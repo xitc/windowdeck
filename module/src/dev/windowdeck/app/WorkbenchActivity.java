@@ -12,6 +12,9 @@ import android.text.TextUtils;
 import android.util.Log;
 import android.view.*;
 import android.widget.*;
+import android.window.OnBackAnimationCallback;
+import android.window.OnBackInvokedDispatcher;
+import android.window.BackEvent;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -20,7 +23,7 @@ public final class WorkbenchActivity extends Activity {
  private static final String TAG="WindowDeck";
  private final ArrayList<Slot> slots=new ArrayList<>();
  private FrameLayout stage; private TextView status; private Button addCard, controls;
- private Field interceptInput; private Method resizeMethod;
+ private Field interceptInput,rotateTaskLeash; private Method resizeMethod;
  private boolean settlingInput; private int switchGeneration;
  private ViewTreeObserver.OnPreDrawListener settleListener;
  private long switchStarted, lastAnimationFrame, maxFrameGap, resizeNanos; private int animationFrames, resizeCalls;
@@ -28,6 +31,16 @@ public final class WorkbenchActivity extends Activity {
  private boolean initialized,closing,layoutPosted; private int primary,nextId,imeBottom;
  private Class<?> viewApi,managerApi; private Object manager; private ValueAnimator animation;
  private Slot dragging; private boolean recovering; private Runnable recoveryFinish;
+ private boolean backgrounded,stopped,forwardingBack;
+ private int backGeneration;
+ private int modalWindows;
+ private boolean backStartedWithIme;
+ private final OnBackAnimationCallback hostBack=new OnBackAnimationCallback(){
+  public void onBackStarted(BackEvent e){backStartedWithIme=embeddedImeVisible();Log.i(TAG,"back_gesture_started ime="+backStartedWithIme);}
+  public void onBackProgressed(BackEvent e){}
+  public void onBackCancelled(){backStartedWithIme=false;Log.i(TAG,"back_gesture_cancelled");}
+  public void onBackInvoked(){handleHostBack();}
+ };
  private final Rect naturalBounds=new Rect();
  private final Handler handler=new Handler(Looper.getMainLooper());
  private final class Slot {
@@ -37,6 +50,7 @@ public final class WorkbenchActivity extends Activity {
  }
  @Override protected void onCreate(Bundle state){
   setTheme(android.R.style.Theme_Material_Light_NoActionBar);super.onCreate(state);
+  getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
   getWindow().setStatusBarColor(0xffeef2f8);getWindow().setNavigationBarColor(0xffeef2f8);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
   getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
@@ -57,6 +71,7 @@ public final class WorkbenchActivity extends Activity {
   try{
    if(!"com.oplus.pscanvas".equals(getPackageName()))throw new IllegalStateException("需要从系统容器启动");
    viewApi=Class.forName("com.oplus.flexiblewindow.FlexibleTaskView");resizeMethod=viewApi.getMethod("resize",Rect.class);interceptInput=viewApi.getDeclaredField("mInterceptInputEvent");interceptInput.setAccessible(true);managerApi=Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager");manager=managerApi.getMethod("getInstance").invoke(null);
+   rotateTaskLeash=viewApi.getDeclaredField("mNeedRotateTaskLeash");rotateTaskLeash.setAccessible(true);
    String[] input=state!=null?state.getStringArray("components"):null;
    if(input==null)input=new String[]{getIntent().getStringExtra("windowdeck_app_a"),getIntent().getStringExtra("windowdeck_app_b"),getIntent().getStringExtra("windowdeck_app_c")};
    for(String component:input)if(component!=null&&!component.isEmpty()){if(slots.size()==3)break;slots.add(validate(ComponentName.unflattenFromString(component),null));}
@@ -69,7 +84,7 @@ public final class WorkbenchActivity extends Activity {
     if(!initialized){initialized=true;updateNaturalBounds();for(Slot s:new ArrayList<>(slots))createWindow(s);}
     scheduleLayout();
    });
-   Log.i(TAG,"workbench_created version=0.4.3-beta.1 container="+getTaskId()+" count="+slots.size());
+   Log.i(TAG,"workbench_created version=0.4.5-beta.1 container="+getTaskId()+" count="+slots.size());
   }catch(Throwable e){fail(e);}
  }
  private Slot validate(ComponentName c,Slot replacing) throws Exception {
@@ -98,10 +113,10 @@ public final class WorkbenchActivity extends Activity {
  }
  private void menu(Slot s){
   if(closing||s.released||recovering||dragging!=null)return;
-  new AlertDialog.Builder(this).setTitle(s.label).setItems(new String[]{"切换为主应用",s.pinned?"取消固定":"固定此应用","替换应用","从工作台移出"},(d,which)->{
+  showWorkbenchDialog(new AlertDialog.Builder(this).setTitle(s.label).setItems(new String[]{"切换为主应用",s.pinned?"取消固定":"固定此应用","替换应用","从工作台移出"},(d,which)->{
    if(s.released||recovering||dragging!=null)return;
    if(which==0)promote(slots.indexOf(s));else if(which==1)togglePin(s);else if(which==2)chooseApp(s);else removeSlot(s);
-  }).setNegativeButton("取消",null).show();
+  }).setNegativeButton("取消",null).create());
  }
  private void togglePin(Slot s){
   if(!s.pinned)for(Slot other:slots)if(other.pinned){Toast.makeText(this,"请先取消固定 "+other.label,Toast.LENGTH_SHORT).show();return;}
@@ -168,7 +183,7 @@ public final class WorkbenchActivity extends Activity {
     if(closing||slot.released)return null;
     if(m.getName().equals("onTaskCreated")||m.getName().equals("onTaskChanged")){
      ComponentName top=(ComponentName)args[1];if(top!=null&&!top.equals(slot.activeComponent)){slot.activeComponent=top;try{slot.orientationAxis=OrientationPolicy.axis(getPackageManager().getActivityInfo(top,0).screenOrientation);handler.post(this::scheduleLayout);}catch(PackageManager.NameNotFoundException ignored){}}
-     int id=(Integer)args[0];if(slot.taskId!=id)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;slot.failed=false;refreshStatus();handler.post(()->syncSurface(slot));
+     int id=(Integer)args[0];if(slot.taskId!=id)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;slot.failed=false;refreshStatus();handler.post(()->{syncSurface(slot);focusPrimary("task_ready");});
     }else if(m.getName().equals("onTaskRectOrientationChanged")){
      ActivityManager.RunningTaskInfo info=(ActivityManager.RunningTaskInfo)args[0];Rect requested=args[1] instanceof Rect?new Rect((Rect)args[1]):null;
      if(info.taskId==slot.taskId&&requested!=null&&!requested.isEmpty()&&requested.width()!=requested.height()){
@@ -177,17 +192,22 @@ public final class WorkbenchActivity extends Activity {
      }
     }else if(m.getName().equals("onInitialized")&&Boolean.FALSE.equals(args[0])){slot.failed=true;Log.e(TAG,"task_start_failed slot="+slot.id);refreshStatus();}
     else if(m.getName().equals("onTaskWindowDraw")){Log.i(TAG,"task_draw slot="+slot.id+" drawn="+args[1]);if(Boolean.TRUE.equals(args[1]))handler.post(()->syncSurface(slot));}
-    else if(m.getName().equals("onBackPressedOnTaskRoot"))handler.post(()->removeSlot(slot));
+    else if(m.getName().equals("onBackPressedOnTaskRoot")){int task=(Integer)args[0];handler.post(()->handleTaskRootBack(slot,task));}
     else if(m.getName().equals("onTaskRemovalStarted"))handler.post(()->removeSlot(slot,true));
     return null;
    });
    viewApi.getMethod("setListener",Executor.class,listener).invoke(slot.surface,(Executor)this::runOnUiThread,proxy);
    Bundle config=new Bundle();config.putInt("scenario",2);config.putParcelable("launchBounds",new Rect(slot.renderBounds));
+   config.putBoolean("need_rotate_task_leash",rotatePresentation(slot));
+   // Native rotation otherwise promotes the Surface above the host window,
+   // bypassing preview interception and recovery covers. Keep host controls on top.
+   config.putBoolean("zorder_on_top",false);
    config.putParcelable("intent",new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(slot.component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
    config.putInt("userId",android.os.Process.myUid()/100000);config.putFloat("cornerRadius",Ui.dp(this,10));config.putInt("reparent_align",0);
    config.putBoolean("intercept_input_event",true);config.putBoolean("allow_task_detach_from_embedding",true);config.putBoolean("key_intercept_back_key",true);config.putBoolean("flexible_key_remove_task_detach",false);config.putInt("use_view_snapshot",1);
    viewApi.getMethod("init",Bundle.class).invoke(slot.surface,config);viewApi.getMethod("setEnforceStart",boolean.class).invoke(slot.surface,true);
-   slot.card.addView(slot.surface,new FrameLayout.LayoutParams(slot.renderBounds.width(),slot.renderBounds.height()));
+   int[] presentation=presentationSize(slot);
+   slot.card.addView(slot.surface,new FrameLayout.LayoutParams(presentation[0],presentation[1]));
    slot.icon=new ImageView(this);slot.icon.setImageDrawable(getPackageManager().getActivityIcon(slot.component));slot.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);slot.icon.setPadding(Ui.dp(this,3),Ui.dp(this,3),Ui.dp(this,3),Ui.dp(this,3));slot.icon.setBackground(Ui.bg(0xfff7f9fc,Ui.dp(this,12)));
    FrameLayout.LayoutParams badge=new FrameLayout.LayoutParams(Ui.dp(this,32),Ui.dp(this,32),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);slot.card.addView(slot.icon,badge);slot.pin=Ui.text(this,"钉",12,0xffffffff);slot.pin.setGravity(Gravity.CENTER);slot.pin.setBackground(Ui.bg(0xff365db5,Ui.dp(this,12)));slot.pin.setContentDescription("已固定，先取消固定才能替换或移出");
    slot.card.addView(slot.pin,new FrameLayout.LayoutParams(Ui.dp(this,24),Ui.dp(this,24),Gravity.TOP|Gravity.RIGHT));
@@ -197,8 +217,9 @@ public final class WorkbenchActivity extends Activity {
  }
  private void workbenchMenu(){
   if(closing||recovering||dragging!=null)return;
-  new AlertDialog.Builder(this).setTitle("工作台 · "+layoutLabel()).setItems(new String[]{"添加应用","切换左右 / 上下布局","管理主应用","退出工作台"},(d,n)->{if(n==0)chooseApp(null);else if(n==1)toggleLayout();else if(n==2&&!slots.isEmpty())menu(slots.get(primary));else if(n==3)closeWorkbench();}).setNegativeButton("取消",null).show();
+  showWorkbenchDialog(new AlertDialog.Builder(this).setTitle("工作台 · "+layoutLabel()).setItems(new String[]{"添加应用","切换左右 / 上下布局","管理主应用","退出工作台"},(d,n)->{if(n==0)chooseApp(null);else if(n==1)toggleLayout();else if(n==2&&!slots.isEmpty())menu(slots.get(primary));else if(n==3)closeWorkbench();}).setNegativeButton("取消",null).create());
  }
+ void showWorkbenchDialog(AlertDialog dialog){modalWindows++;dialog.setOnDismissListener(d->{modalWindows=Math.max(0,modalWindows-1);handler.post(()->focusPrimary("dialog_dismiss"));});dialog.show();}
  private String layoutLabel(){return layoutMode==PaneLayout.TOP_BOTTOM?"上下":"左右";}
  private void toggleLayout(){
   if(closing||!initialized||recovering||dragging!=null)return;
@@ -206,21 +227,31 @@ public final class WorkbenchActivity extends Activity {
   scheduleLayout();
   Log.i(TAG,"layout_mode="+layoutMode+" tasks="+taskIds());
  }
- private int effectiveMode(){return stage.getWidth()>stage.getHeight()?PaneLayout.LEFT_RIGHT:layoutMode;}
- private int previewHeight(){
-  return PaneLayout.previewHeight(stage.getWidth(),stage.getHeight(),Ui.dp(this,6),Ui.dp(this,84),Ui.dp(this,22),effectiveMode());
+ private int effectiveMode(){return getResources().getConfiguration().orientation==Configuration.ORIENTATION_LANDSCAPE?PaneLayout.LEFT_RIGHT:layoutMode;}
+ private boolean rotatePresentation(Slot s){
+  android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
+  return s.orientationAxis==2&&OrientationPolicy.rotatePresentation(s.renderBounds.width(),s.renderBounds.height(),dm.widthPixels,dm.heightPixels);
  }
- private int[][] geometry(){return PaneLayout.compute(stage.getWidth(),stage.getHeight(),slots.size(),primary,Ui.dp(this,6),Ui.dp(this,84),previewHeight(),effectiveMode());}
- private void layoutAddCard(){
-  int[] box=PaneLayout.addBox(stage.getWidth(),stage.getHeight(),slots.size(),Ui.dp(this,6),Ui.dp(this,84),previewHeight(),effectiveMode());
+ private int[] presentationSize(Slot s){return OrientationPolicy.presentationSize(s.renderBounds.width(),s.renderBounds.height(),rotatePresentation(s));}
+ private int sideWidth(){return Ui.dp(this,effectiveMode()==PaneLayout.LEFT_RIGHT?56:84);}
+ private int previewHeight(){
+  return PaneLayout.previewHeight(stage.getWidth(),stage.getHeight(),Ui.dp(this,6),sideWidth(),Ui.dp(this,22),effectiveMode());
+ }
+ private int[][] allocation(){return PaneLayout.compute(stage.getWidth(),stage.getHeight(),slots.size(),primary,Ui.dp(this,6),sideWidth(),previewHeight(),effectiveMode());}
+ private CardLayout.Result cardGeometry(){
+  int[][] sizes=new int[slots.size()][2];
+  for(int i=0;i<slots.size();i++)sizes[i]=presentationSize(slots.get(i));
+  return CardLayout.compute(stage.getWidth(),stage.getHeight(),primary,Ui.dp(this,6),sideWidth(),previewHeight(),effectiveMode(),Ui.dp(this,22),Ui.dp(this,48),sizes);
+ }
+ private void layoutAddCard(int[] box){
   addCard.setVisibility(box==null?View.GONE:View.VISIBLE);
   layoutControls();
-  if(box!=null){box[3]=Math.min(box[2],box[3]);FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];addCard.setLayoutParams(lp);}
+  if(box!=null){FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];addCard.setLayoutParams(lp);}
  }
  private void layoutControls(){
   int edge=Ui.dp(this,48),gap=Ui.dp(this,6);
   FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(edge,edge);
-  lp.leftMargin=Math.max(gap,stage.getWidth()-edge-gap);
+  lp.leftMargin=effectiveMode()==PaneLayout.TOP_BOTTOM?Math.max(gap,stage.getWidth()-edge-gap):gap;
   lp.topMargin=effectiveMode()==PaneLayout.TOP_BOTTOM?gap:Math.max(gap,stage.getHeight()-edge-gap);
   controls.setLayoutParams(lp);controls.bringToFront();
  }
@@ -234,7 +265,7 @@ public final class WorkbenchActivity extends Activity {
  }
  private void updateNaturalBounds(){
   if(slots.isEmpty()||stage.getWidth()<100||stage.getHeight()<100)return;
-  int[] main=geometry()[primary];int cw=Math.max(100,main[2]),ch=Math.max(100,main[3]);
+  int[] main=allocation()[primary];int cw=Math.max(100,main[2]),ch=Math.max(100,main[3]);
   android.util.DisplayMetrics dm=getResources().getDisplayMetrics();int nw=Math.max(cw,Math.min(dm.widthPixels,dm.heightPixels));
   naturalBounds.set(0,0,nw,Math.max(Ui.dp(this,120),Math.round(ch*(nw/(float)cw))));
   for(Slot s:slots)updateRenderBounds(s);
@@ -256,24 +287,34 @@ public final class WorkbenchActivity extends Activity {
   catch(Throwable e){Log.w(TAG,"surface_sync_failed slot="+s.id,e);}
  }
  @Override protected void onPause(){cancelDrag();cancelAnimation();if(initialized&&!closing)layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();handler.postDelayed(()->{for(Slot s:slots)syncSurface(s);},350);}
+ @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");},350);}
+ @Override protected void onStop(){stopped=true;backGeneration++;forwardingBack=false;super.onStop();}
+ // Do not refocus on every host touch: doing so cancels a preview's click or
+ // long-press stream. Resume, settled promotion and dialog dismissal own focus.
+ @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);backgrounded=false;stopped=false;Log.i(TAG,"workbench_resume container="+getTaskId()+" primary="+primary+" layout="+layoutMode+" tasks="+taskIds());handler.post(()->{for(Slot s:slots)syncSurface(s);focusPrimary("entry");});}
  private void scheduleLayout(){if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){cancelDrag();cancelAnimation();updateNaturalBounds();layoutCards(false);for(Slot s:slots)resizeSurface(s);Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+slots.size());}});}
  private void fitSurface(Slot s,int width,int height){
   if(s.surface==null||s.renderBounds.isEmpty())return;
+  boolean rotate=rotatePresentation(s);int[] presentation=presentationSize(s);
+  // Use the ROM's task-leash rotation so composition and task input share the
+  // transform. SurfaceView.setRotation alone does not rotate its child surface.
+  try{if(rotateTaskLeash.getBoolean(s.surface)!=rotate){rotateTaskLeash.setBoolean(s.surface,rotate);s.surface.post(()->syncSurface(s));}}
+  catch(Throwable e){fail(e);return;}
   FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)s.surface.getLayoutParams();
-  if(lp.width!=s.renderBounds.width()||lp.height!=s.renderBounds.height()){
-   lp.width=s.renderBounds.width();lp.height=s.renderBounds.height();s.surface.setLayoutParams(lp);
+  if(lp.width!=presentation[0]||lp.height!=presentation[1]){
+   lp.width=presentation[0];lp.height=presentation[1];s.surface.setLayoutParams(lp);
   }
   int availableHeight=Math.max(1,height-(slots.indexOf(s)==primary?0:Ui.dp(this,22)));
-  float scale=Math.min(width/(float)s.renderBounds.width(),availableHeight/(float)s.renderBounds.height());
+  float scale=Math.min(width/(float)presentation[0],availableHeight/(float)presentation[1]);
   s.surface.setPivotX(0);s.surface.setPivotY(0);s.surface.setScaleX(scale);s.surface.setScaleY(scale);
-  s.surface.setTranslationX((width-s.renderBounds.width()*scale)/2f);
-  s.surface.setTranslationY((availableHeight-s.renderBounds.height()*scale)/2f);
+  s.surface.setTranslationX((width-presentation[0]*scale)/2f);
+  s.surface.setTranslationY((availableHeight-presentation[1]*scale)/2f);
   if(s.recoveryCover!=null){
    ImageView cover=s.recoveryCover;FrameLayout.LayoutParams cp=(FrameLayout.LayoutParams)cover.getLayoutParams();
-   if(cp.width!=lp.width||cp.height!=lp.height){cp.width=lp.width;cp.height=lp.height;cover.setLayoutParams(cp);}
+   if(cp.width!=s.renderBounds.width()||cp.height!=s.renderBounds.height()){cp.width=s.renderBounds.width();cp.height=s.renderBounds.height();cover.setLayoutParams(cp);}
    cover.setPivotX(0);cover.setPivotY(0);cover.setScaleX(scale);cover.setScaleY(scale);
-   cover.setTranslationX(s.surface.getTranslationX());cover.setTranslationY(s.surface.getTranslationY());
+   cover.setRotation(rotate?90:0);
+   cover.setTranslationX(s.surface.getTranslationX()+(rotate?s.renderBounds.height()*scale:0));cover.setTranslationY(s.surface.getTranslationY());
   }
  }
  private void apply(Slot s,int[] r){
@@ -284,7 +325,7 @@ public final class WorkbenchActivity extends Activity {
   lp.width=r[2];lp.height=r[3];lp.leftMargin=r[0];lp.topMargin=r[1];s.card.setLayoutParams(lp);
  }
  private void layoutCards(boolean animate){
-  if(slots.isEmpty()||closing)return;layoutAddCard();int[][] target=geometry();final ArrayList<Slot> current=new ArrayList<>(slots);int[][] from=new int[current.size()][4];
+  if(slots.isEmpty()||closing)return;CardLayout.Result geometry=cardGeometry();layoutAddCard(geometry.add);int[][] target=geometry.cards;final ArrayList<Slot> current=new ArrayList<>(slots);int[][] from=new int[current.size()][4];
   for(int i=0;i<current.size();i++){Slot s=current.get(i);if(s.card==null)return;from[i]=new int[]{Math.round(s.card.getX()),Math.round(s.card.getY()),Math.round(s.card.getWidth()*s.card.getScaleX()),Math.round(s.card.getHeight()*s.card.getScaleY())};inputRole(s,i==primary);}
   if(!animate){for(int i=0;i<current.size();i++){resetCardTransform(current.get(i));apply(current.get(i),target[i]);}return;}
   final int generation=++switchGeneration;
@@ -305,7 +346,7 @@ public final class WorkbenchActivity extends Activity {
     if(generation!=switchGeneration||closing)return true;
     settleListener=null;settlingInput=false;
     for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
-    logSwitch("settled");return true;
+    logSwitch("settled");handler.post(()->focusPrimary("switch"));return true;
    }};stage.getViewTreeObserver().addOnPreDrawListener(settleListener);stage.invalidate();
   }});animation.start();
  }
@@ -399,9 +440,64 @@ public final class WorkbenchActivity extends Activity {
   }
  }
  private void releaseWindows(){clearRecoveryCovers();cancelDrag();cancelAnimation();handler.removeCallbacksAndMessages(null);for(Slot s:new ArrayList<>(slots))releaseSlot(s);}
+ private boolean backReady(){return !closing&&!backgrounded&&!stopped&&modalWindows==0&&!recovering&&!switching()&&dragging==null&&!slots.isEmpty();}
+ private boolean focusPrimary(String reason){
+  if(!backReady()||stage==null||!stage.isShown())return false;
+  Slot main=slots.get(primary);if(main.released||main.taskId<0)return false;
+  try{managerApi.getMethod("setFocusAppForEmbeddedTask",int.class).invoke(manager,main.taskId);Log.i(TAG,"back_focus reason="+reason+" task="+main.taskId);return true;}
+  catch(Throwable e){Log.w(TAG,"back_focus_failed",e);return false;}
+ }
+ private void handleTaskRootBack(Slot s,int task){
+  if(!backReady()||slots.get(primary)!=s||s.released||s.taskId!=task){Log.i(TAG,"back_root_ignored task="+task);return;}
+  Log.i(TAG,"back_root task="+task+" container="+getTaskId());backgroundWorkbench("task_root");
+ }
+ private void backgroundWorkbench(String reason){
+  if(!backReady())return;
+  backgrounded=true;backGeneration++;forwardingBack=false;cancelDrag();cancelAnimation();
+  // Home preserves the embedded group. moveTaskToBack on a linked child can
+  // detach it through the ROM fullscreen transition, so do not use release here.
+  try{startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));Log.i(TAG,"workbench_background reason="+reason+" container="+getTaskId()+" primary="+primary+" layout="+layoutMode+" tasks="+taskIds());}
+  catch(Throwable e){backgrounded=false;Log.w(TAG,"back_home_failed",e);}
+ }
+ private boolean embeddedImeVisible(){
+  if(imeBottom>0)return true;
+  // Embedded IME insets need not reach the container. Read the display's actual
+  // IME visibility before the gesture, including an IME owned by a child task.
+  try{Object im=getSystemService(INPUT_METHOD_SERVICE);return (Integer)android.view.inputmethod.InputMethodManager.class.getMethod("getInputMethodWindowVisibleHeight").invoke(im)>0;}
+  catch(Throwable e){Log.w(TAG,"back_ime_visibility_failed",e);return false;}
+ }
+ private void handleHostBack(){
+  boolean keyboard=backStartedWithIme||embeddedImeVisible();backStartedWithIme=false;
+  if(forwardingBack||!backReady())return;
+  if(keyboard){
+   try{android.view.inputmethod.InputMethodManager im=(android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);im.hideSoftInputFromWindow(getWindow().getDecorView().getWindowToken(),0);getWindow().getInsetsController().hide(WindowInsets.Type.ime());Log.i(TAG,"back_ime_hidden");}
+   catch(Throwable e){getWindow().getInsetsController().hide(WindowInsets.Type.ime());Log.w(TAG,"back_ime_hide_fallback",e);}
+   return;
+  }
+  // Normally focus is already in the main app, so Android handles IME, dialogs,
+  // in-app navigation and predictive cancellation itself. Forward only a
+  // committed host back, after checking focus, with a recursion guard.
+  Slot target=slots.get(primary);if(!focusPrimary("host_back"))return;
+  forwardingBack=true;final int generation=++backGeneration;
+  handler.postDelayed(()->{
+   if(generation!=backGeneration||!backReady()||slots.get(primary)!=target){forwardingBack=false;return;}
+   try{
+    Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+    Object focused=Class.forName("android.app.IActivityTaskManager").getMethod("getFocusedRootTaskInfo").invoke(service);
+    int focusedId=focused==null?-1:focused.getClass().getField("taskId").getInt(focused);
+    if(focusedId!=target.taskId){Log.w(TAG,"back_forward_focus_mismatch expected="+target.taskId+" actual="+focusedId);return;}
+    Class<?> input=Class.forName("android.hardware.input.InputManager");Object im=input.getMethod("getInstance").invoke(null);Method inject=input.getMethod("injectInputEvent",InputEvent.class,int.class);
+    long now=SystemClock.uptimeMillis();
+    inject.invoke(im,new KeyEvent(now,now,KeyEvent.ACTION_DOWN,KeyEvent.KEYCODE_BACK,0,0,KeyCharacterMap.VIRTUAL_KEYBOARD,0,KeyEvent.FLAG_FROM_SYSTEM,InputDevice.SOURCE_KEYBOARD),0);
+    inject.invoke(im,new KeyEvent(now,now+1,KeyEvent.ACTION_UP,KeyEvent.KEYCODE_BACK,0,0,KeyCharacterMap.VIRTUAL_KEYBOARD,0,KeyEvent.FLAG_FROM_SYSTEM,InputDevice.SOURCE_KEYBOARD),0);
+    Log.i(TAG,"back_forward task="+target.taskId);
+   }catch(Throwable e){Log.w(TAG,"back_forward_failed",e);}
+   finally{handler.postDelayed(()->{if(generation==backGeneration)forwardingBack=false;},200);}
+  },80);
+ }
  private void closeWorkbench(){if(closing)return;closing=true;releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
- @Override public void onBackPressed(){if(imeBottom>0){getWindow().getInsetsController().hide(WindowInsets.Type.ime());return;}closeWorkbench();}
- @Override protected void onDestroy(){if(!closing){closing=true;releaseWindows();}super.onDestroy();}
+ @Override public void onBackPressed(){handleHostBack();}
+ @Override protected void onDestroy(){getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){closing=true;releaseWindows();}super.onDestroy();}
  @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[slots.size()];for(int i=0;i<slots.size();i++)components[i]=slots.get(i).component.flattenToString();b.putStringArray("components",components);b.putInt("primary",primary);b.putInt("layoutMode",layoutMode);for(Slot s:slots)if(s.pinned)b.putString("pinned",s.component.flattenToString());super.onSaveInstanceState(b);}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds());if(stage!=null)scheduleLayout();}
 }
