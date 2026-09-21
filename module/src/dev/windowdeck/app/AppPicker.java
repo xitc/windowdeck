@@ -20,6 +20,7 @@ final class AppPicker {
   search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}public void onTextChanged(CharSequence s,int a,int b,int c){filter.run();}public void afterTextChanged(Editable e){}});
   AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("选择应用").setView(body).setNegativeButton("取消",null).create();
   list.setOnItemClickListener((p,v,pos,id)->{ResolveInfo r=shown.get(pos);dialog.dismiss();callback.select(new ComponentName(r.activityInfo.packageName,r.activityInfo.name),r.loadLabel(activity.getPackageManager()).toString());});
-  dialog.setOnShowListener(d->{android.view.Window w=dialog.getWindow();w.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);w.setLayout(-1,(int)(activity.getResources().getDisplayMetrics().heightPixels*.78f));body.setFocusableInTouchMode(true);body.requestFocus();});dialog.show();
+  dialog.setOnShowListener(d->{android.view.Window w=dialog.getWindow();w.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);w.setLayout(-1,(int)(activity.getResources().getDisplayMetrics().heightPixels*.78f));body.setFocusableInTouchMode(true);body.requestFocus();});
+  if(activity instanceof WorkbenchActivity)((WorkbenchActivity)activity).showWorkbenchDialog(dialog);else dialog.show();
  }
 }

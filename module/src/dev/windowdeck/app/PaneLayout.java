@@ -40,7 +40,7 @@ final class PaneLayout {
     int sw=fitSideW(w,h,count,g,sideW,sideH,mode);
     int vis=visualCount(count);
     int mw=vis>0?Math.max(1,w-sw-3*g):Math.max(1,w-2*g);
-    return new int[]{g,g,mw,Math.max(1,h-2*g)};
+    return new int[]{vis>0?sw+2*g:g,g,mw,Math.max(1,h-2*g)};
   }
 
   static int[] sideBox(int w,int h,int count,int gap,int sideW,int sideH,int mode,int index){
@@ -52,8 +52,7 @@ final class PaneLayout {
       if(x+sw>w-g)x=Math.max(g,w-g-sw);
       return new int[]{x,g,sw,sh};
     }
-    int[] main=mainBox(w,h,count,g,sideW,sideH,mode);
-    int x=main[0]+main[2]+g;
+    int x=g;
     int y=g+index*(sh+g);
     if(y+sh>h-g)y=Math.max(g,h-g-sh);
     return new int[]{x,y,sw,sh};

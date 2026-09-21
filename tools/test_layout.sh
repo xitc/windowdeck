@@ -9,6 +9,13 @@ javac -encoding UTF-8 -d "$out" \
 java -cp "$out" dev.windowdeck.app.PaneLayoutTest
 
 javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/PaneLayout.java" \
+  "$project_dir/module/src/dev/windowdeck/app/CardLayout.java" \
+  "$project_dir/module/src/dev/windowdeck/app/OrientationPolicy.java" \
+  "$project_dir/tests/CardLayoutTest.java"
+java -cp "$out" dev.windowdeck.app.CardLayoutTest
+
+javac -encoding UTF-8 -d "$out" \
   "$project_dir/module/src/dev/windowdeck/app/GesturePolicy.java" \
   "$project_dir/tests/GesturePolicyTest.java"
 java -cp "$out" dev.windowdeck.app.GesturePolicyTest

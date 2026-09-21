@@ -21,7 +21,8 @@ public final class MainActivity extends Activity {
   TextView intro=Ui.text(this,"最多三个实时应用窗口，支持运行中添加、替换和移出。",16,0xff536178);intro.setPadding(0,pad,0,pad);body.addView(intro);
   body.addView(Ui.text(this,"首次使用：在 LSPosed 启用本模块，仅勾选“多窗口”（com.oplus.pscanvas），然后重新启动该应用进程。启动时需要 Root，会替换当前多窗口容器。",14,0xff536178));
   for(int i=0;i<3;i++){final int slot=i;picks[i]=Ui.button(this,prefix(i)+labels[i]);body.addView(picks[i]);picks[i].setOnClickListener(v->pick(slot));}
-  start=Ui.button(this,"启动工作台");body.addView(start);start.setOnClickListener(v->launch());
+  Button resume=Ui.button(this,"打开 / 恢复当前工作台");body.addView(resume);resume.setOnClickListener(v->launch(true));
+  start=Ui.button(this,"用所选应用新建工作台");body.addView(start);start.setOnClickListener(v->launch(false));
   status=Ui.text(this,"适配 PJZ110 · ColorOS 16.0.10.501\n实验版：退出时解除窗口嵌入，不清除应用数据。",13,0xff536178);status.setPadding(0,pad,0,0);body.addView(status);
  }
  private String prefix(int i){return i==0?"主应用：":"侧窗 "+i+"：";}
@@ -36,11 +37,11 @@ public final class MainActivity extends Activity {
  }
  private void savePick(int slot,String component,String label){components[slot]=component;labels[slot]=label;picks[slot].setText(prefix(slot)+label);getPreferences(0).edit().putString("component"+slot,component).putString("label"+slot,label).apply();}
  private static String quote(String s){return "'"+s.replace("'","'\\''")+"'";}
- private void launch(){
+ private void launch(boolean resume){
   ComponentName first=ComponentName.unflattenFromString(components[0]),second=ComponentName.unflattenFromString(components[1]);
   if(first==null||second==null||first.getPackageName().equals(second.getPackageName())){status.setText("请选择两个不同的应用。");return;}
   start.setEnabled(false);status.setText("正在请求 Root 并启动…");
-  String cmd="am start --user 0 -f 0x10008000 -n com.oplus.pscanvas/.canvasmode.canvas.ContainerActivity --ez windowdeck_workbench_v1 true --es windowdeck_app_a "+quote(components[0])+" --es windowdeck_app_b "+quote(components[1])+(components[2].isEmpty()?"":" --es windowdeck_app_c "+quote(components[2]));
+  String cmd="am start --user 0 -f "+(resume?"0x30020000":"0x10008000")+" -n com.oplus.pscanvas/.canvasmode.canvas.ContainerActivity --ez windowdeck_workbench_v1 true --es windowdeck_app_a "+quote(components[0])+" --es windowdeck_app_b "+quote(components[1])+(components[2].isEmpty()?"":" --es windowdeck_app_c "+quote(components[2]));
   new Thread(()->{try{
    Process p=new ProcessBuilder("su","-c",cmd).redirectErrorStream(true).start();
    if(!p.waitFor(30,java.util.concurrent.TimeUnit.SECONDS)){p.destroy();throw new IOException("Root 授权超时，请在管理器中检查本应用权限");}
