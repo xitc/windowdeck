@@ -7,6 +7,9 @@ import android.content.pm.*;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.graphics.Bitmap;
+import android.graphics.Outline;
+import android.graphics.Path;
+import android.graphics.drawable.ColorDrawable;
 import android.os.*;
 import android.text.TextUtils;
 import android.util.Log;
@@ -22,8 +25,8 @@ import java.util.concurrent.Executor;
 public final class WorkbenchActivity extends Activity {
  private static final String TAG="WindowDeck";
  private final ArrayList<Slot> slots=new ArrayList<>();
- private FrameLayout stage; private TextView status; private Button addCard, controls;
- private Field interceptInput,rotateTaskLeash; private Method resizeMethod;
+ private FrameLayout stage; private TextView status; private Button addCard, more; private PopupWindow primaryPopup; private boolean captionAttached;
+ private Field interceptInput,rotateTaskLeash,cornerRadius,taskLeash,reparentAlign; private Method resizeMethod;
  private boolean settlingInput; private int switchGeneration;
  private ViewTreeObserver.OnPreDrawListener settleListener;
  private long switchStarted, lastAnimationFrame, maxFrameGap, resizeNanos; private int animationFrames, resizeCalls;
@@ -35,6 +38,7 @@ public final class WorkbenchActivity extends Activity {
  private int backGeneration;
  private int modalWindows;
  private boolean backStartedWithIme;
+ private WorkbenchBackdrop backdrop;
  private final OnBackAnimationCallback hostBack=new OnBackAnimationCallback(){
   public void onBackStarted(BackEvent e){backStartedWithIme=embeddedImeVisible();Log.i(TAG,"back_gesture_started ime="+backStartedWithIme);}
   public void onBackProgressed(BackEvent e){}
@@ -49,12 +53,10 @@ public final class WorkbenchActivity extends Activity {
   Slot(ComponentName c,String l){id=nextId++;component=c;label=l;}
  }
  @Override protected void onCreate(Bundle state){
-  setTheme(android.R.style.Theme_Material_Light_NoActionBar);super.onCreate(state);
+  setTheme(android.R.style.Theme_Material_NoActionBar);super.onCreate(state);
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
-  getWindow().setStatusBarColor(0xffeef2f8);getWindow().setNavigationBarColor(0xffeef2f8);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
-  getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-  LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0xffeef2f8);setContentView(root);
+  LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0);setContentView(root);getWindow().setBackgroundDrawable(new ColorDrawable(Ui.CHROME));Ui.overlaySystemBars(this,false);
   root.setOnApplyWindowInsetsListener((v,insets)->{
    android.graphics.Insets sys=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());
    int keyboard=insets.getInsets(WindowInsets.Type.ime()).bottom;
@@ -65,13 +67,17 @@ public final class WorkbenchActivity extends Activity {
   layoutMode=state==null?PaneLayout.LEFT_RIGHT:state.getInt("layoutMode",PaneLayout.LEFT_RIGHT);
   if(layoutMode!=PaneLayout.TOP_BOTTOM)layoutMode=PaneLayout.LEFT_RIGHT;
   stage=new FrameLayout(this);root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
-  addCard=Ui.button(this,"＋");addCard.setTextSize(28);addCard.setContentDescription("添加应用");addCard.setBackground(Ui.bg(0xffe1e8f2,Ui.dp(this,16)));addCard.setOnClickListener(v->chooseApp(null));stage.addView(addCard);
-  controls=Ui.button(this,"•••");controls.setContentDescription("工作台菜单");controls.setBackground(Ui.bg(0xffdbe3ee,Ui.dp(this,24)));controls.setOnClickListener(v->workbenchMenu());stage.addView(controls);
-  status=Ui.text(this,"正在准备窗口…",12,0xff52637b);status.setGravity(Gravity.CENTER);root.addView(status,new LinearLayout.LayoutParams(-1,Ui.dp(this,24)));
+  addCard=Ui.button(this,"＋");addCard.setTextSize(28);addCard.setTextColor(Ui.FROST_PLUS);addCard.setGravity(Gravity.CENTER);addCard.setIncludeFontPadding(false);addCard.setPadding(0,0,0,0);addCard.setContentDescription("添加应用");addCard.setBackground(Ui.frost(Ui.dp(this,Ui.SIDE_RADIUS)));Ui.round(addCard,Ui.dp(this,Ui.SIDE_RADIUS));addCard.setOnClickListener(v->chooseApp(null));stage.addView(addCard);
+  more=Ui.more(this);more.setOnClickListener(v->primaryMenu());
+  status=Ui.text(this,"正在准备窗口…",12,Ui.TEXT);status.setGravity(Gravity.CENTER);status.setBackground(Ui.bg(0x99000000,Ui.dp(this,8)));status.setPadding(Ui.dp(this,12),Ui.dp(this,6),Ui.dp(this,12),Ui.dp(this,6));status.setVisibility(View.GONE);
+  FrameLayout.LayoutParams statusLp=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);statusLp.bottomMargin=Ui.dp(this,16);stage.addView(status,statusLp);
   try{
    if(!"com.oplus.pscanvas".equals(getPackageName()))throw new IllegalStateException("需要从系统容器启动");
    viewApi=Class.forName("com.oplus.flexiblewindow.FlexibleTaskView");resizeMethod=viewApi.getMethod("resize",Rect.class);interceptInput=viewApi.getDeclaredField("mInterceptInputEvent");interceptInput.setAccessible(true);managerApi=Class.forName("com.oplus.flexiblewindow.FlexibleWindowManager");manager=managerApi.getMethod("getInstance").invoke(null);
-   rotateTaskLeash=viewApi.getDeclaredField("mNeedRotateTaskLeash");rotateTaskLeash.setAccessible(true);
+   rotateTaskLeash=viewApi.getDeclaredField("mNeedRotateTaskLeash");rotateTaskLeash.setAccessible(true);cornerRadius=viewApi.getDeclaredField("mCornerRadius");cornerRadius.setAccessible(true);
+   try{taskLeash=viewApi.getDeclaredField("mTaskLeash");taskLeash.setAccessible(true);reparentAlign=viewApi.getDeclaredField("mReparentAlign");reparentAlign.setAccessible(true);}
+   catch(Throwable e){Log.w(TAG,"leash_fields_unavailable",e);}
+   backdrop=new WorkbenchBackdrop();backdrop.attach(this,manager);
    String[] input=state!=null?state.getStringArray("components"):null;
    if(input==null)input=new String[]{getIntent().getStringExtra("windowdeck_app_a"),getIntent().getStringExtra("windowdeck_app_b"),getIntent().getStringExtra("windowdeck_app_c")};
    for(String component:input)if(component!=null&&!component.isEmpty()){if(slots.size()==3)break;slots.add(validate(ComponentName.unflattenFromString(component),null));}
@@ -84,7 +90,7 @@ public final class WorkbenchActivity extends Activity {
     if(!initialized){initialized=true;updateNaturalBounds();for(Slot s:new ArrayList<>(slots))createWindow(s);}
     scheduleLayout();
    });
-   Log.i(TAG,"workbench_created version=0.4.5-beta.1 container="+getTaskId()+" count="+slots.size());
+   Log.i(TAG,"workbench_created version=0.4.6-beta.1 container="+getTaskId()+" count="+slots.size());
   }catch(Throwable e){fail(e);}
  }
  private Slot validate(ComponentName c,Slot replacing) throws Exception {
@@ -105,11 +111,27 @@ public final class WorkbenchActivity extends Activity {
    try{
     Slot fresh=validate(c,replacing);int index=replacing==null?slots.size():slots.indexOf(replacing);if(index<0)return;
     cancelAnimation();
-    if(replacing!=null){slots.set(index,fresh);releaseSlot(replacing);}else slots.add(fresh);
-    updateNaturalBounds();createWindow(fresh);layoutCards(false);refreshStatus();if(replacing!=null)restoreContainerFocus();
-    Log.i(TAG,(replacing==null?"add":"replace")+" slot="+fresh.id+" count="+slots.size());
+    if(replacing==null){
+     slots.add(fresh);updateNaturalBounds();createWindow(fresh);layoutCards(false);refreshStatus();
+     Log.i(TAG,"add slot="+fresh.id+" count="+slots.size());
+    }else prepareRecovery(replacing,()->replaceSlotNow(index,replacing,fresh));
    }catch(Throwable e){fail(e);}
   });
+ }
+ private void replaceSlotNow(int index,Slot replacing,Slot fresh){
+  if(closing||replacing.released||slots.indexOf(replacing)!=index)return;
+  slots.set(index,fresh);createWindow(fresh);transferCover(replacing,fresh);updateNaturalBounds();layoutCards(false);refreshStatus();
+  stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+   if(closing||replacing.released)return;
+   releaseSlot(replacing);restoreContainerFocus();
+   Log.i(TAG,"replace slot="+fresh.id+" was="+replacing.id+" count="+slots.size());
+  }));stage.invalidate();
+ }
+ private void transferCover(Slot from,Slot to){
+  if(from.recoveryCover==null||to.card==null)return;
+  ImageView cover=from.recoveryCover;from.card.removeView(cover);from.recoveryCover=null;to.recoveryCover=cover;
+  to.card.addView(cover,Math.min(1,to.card.getChildCount()),new FrameLayout.LayoutParams(to.renderBounds.width(),to.renderBounds.height()));
+  fitSurface(to,to.card.getWidth(),to.card.getHeight());
  }
  private void menu(Slot s){
   if(closing||s.released||recovering||dragging!=null)return;
@@ -142,8 +164,8 @@ public final class WorkbenchActivity extends Activity {
    Slot active=slots.get(i);inputRole(active,i==primary);
    if(active.released||active.surface==null)continue;
    if(active.recoveryCover==null){
-    ImageView cover=new ImageView(this);cover.setScaleType(ImageView.ScaleType.FIT_CENTER);
-    cover.setBackgroundColor(0xffeef2f8);cover.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+    ImageView cover=new ImageView(this);cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+    cover.setBackgroundColor(Ui.CHROME);cover.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     try{Method snapshot=viewApi.getDeclaredMethod("getSnapBitMap",boolean.class);snapshot.setAccessible(true);
      Bitmap bitmap=(Bitmap)snapshot.invoke(active.surface,false);if(bitmap!=null)cover.setImageBitmap(bitmap);
      Log.i(TAG,"recovery_cover slot="+active.id+" snapshot="+(bitmap!=null));
@@ -171,7 +193,7 @@ public final class WorkbenchActivity extends Activity {
  private void createWindow(Slot slot){
   try{
    updateRenderBounds(slot);
-   slot.card=new PreviewCard(this);slot.card.setBackground(Ui.bg(0xffe1e8f2,Ui.dp(this,16)));
+   slot.card=new PreviewCard(this);applyCardRadius(slot,slots.indexOf(slot)==primary);
    slot.card.setOnClickListener(v->promote(slots.indexOf(slot)));
    slot.card.beginDrag=()->beginDrag(slot);slot.card.cancelDrag=()->finishDrag(slot,false);slot.card.dismiss=()->finishDrag(slot,true);
    slot.card.setOnLongClickListener(v->{if(!switching())menu(slot);return true;});
@@ -203,21 +225,45 @@ public final class WorkbenchActivity extends Activity {
    // bypassing preview interception and recovery covers. Keep host controls on top.
    config.putBoolean("zorder_on_top",false);
    config.putParcelable("intent",new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(slot.component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-   config.putInt("userId",android.os.Process.myUid()/100000);config.putFloat("cornerRadius",Ui.dp(this,10));config.putInt("reparent_align",0);
+   config.putInt("userId",android.os.Process.myUid()/100000);config.putFloat("cornerRadius",cardRadius(slots.indexOf(slot)==primary));config.putInt("reparent_align",slots.indexOf(slot)==primary?0:2);
    config.putBoolean("intercept_input_event",true);config.putBoolean("allow_task_detach_from_embedding",true);config.putBoolean("key_intercept_back_key",true);config.putBoolean("flexible_key_remove_task_detach",false);config.putInt("use_view_snapshot",1);
    viewApi.getMethod("init",Bundle.class).invoke(slot.surface,config);viewApi.getMethod("setEnforceStart",boolean.class).invoke(slot.surface,true);
    int[] presentation=presentationSize(slot);
    slot.card.addView(slot.surface,new FrameLayout.LayoutParams(presentation[0],presentation[1]));
-   slot.icon=new ImageView(this);slot.icon.setImageDrawable(getPackageManager().getActivityIcon(slot.component));slot.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);slot.icon.setPadding(Ui.dp(this,3),Ui.dp(this,3),Ui.dp(this,3),Ui.dp(this,3));slot.icon.setBackground(Ui.bg(0xfff7f9fc,Ui.dp(this,12)));
-   FrameLayout.LayoutParams badge=new FrameLayout.LayoutParams(Ui.dp(this,32),Ui.dp(this,32),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);slot.card.addView(slot.icon,badge);slot.pin=Ui.text(this,"钉",12,0xffffffff);slot.pin.setGravity(Gravity.CENTER);slot.pin.setBackground(Ui.bg(0xff365db5,Ui.dp(this,12)));slot.pin.setContentDescription("已固定，先取消固定才能替换或移出");
-   slot.card.addView(slot.pin,new FrameLayout.LayoutParams(Ui.dp(this,24),Ui.dp(this,24),Gravity.TOP|Gravity.RIGHT));
-   stage.addView(slot.card);controls.bringToFront();
+   slot.icon=new ImageView(this);slot.icon.setImageDrawable(getPackageManager().getActivityIcon(slot.component));slot.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);Ui.round(slot.icon,Ui.dp(this,6));
+   FrameLayout.LayoutParams badge=new FrameLayout.LayoutParams(Ui.dp(this,22),Ui.dp(this,22),Gravity.BOTTOM|Gravity.LEFT);badge.leftMargin=Ui.dp(this,6);badge.bottomMargin=Ui.dp(this,6);slot.card.addView(slot.icon,badge);
+   slot.pin=Ui.text(this,"钉",9,0xffffffff);slot.pin.setGravity(Gravity.CENTER);slot.pin.setBackground(Ui.bg(0xff365db5,Ui.dp(this,8)));slot.pin.setContentDescription("已固定，先取消固定才能替换或移出");
+   FrameLayout.LayoutParams pinLp=new FrameLayout.LayoutParams(Ui.dp(this,16),Ui.dp(this,16),Gravity.BOTTOM|Gravity.LEFT);pinLp.leftMargin=Ui.dp(this,32);pinLp.bottomMargin=Ui.dp(this,8);slot.card.addView(slot.pin,pinLp);
+   stage.addView(slot.card);layoutCaption();status.bringToFront();
    handler.postDelayed(()->{if(!closing&&!slot.released&&slot.taskId<0){slot.failed=true;refreshStatus();Log.w(TAG,"startup_timeout slot="+slot.id);}},10000);
   }catch(Throwable e){slot.failed=true;fail(e);}
  }
- private void workbenchMenu(){
-  if(closing||recovering||dragging!=null)return;
-  showWorkbenchDialog(new AlertDialog.Builder(this).setTitle("工作台 · "+layoutLabel()).setItems(new String[]{"添加应用","切换左右 / 上下布局","管理主应用","退出工作台"},(d,n)->{if(n==0)chooseApp(null);else if(n==1)toggleLayout();else if(n==2&&!slots.isEmpty())menu(slots.get(primary));else if(n==3)closeWorkbench();}).setNegativeButton("取消",null).create());
+ private void dismissPrimaryMenu(){if(primaryPopup!=null&&primaryPopup.isShowing())primaryPopup.dismiss();primaryPopup=null;}
+ private void primaryMenu(){
+  if(closing||recovering||dragging!=null||slots.isEmpty()||more==null||more.getVisibility()!=View.VISIBLE)return;
+  dismissPrimaryMenu();
+  Slot main=slots.get(primary);
+  LinearLayout panel=new LinearLayout(this);panel.setOrientation(1);panel.setBackground(Ui.bg(0xffffffff,Ui.dp(this,12)));panel.setElevation(Ui.dp(this,12));
+  panel.setPadding(0,Ui.dp(this,4),0,Ui.dp(this,4));
+  String[] items={"切换全屏","切换布局","替换应用","关闭应用"};
+  for(int i=0;i<items.length;i++){
+   final int which=i;
+   TextView row=Ui.text(this,items[i],16,0xff1c1c1c);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(Ui.dp(this,20),0,Ui.dp(this,20),0);
+   row.setMinHeight(Ui.dp(this,48));row.setClickable(true);row.setBackground(Ui.bg(0xffffffff,0));
+   row.setOnClickListener(v->{dismissPrimaryMenu();
+    if(closing||recovering||dragging!=null||slots.isEmpty()||slots.get(primary)!=main)return;
+    if(which==0)exitToFullscreen();else if(which==1)toggleLayout();else if(which==2)chooseApp(main);else removeSlot(main);
+   });
+   panel.addView(row,new LinearLayout.LayoutParams(Ui.dp(this,168),Ui.dp(this,48)));
+  }
+  primaryPopup=new PopupWindow(panel,Ui.dp(this,168),-2,true);primaryPopup.setOutsideTouchable(true);primaryPopup.setElevation(Ui.dp(this,12));
+  primaryPopup.setWindowLayoutType(WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL);
+  primaryPopup.setOnDismissListener(()->{primaryPopup=null;modalWindows=Math.max(0,modalWindows-1);handler.post(()->focusPrimary("menu_dismiss"));});
+  modalWindows++;
+  panel.measure(View.MeasureSpec.makeMeasureSpec(Ui.dp(this,168),View.MeasureSpec.EXACTLY),View.MeasureSpec.UNSPECIFIED);
+  int xoff=(more.getWidth()-panel.getMeasuredWidth())/2;
+  try{primaryPopup.showAsDropDown(more,xoff,Ui.dp(this,4));Log.i(TAG,"primary_menu_open");}
+  catch(Throwable e){modalWindows=Math.max(0,modalWindows-1);primaryPopup=null;Log.w(TAG,"primary_menu_failed",e);}
  }
  void showWorkbenchDialog(AlertDialog dialog){modalWindows++;dialog.setOnDismissListener(d->{modalWindows=Math.max(0,modalWindows-1);handler.post(()->focusPrimary("dialog_dismiss"));});dialog.show();}
  private String layoutLabel(){return layoutMode==PaneLayout.TOP_BOTTOM?"上下":"左右";}
@@ -233,41 +279,83 @@ public final class WorkbenchActivity extends Activity {
   return s.orientationAxis==2&&OrientationPolicy.rotatePresentation(s.renderBounds.width(),s.renderBounds.height(),dm.widthPixels,dm.heightPixels);
  }
  private int[] presentationSize(Slot s){return OrientationPolicy.presentationSize(s.renderBounds.width(),s.renderBounds.height(),rotatePresentation(s));}
- private int sideWidth(){return Ui.dp(this,effectiveMode()==PaneLayout.LEFT_RIGHT?56:84);}
- private int previewHeight(){
-  return PaneLayout.previewHeight(stage.getWidth(),stage.getHeight(),Ui.dp(this,6),sideWidth(),Ui.dp(this,22),effectiveMode());
+ private int layoutGap(){return Math.max(1,Ui.dp(this,1));}
+ private int sideWidth(){
+  return effectiveMode()==PaneLayout.LEFT_RIGHT?PaneLayout.leftRightSideW(stage.getWidth(),layoutGap()):PaneLayout.topBottomSideW(stage.getWidth(),layoutGap());
  }
- private int[][] allocation(){return PaneLayout.compute(stage.getWidth(),stage.getHeight(),slots.size(),primary,Ui.dp(this,6),sideWidth(),previewHeight(),effectiveMode());}
+ private int previewHeight(){
+  return PaneLayout.previewHeight(stage.getWidth(),stage.getHeight(),layoutGap(),sideWidth(),0,effectiveMode());
+ }
+ private int[][] allocation(){return PaneLayout.compute(stage.getWidth(),stage.getHeight(),slots.size(),primary,layoutGap(),sideWidth(),previewHeight(),effectiveMode());}
  private CardLayout.Result cardGeometry(){
   int[][] sizes=new int[slots.size()][2];
   for(int i=0;i<slots.size();i++)sizes[i]=presentationSize(slots.get(i));
-  return CardLayout.compute(stage.getWidth(),stage.getHeight(),primary,Ui.dp(this,6),sideWidth(),previewHeight(),effectiveMode(),Ui.dp(this,22),Ui.dp(this,48),sizes);
+  return CardLayout.compute(stage.getWidth(),stage.getHeight(),primary,layoutGap(),sideWidth(),previewHeight(),effectiveMode(),0,Ui.dp(this,48),sizes);
+ }
+ private int captionHeight(){return Ui.dp(this,36);}
+ private void detachCaption(){
+  if(!captionAttached||more==null)return;
+  try{getWindowManager().removeViewImmediate(more);}catch(Throwable ignored){}
+  captionAttached=false;
+ }
+ private void layoutCaption(){
+  if(more==null||slots.isEmpty()||closing||stage==null||stage.getWidth()<=0){detachCaption();return;}
+  CardLayout.Result geometry=cardGeometry();
+  if(geometry.cards.length==0){detachCaption();return;}
+  int[] main=geometry.cards[Math.min(primary,geometry.cards.length-1)];
+  int w=Ui.dp(this,64),h=captionHeight();
+  int[] loc=new int[2];stage.getLocationInWindow(loc);
+  int x=loc[0]+main[0]+Math.max(0,(main[2]-w)/2);
+  int y=loc[1]+main[1];
+  WindowManager.LayoutParams lp;
+  if(!captionAttached){
+   android.os.IBinder token=getWindow().getDecorView().getWindowToken();
+   if(token==null){stage.post(this::layoutCaption);return;}
+   lp=new WindowManager.LayoutParams(w,h,WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,android.graphics.PixelFormat.TRANSLUCENT);
+   lp.token=token;lp.gravity=Gravity.TOP|Gravity.LEFT;lp.setTitle("WindowDeckCaption");lp.x=x;lp.y=y;
+   try{getWindowManager().addView(more,lp);captionAttached=true;Log.i(TAG,"caption_attached x="+x+" y="+y);}
+   catch(Throwable e){Log.w(TAG,"caption_attach_failed",e);return;}
+  }else{
+   lp=(WindowManager.LayoutParams)more.getLayoutParams();
+   if(lp.x==x&&lp.y==y&&lp.width==w&&lp.height==h)return;
+   lp.x=x;lp.y=y;lp.width=w;lp.height=h;
+   try{getWindowManager().updateViewLayout(more,lp);}catch(Throwable e){Log.w(TAG,"caption_update_failed",e);}
+  }
  }
  private void layoutAddCard(int[] box){
   addCard.setVisibility(box==null?View.GONE:View.VISIBLE);
-  layoutControls();
-  if(box!=null){FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];addCard.setLayoutParams(lp);}
- }
- private void layoutControls(){
-  int edge=Ui.dp(this,48),gap=Ui.dp(this,6);
-  FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(edge,edge);
-  lp.leftMargin=effectiveMode()==PaneLayout.TOP_BOTTOM?Math.max(gap,stage.getWidth()-edge-gap):gap;
-  lp.topMargin=effectiveMode()==PaneLayout.TOP_BOTTOM?gap:Math.max(gap,stage.getHeight()-edge-gap);
-  controls.setLayoutParams(lp);controls.bringToFront();
+  if(box!=null){
+   FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];addCard.setLayoutParams(lp);
+   clipSide(addCard,box[2],box[3],true);
+  }else addCard.setAnimationMatrix(null);
+  layoutCaption();
  }
  private void inputRole(Slot s,boolean isPrimary){
   boolean preview=!isPrimary||switching()||recovering;s.card.preview=preview;
   s.card.gesturesEnabled=!recovering;s.card.vertical=effectiveMode()==PaneLayout.TOP_BOTTOM;s.pin.setVisibility(s.pinned?View.VISIBLE:View.GONE);
-  s.card.setContentDescription(s.label+(isPrimary?"主应用":"，点击切换，长按管理"));
+  s.card.setContentDescription(s.label+(isPrimary?"主应用，顶部菜单":"，点击切换，长按管理"));
   s.icon.setVisibility(isPrimary?View.GONE:View.VISIBLE);
-
+  applyCardRadius(s,isPrimary);
   try{if(interceptInput.getBoolean(s.surface)!=preview){interceptInput.setBoolean(s.surface,preview);s.surface.requestLayout();}}catch(Throwable e){fail(e);}
+ }
+ private int cardRadius(boolean isPrimary){return Ui.dp(this,isPrimary?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS);}
+ private void applyCardRadius(Slot s,boolean isPrimary){
+  if(s.card==null)return;
+  int radius=cardRadius(isPrimary);
+  s.card.setBackground(Ui.bg(Ui.CARD,radius));Ui.round(s.card,radius);
+  if(s.surface==null||cornerRadius==null)return;
+  try{
+   if(Math.abs(cornerRadius.getFloat(s.surface)-radius)<0.5f)return;
+   cornerRadius.setFloat(s.surface,radius);
+   viewApi.getMethod("setCornerRadius",float.class).invoke(s.surface,(float)radius);
+  }catch(Throwable e){Log.w(TAG,"corner_radius_failed slot="+s.id,e);}
  }
  private void updateNaturalBounds(){
   if(slots.isEmpty()||stage.getWidth()<100||stage.getHeight()<100)return;
-  int[] main=allocation()[primary];int cw=Math.max(100,main[2]),ch=Math.max(100,main[3]);
-  android.util.DisplayMetrics dm=getResources().getDisplayMetrics();int nw=Math.max(cw,Math.min(dm.widthPixels,dm.heightPixels));
-  naturalBounds.set(0,0,nw,Math.max(Ui.dp(this,120),Math.round(ch*(nw/(float)cw))));
+  android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
+  int shortEdge=Math.max(1,Math.min(dm.widthPixels,dm.heightPixels));
+  int longEdge=Math.max(1,Math.max(dm.widthPixels,dm.heightPixels));
+  naturalBounds.set(0,0,shortEdge,longEdge);
   for(Slot s:slots)updateRenderBounds(s);
  }
  private void updateRenderBounds(Slot s){
@@ -280,14 +368,26 @@ public final class WorkbenchActivity extends Activity {
   boolean measure=switching();long start=measure?System.nanoTime():0;
   try{resizeMethod.invoke(s.surface,new Rect(s.renderBounds));}catch(Throwable e){fail(e);}
   finally{if(measure){resizeCalls++;resizeNanos+=System.nanoTime()-start;}}
+  int[] plate=surfacePlate(s);scheduleLeashFit(s,plate[0],plate[1]);
  }
- private void syncSurface(Slot s){
-  if(closing||s.released||s.surface==null||s.taskId<0)return;
+ private void reparentSurface(Slot s){
+  if(s.surface==null||s.released)return;
   try{Method method=viewApi.getDeclaredMethod("reparent");method.setAccessible(true);method.invoke(s.surface);s.surface.setBackground(null);}
   catch(Throwable e){Log.w(TAG,"surface_sync_failed slot="+s.id,e);}
  }
- @Override protected void onPause(){cancelDrag();cancelAnimation();if(initialized&&!closing)layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");},350);}
+ private void syncSurface(Slot s){
+  if(closing||s.released||s.surface==null||s.taskId<0)return;
+  reparentSurface(s);
+  int[] plate=surfacePlate(s);scheduleLeashFit(s,plate[0],plate[1]);
+ }
+ private int[] surfacePlate(Slot s){
+  ViewGroup.LayoutParams lp=s.surface.getLayoutParams();
+  int w=lp!=null&&lp.width>0?lp.width:s.surface.getWidth();
+  int h=lp!=null&&lp.height>0?lp.height:s.surface.getHeight();
+  return new int[]{Math.max(1,w),Math.max(1,h)};
+ }
+ @Override protected void onPause(){dismissPrimaryMenu();cancelDrag();cancelAnimation();if(initialized&&!closing)layoutCards(false);super.onPause();}
+ @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;if(backdrop!=null)backdrop.onResume();handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");},350);}
  @Override protected void onStop(){stopped=true;backGeneration++;forwardingBack=false;super.onStop();}
  // Do not refocus on every host touch: doing so cancels a preview's click or
  // long-press stream. Resume, settled promotion and dialog dismissal own focus.
@@ -295,45 +395,93 @@ public final class WorkbenchActivity extends Activity {
  private void scheduleLayout(){if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){cancelDrag();cancelAnimation();updateNaturalBounds();layoutCards(false);for(Slot s:slots)resizeSurface(s);Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+slots.size());}});}
  private void fitSurface(Slot s,int width,int height){
   if(s.surface==null||s.renderBounds.isEmpty())return;
-  boolean rotate=rotatePresentation(s);int[] presentation=presentationSize(s);
-  // Use the ROM's task-leash rotation so composition and task input share the
-  // transform. SurfaceView.setRotation alone does not rotate its child surface.
-  try{if(rotateTaskLeash.getBoolean(s.surface)!=rotate){rotateTaskLeash.setBoolean(s.surface,rotate);s.surface.post(()->syncSurface(s));}}
-  catch(Throwable e){fail(e);return;}
+  boolean rotate=rotatePresentation(s);
+  boolean preview=slots.indexOf(s)!=primary;
+  // Size the SurfaceView to the plate and let the task leash map into it.
+  // Scaling the full-size SurfaceView overflows; FlexibleTaskView's parent
+  // surface cannot clip that. Use the ROM's rotate-leash flag for games.
+  try{
+   if(rotateTaskLeash.getBoolean(s.surface)!=rotate){rotateTaskLeash.setBoolean(s.surface,rotate);s.surface.post(()->syncSurface(s));}
+   if(reparentAlign!=null)reparentAlign.setInt(s.surface,preview&&!rotate?2:0);
+  }catch(Throwable e){fail(e);return;}
+  int w=Math.max(1,width),h=Math.max(1,height);
   FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)s.surface.getLayoutParams();
-  if(lp.width!=presentation[0]||lp.height!=presentation[1]){
-   lp.width=presentation[0];lp.height=presentation[1];s.surface.setLayoutParams(lp);
-  }
-  int availableHeight=Math.max(1,height-(slots.indexOf(s)==primary?0:Ui.dp(this,22)));
-  float scale=Math.min(width/(float)presentation[0],availableHeight/(float)presentation[1]);
-  s.surface.setPivotX(0);s.surface.setPivotY(0);s.surface.setScaleX(scale);s.surface.setScaleY(scale);
-  s.surface.setTranslationX((width-presentation[0]*scale)/2f);
-  s.surface.setTranslationY((availableHeight-presentation[1]*scale)/2f);
+  if(lp.width!=w||lp.height!=h){lp.width=w;lp.height=h;s.surface.setLayoutParams(lp);}
+  s.surface.setPivotX(0);s.surface.setPivotY(0);s.surface.setScaleX(1);s.surface.setScaleY(1);
+  s.surface.setTranslationX(0);s.surface.setTranslationY(0);
+  if(preview)s.surface.setClipBounds(new Rect(0,0,w,h));else s.surface.setClipBounds(null);
   if(s.recoveryCover!=null){
    ImageView cover=s.recoveryCover;FrameLayout.LayoutParams cp=(FrameLayout.LayoutParams)cover.getLayoutParams();
-   if(cp.width!=s.renderBounds.width()||cp.height!=s.renderBounds.height()){cp.width=s.renderBounds.width();cp.height=s.renderBounds.height();cover.setLayoutParams(cp);}
-   cover.setPivotX(0);cover.setPivotY(0);cover.setScaleX(scale);cover.setScaleY(scale);
-   cover.setRotation(rotate?90:0);
-   cover.setTranslationX(s.surface.getTranslationX()+(rotate?s.renderBounds.height()*scale:0));cover.setTranslationY(s.surface.getTranslationY());
+   if(cp.width!=w||cp.height!=h){cp.width=w;cp.height=h;cover.setLayoutParams(cp);}
+   cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+   cover.setPivotX(0);cover.setPivotY(0);cover.setScaleX(1);cover.setScaleY(1);
+   cover.setRotation(0);cover.setTranslationX(0);cover.setTranslationY(0);
   }
+  scheduleLeashFit(s,w,h);
+ }
+ private void scheduleLeashFit(Slot s,int w,int h){
+  if(s.surface==null)return;
+  s.surface.post(()->{
+   if(closing||s.released||s.surface==null)return;
+   reparentSurface(s);
+   applyLeashFit(s,w,h);
+  });
+ }
+ private void applyLeashFit(Slot s,int w,int h){
+  if(s.surface==null||s.released||s.card==null||taskLeash==null||w<2||h<2)return;
+  boolean preview=slots.indexOf(s)!=primary;
+  boolean rotate=rotatePresentation(s);
+  try{
+   if(reparentAlign!=null)reparentAlign.setInt(s.surface,preview&&!rotate?2:0);
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface);
+   SurfaceControl plate=s.surface instanceof SurfaceView?((SurfaceView)s.surface).getSurfaceControl():null;
+   SurfaceControl.Transaction t=new SurfaceControl.Transaction();
+   if(plate!=null&&plate.isValid())t.setCrop(plate,new Rect(0,0,w,h));
+   if(leash!=null&&leash.isValid()&&preview&&!rotate&&!s.renderBounds.isEmpty()){
+    int[] src=presentationSize(s);
+    int[] crop=SurfaceFit.coverCrop(src[0],src[1],w,h);
+    float scale=SurfaceFit.coverScale(crop,w,h);
+    t.setCrop(leash,new Rect(crop[0],crop[1],crop[0]+crop[2],crop[1]+crop[3]));
+    t.setScale(leash,scale,scale);
+    t.setPosition(leash,-crop[0]*scale,-crop[1]*scale);
+    Log.i(TAG,"leash_crop slot="+s.id+" plate="+w+"x"+h+" src="+src[0]+"x"+src[1]+" crop="+crop[0]+","+crop[1]+" "+crop[2]+"x"+crop[3]+" scale="+scale);
+   }
+   t.apply();
+  }catch(Throwable e){Log.w(TAG,"leash_crop_failed slot="+s.id,e);}
  }
  private void apply(Slot s,int[] r){
-  if(s.card==null)return;FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)s.card.getLayoutParams();
+  if(s.card==null)return;
   fitSurface(s,r[2],r[3]);
-  if(lp!=null&&lp.width==r[2]&&lp.height==r[3]&&lp.leftMargin==r[0]&&lp.topMargin==r[1])return;
+  FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)s.card.getLayoutParams();
   if(lp==null)lp=new FrameLayout.LayoutParams(r[2],r[3]);
-  lp.width=r[2];lp.height=r[3];lp.leftMargin=r[0];lp.topMargin=r[1];s.card.setLayoutParams(lp);
+  if(lp.width!=r[2]||lp.height!=r[3]||lp.leftMargin!=r[0]||lp.topMargin!=r[1]){
+   lp.width=r[2];lp.height=r[3];lp.leftMargin=r[0];lp.topMargin=r[1];s.card.setLayoutParams(lp);
+  }
+  clipSide(s.card,r[2],r[3],slots.indexOf(s)!=primary);
+ }
+ private void clipSide(View card,int w,int h,boolean side){
+  if(card==null)return;
+  card.setAnimationMatrix(null);
+  if(!side||w<=1||h<=1)return;
+  float[] q=CardPerspective.quad(w,h,effectiveMode());
+  Path path=new Path();path.moveTo(q[0],q[1]);path.lineTo(q[2],q[3]);path.lineTo(q[4],q[5]);path.lineTo(q[6],q[7]);path.close();
+  card.setClipToOutline(true);
+  card.setOutlineProvider(new ViewOutlineProvider(){
+   public void getOutline(View v,Outline o){try{if(!path.isEmpty())o.setConvexPath(path);}catch(Throwable ignored){}}
+  });
+  card.invalidateOutline();
  }
  private void layoutCards(boolean animate){
   if(slots.isEmpty()||closing)return;CardLayout.Result geometry=cardGeometry();layoutAddCard(geometry.add);int[][] target=geometry.cards;final ArrayList<Slot> current=new ArrayList<>(slots);int[][] from=new int[current.size()][4];
   for(int i=0;i<current.size();i++){Slot s=current.get(i);if(s.card==null)return;from[i]=new int[]{Math.round(s.card.getX()),Math.round(s.card.getY()),Math.round(s.card.getWidth()*s.card.getScaleX()),Math.round(s.card.getHeight()*s.card.getScaleY())};inputRole(s,i==primary);}
-  if(!animate){for(int i=0;i<current.size();i++){resetCardTransform(current.get(i));apply(current.get(i),target[i]);}return;}
+  if(!animate){for(int i=0;i<current.size();i++){resetCardTransform(current.get(i));apply(current.get(i),target[i]);}raiseMain();layoutCaption();return;}
   final int generation=++switchGeneration;
   switchStarted=SystemClock.uptimeMillis();lastAnimationFrame=0;maxFrameGap=0;animationFrames=0;resizeCalls=0;resizeNanos=0;
   animation=ValueAnimator.ofFloat(0,1);for(int i=0;i<current.size();i++)inputRole(current.get(i),i==primary);animation.setDuration(360);animation.setInterpolator(GesturePolicy::spring);
   // Keep SurfaceView dimensions fixed throughout the transition. RenderThread
   // transforms the card and its child Surface together; no per-frame task resize.
   for(int i=0;i<current.size();i++){apply(current.get(i),target[i]);transformCard(current.get(i),from[i],target[i],0);}
+  raiseMain();
   animation.addUpdateListener(a->{
    long now=SystemClock.uptimeMillis();if(lastAnimationFrame!=0)maxFrameGap=Math.max(maxFrameGap,now-lastAnimationFrame);lastAnimationFrame=now;animationFrames++;
    float f=(Float)a.getAnimatedValue();for(int i=0;i<current.size();i++)transformCard(current.get(i),from[i],target[i],f);
@@ -346,9 +494,14 @@ public final class WorkbenchActivity extends Activity {
     if(generation!=switchGeneration||closing)return true;
     settleListener=null;settlingInput=false;
     for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
-    logSwitch("settled");handler.post(()->focusPrimary("switch"));return true;
+    layoutCaption();logSwitch("settled");handler.post(()->focusPrimary("switch"));return true;
    }};stage.getViewTreeObserver().addOnPreDrawListener(settleListener);stage.invalidate();
   }});animation.start();
+ }
+ private void raiseMain(){
+  if(primary<0||primary>=slots.size())return;
+  Slot s=slots.get(primary);if(s.card!=null)s.card.bringToFront();
+  if(status!=null)status.bringToFront();
  }
  private void resetCardTransform(Slot s){s.card.setTranslationX(0);s.card.setTranslationY(0);s.card.setScaleX(1);s.card.setScaleY(1);}
  private void transformCard(Slot s,int[] from,int[] target,float fraction){
@@ -367,9 +520,50 @@ public final class WorkbenchActivity extends Activity {
  }
  private void promote(int index){if(closing||recovering||dragging!=null||index<0||index>=slots.size()||index==primary)return;if(slots.get(index).taskId<0){Toast.makeText(this,"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}cancelAnimation();primary=index;layoutCards(true);refreshStatus();Log.i(TAG,"switch primary="+primary+" tasks="+taskIds());}
  private String taskIds(){StringBuilder b=new StringBuilder();for(Slot s:slots){if(b.length()>0)b.append(',');b.append(s.taskId);}return b.toString();}
- private void refreshStatus(){runOnUiThread(()->{if(closing||slots.isEmpty())return;boolean ready=true,failed=false;for(Slot s:slots){ready&=s.taskId>=0;failed|=s.failed;}status.setVisibility(ready&&!failed?View.GONE:View.VISIBLE);status.setText(failed?"部分窗口未就绪，可通过 ⋮ 替换或移出":ready?slots.size()+" 个实时窗口 · 主应用："+slots.get(primary).label:"正在等待应用窗口…");});}
+ private void refreshStatus(){runOnUiThread(()->{if(closing||slots.isEmpty())return;boolean ready=true,failed=false;for(Slot s:slots){ready&=s.taskId>=0;failed|=s.failed;}status.setVisibility(ready&&!failed?View.GONE:View.VISIBLE);status.setText(failed?"部分窗口未就绪，可长按卡片替换或移出":ready?slots.size()+" 个实时窗口 · 主应用："+slots.get(primary).label:"正在等待应用窗口…");if(status.getVisibility()==View.VISIBLE)status.bringToFront();});}
  private void fail(Throwable e){while(e.getCause()!=null&&e.getCause()!=e)e=e.getCause();Log.e(TAG,"workbench_error",e);if(status!=null){status.setVisibility(View.VISIBLE);status.setText("无法启动："+e.getClass().getSimpleName()+" · "+e.getMessage());}}
- private void releaseSlot(Slot s){
+ private void exitToFullscreen(){
+  if(closing||slots.isEmpty())return;
+  Slot main=slots.get(primary);
+  int keep=main.taskId;
+  ComponentName component=main.component;
+  dismissPrimaryMenu();detachCaption();
+  closing=true;clearRecoveryCovers();cancelDrag();cancelAnimation();handler.removeCallbacksAndMessages(null);
+  // Unlink every task. Keep the main task from being moved to back or restored
+  // behind this container; that was snapping fullscreen back to the workbench.
+  for(Slot s:new ArrayList<>(slots))releaseSlot(s,s==main);
+  boolean launched=bringTaskFullscreen(keep,component);
+  Log.i(TAG,"workbench_fullscreen task="+keep+" launched="+launched+" container="+getTaskId());
+  try{
+   Class<?> atm=Class.forName("android.app.OplusActivityTaskManager");
+   atm.getMethod("moveTaskToBack",int.class,boolean.class).invoke(atm.getMethod("getInstance").invoke(null),getTaskId(),true);
+  }catch(Throwable e){Log.w(TAG,"container_to_back_failed",e);}
+  handler.post(()->{if(!isFinishing())finishAndRemoveTask();});
+ }
+ private boolean bringTaskFullscreen(int taskId,ComponentName component){
+  if(taskId>=0){
+   try{
+    ActivityManager am=(ActivityManager)getSystemService(ACTIVITY_SERVICE);
+    am.getClass().getMethod("moveTaskToFront",int.class,int.class).invoke(am,taskId,0);
+    Log.i(TAG,"fullscreen_move_front task="+taskId);
+    return true;
+   }catch(Throwable e){Log.w(TAG,"fullscreen_move_front_failed",e);}
+   try{
+    Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+    Object result=Class.forName("android.app.IActivityTaskManager").getMethod("startActivityFromRecents",int.class,Bundle.class).invoke(service,taskId,null);
+    Log.i(TAG,"fullscreen_recents task="+taskId+" result="+result);
+    return true;
+   }catch(Throwable e){Log.w(TAG,"fullscreen_recents_failed",e);}
+  }
+  if(component==null)return false;
+  try{
+   startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+   Log.i(TAG,"fullscreen_intent component="+component.flattenToShortString());
+   return true;
+  }catch(Throwable e){Log.w(TAG,"fullscreen_intent_failed",e);return false;}
+ }
+ private void releaseSlot(Slot s){releaseSlot(s,false);}
+ private void releaseSlot(Slot s,boolean toFront){
   if(s.released)return;
   s.released=true;
   if(!closing)recovering=true;
@@ -381,8 +575,10 @@ public final class WorkbenchActivity extends Activity {
     if(s.taskId>=0){
      viewApi.getMethod("interceptBackPressedOnTaskRoot",boolean.class).invoke(s.surface,false);
      managerApi.getMethod("removeEmbeddedContainerTask",int.class,int.class).invoke(manager,s.taskId,getTaskId());
-     Class<?> atm=Class.forName("android.app.OplusActivityTaskManager");
-     atm.getMethod("moveTaskToBack",int.class,boolean.class).invoke(atm.getMethod("getInstance").invoke(null),s.taskId,true);
+     if(!toFront){
+      Class<?> atm=Class.forName("android.app.OplusActivityTaskManager");
+      atm.getMethod("moveTaskToBack",int.class,boolean.class).invoke(atm.getMethod("getInstance").invoke(null),s.taskId,true);
+     }
     }
     // moveTaskToBack owns the server-side transition. Do not race it with
     // detachFromTaskView's second resetFlexibleTask / fullscreen transition.
@@ -393,10 +589,11 @@ public final class WorkbenchActivity extends Activity {
   }
   if(s.card!=null){stage.removeView(s.card);s.card.resetGesture();}
   if(s.recoveryCover!=null){s.recoveryCover.setImageDrawable(null);s.recoveryCover=null;}
-  if(s.taskId>=0){
+  if(s.taskId>=0&&!toFront&&!closing){
    Runnable restore=()->{
+    if(closing)return;
     for(Slot active:slots)if(!active.released&&active.taskId==s.taskId)return;
-    try{reorderTask(s.taskId,false);if(!closing)restoreContainerFocus();Log.i(TAG,"detached_task_restored task="+s.taskId);}
+    try{reorderTask(s.taskId,false);restoreContainerFocus();Log.i(TAG,"detached_task_restored task="+s.taskId);}
     catch(Throwable e){Log.w(TAG,"task_restore_failed id="+s.taskId,e);}
    };
    restore.run();handler.postDelayed(restore,600);
@@ -467,6 +664,7 @@ public final class WorkbenchActivity extends Activity {
   catch(Throwable e){Log.w(TAG,"back_ime_visibility_failed",e);return false;}
  }
  private void handleHostBack(){
+  if(primaryPopup!=null&&primaryPopup.isShowing()){dismissPrimaryMenu();return;}
   boolean keyboard=backStartedWithIme||embeddedImeVisible();backStartedWithIme=false;
   if(forwardingBack||!backReady())return;
   if(keyboard){
@@ -495,9 +693,9 @@ public final class WorkbenchActivity extends Activity {
    finally{handler.postDelayed(()->{if(generation==backGeneration)forwardingBack=false;},200);}
   },80);
  }
- private void closeWorkbench(){if(closing)return;closing=true;releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
+ private void closeWorkbench(){dismissPrimaryMenu();detachCaption();if(closing)return;closing=true;releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
  @Override public void onBackPressed(){handleHostBack();}
- @Override protected void onDestroy(){getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){closing=true;releaseWindows();}super.onDestroy();}
+ @Override protected void onDestroy(){dismissPrimaryMenu();detachCaption();if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){closing=true;releaseWindows();}super.onDestroy();}
  @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[slots.size()];for(int i=0;i<slots.size();i++)components[i]=slots.get(i).component.flattenToString();b.putStringArray("components",components);b.putInt("primary",primary);b.putInt("layoutMode",layoutMode);for(Slot s:slots)if(s.pinned)b.putString("pinned",s.component.flattenToString());super.onSaveInstanceState(b);}
- @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds());if(stage!=null)scheduleLayout();}
+ @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds());if(backdrop!=null)backdrop.onConfigurationChanged();if(stage!=null)scheduleLayout();}
 }

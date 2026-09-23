@@ -24,3 +24,19 @@ javac -encoding UTF-8 -d "$out" \
   "$project_dir/module/src/dev/windowdeck/app/OrientationPolicy.java" \
   "$project_dir/tests/OrientationPolicyTest.java"
 java -cp "$out" dev.windowdeck.app.OrientationPolicyTest
+
+javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/BackdropPolicy.java" \
+  "$project_dir/tests/BackdropPolicyTest.java"
+java -cp "$out" dev.windowdeck.app.BackdropPolicyTest
+
+javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/SurfaceFit.java" \
+  "$project_dir/tests/SurfaceFitTest.java"
+java -cp "$out" dev.windowdeck.app.SurfaceFitTest
+
+javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/PaneLayout.java" \
+  "$project_dir/module/src/dev/windowdeck/app/CardPerspective.java" \
+  "$project_dir/tests/CardPerspectiveTest.java"
+java -cp "$out" dev.windowdeck.app.CardPerspectiveTest

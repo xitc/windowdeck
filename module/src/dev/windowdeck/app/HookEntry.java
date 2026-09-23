@@ -15,6 +15,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
     android.util.Log.i("WindowDeck","custom_activity_created");
    }
   });
-  android.util.Log.i("WindowDeck","hook_ready version=0.4.5-beta.1");
+  android.util.Log.i("WindowDeck","hook_ready version=0.4.6-beta.1");
  }
 }
