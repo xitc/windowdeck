@@ -12,6 +12,10 @@ final class SurfaceFit {
   if(y+visH>srcH)y=srcH-visH;
   return new int[]{x,y,visW,visH};
  }
+ static float[] sourceQuad(int presentedWidth,int[] crop,boolean rotate){
+  float x=crop[0],y=crop[1],r=x+crop[2],b=y+crop[3];
+  return rotate?new float[]{y,presentedWidth-x,y,presentedWidth-r,b,presentedWidth-r,b,presentedWidth-x}:new float[]{x,y,r,y,r,b,x,b};
+ }
  static float coverScale(int[] crop,int dstW,int dstH){
   if(crop==null||crop[2]<=0||crop[3]<=0)return 1f;
   return (float)Math.max(dstW/(double)crop[2],dstH/(double)crop[3]);

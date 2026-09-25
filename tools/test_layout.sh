@@ -40,3 +40,13 @@ javac -encoding UTF-8 -d "$out" \
   "$project_dir/module/src/dev/windowdeck/app/CardPerspective.java" \
   "$project_dir/tests/CardPerspectiveTest.java"
 java -cp "$out" dev.windowdeck.app.CardPerspectiveTest
+
+javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/IngressPolicy.java" \
+  "$project_dir/tests/IngressPolicyTest.java"
+java -cp "$out" dev.windowdeck.app.IngressPolicyTest
+
+javac -encoding UTF-8 -d "$out" \
+  "$project_dir/module/src/dev/windowdeck/app/SwipePanelPolicy.java" \
+  "$project_dir/tests/SwipePanelPolicyTest.java"
+java -cp "$out" dev.windowdeck.app.SwipePanelPolicyTest
