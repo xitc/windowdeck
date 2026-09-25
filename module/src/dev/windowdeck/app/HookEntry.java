@@ -22,6 +22,27 @@ public final class HookEntry implements IXposedHookLoadPackage {
    }
   });
   try{LeashTransactions.install();}catch(Throwable e){android.util.Log.e("WindowDeck","leash_atomic_hook_failed",e);}
-  android.util.Log.i("WindowDeck","hook_ready version=0.4.7-beta.21");
+  try{hookBackKeyPassthrough(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","back_key_passthrough_failed",e);XposedBridge.log(e);}
+  android.util.Log.i("WindowDeck","hook_ready version=0.4.8-beta.2");
+ }
+ // Side cards keep mInterceptInputEvent so the container owns their touches.
+ // ColorOS copies that field onto the task and then drops KEYCODE_BACK.
+ private static void hookBackKeyPassthrough(ClassLoader loader){
+  XposedHelpers.findAndHookMethod("com.oplus.flexiblewindow.FlexibleTaskView",loader,"prepareActivityOptions",new XC_MethodHook(){
+   protected void afterHookedMethod(MethodHookParam param){
+    try{
+     if(!workbenchView(param.thisObject))return;
+     Object options=param.getResult();if(options==null)return;
+     android.os.Bundle extra=(android.os.Bundle)XposedHelpers.callMethod(options,"getExtraBundle");
+     if(extra!=null&&extra.getBoolean("intercept_input_event",false)){extra.putBoolean("intercept_input_event",false);android.util.Log.i("WindowDeck","back_key_passthrough");}
+    }catch(Throwable e){android.util.Log.w("WindowDeck","back_key_passthrough_failed",e);}
+   }
+  });
+  android.util.Log.i("WindowDeck","back_key_passthrough_ready");
+ }
+ private static boolean workbenchView(Object view){
+  android.content.Context context=((android.view.View)view).getContext();
+  while(context instanceof android.content.ContextWrapper&&!(context instanceof android.app.Activity))context=((android.content.ContextWrapper)context).getBaseContext();
+  return context instanceof WorkbenchActivity;
  }
 }

@@ -87,7 +87,9 @@ final class LauncherSwipeHook {
    }catch(Throwable e){Log.w(TAG,"swipe_side_geometry_failed",e);}}
    @Override protected void afterHookedMethod(MethodHookParam p){try{
     if(!Boolean.TRUE.equals(THREE_CHOICES.get()))return;
-    Resources res=(Resources)p.args[2];float width=dp(res,104);
+    Resources res=(Resources)p.args[2];int rotation=(Integer)p.args[3];
+    if(SwipePanelPolicy.landscapeStack(rotation)){openLandscapeGap(p.thisObject,dp(res,104));return;}
+    float width=dp(res,104);
     Map<?,?> rects=(Map<?,?>)XposedHelpers.callMethod(p.thisObject,"getMBgRectMap");
     float center=res.getDisplayMetrics().widthPixels/2f;
     for(Object info:rects.values()){
@@ -105,8 +107,18 @@ final class LauncherSwipeHook {
  private static int dp(Context c,int n){return Math.round(n*c.getResources().getDisplayMetrics().density);}
  private static int dp(Resources r,int n){return Math.round(n*r.getDisplayMetrics().density);}
  private static boolean canShowThird(Context context,int rotation){
-  if(rotation!=0||context.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT||context.getResources().getConfiguration().smallestScreenWidthDp>=600)return false;
-  return true;
+  if(context.getResources().getConfiguration().smallestScreenWidthDp>=600)return false;
+  return rotation>=0&&rotation<=3;
+ }
+ private static void openLandscapeGap(Object params,float length) throws Exception {
+  Map<?,?> rects=(Map<?,?>)XposedHelpers.callMethod(params,"getMBgRectMap");
+  RectF first=null,second=null;
+  for(Object info:rects.values()){RectF normal=(RectF)XposedHelpers.callMethod(info,"getBgNormalRect");if(normal.isEmpty())continue;if(first==null)first=normal;else second=normal;}
+  if(first==null||second==null)return;
+  RectF upper=first.centerY()<=second.centerY()?first:second,lower=upper==first?second:first;
+  float[] top=new float[]{upper.top,upper.bottom},bottom=new float[]{lower.top,lower.bottom};
+  SwipePanelPolicy.separateVertical(top,bottom,length);
+  upper.top=top[0];upper.bottom=top[1];lower.top=bottom[0];lower.bottom=bottom[1];
  }
  private static State state(View panel){State s=STATES.get(panel);if(s==null){s=new State();STATES.put(panel,s);}return s;}
  private static void progress(View panel,float value){
@@ -131,7 +143,7 @@ final class LauncherSwipeHook {
   // Launcher keeps this fullscreen panel at a fixed size during the gesture, so a newly added
   // child may not receive another layout pass before the user releases their finger.
   positionZone(panel);
-  if(value<=0||panel.getVisibility()!=View.VISIBLE||XposedHelpers.getIntField(panel,"mPanelStatus")==0||panel.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT){s.zone.setVisibility(View.GONE);return;}
+  if(value<=0||panel.getVisibility()!=View.VISIBLE||XposedHelpers.getIntField(panel,"mPanelStatus")==0){s.zone.setVisibility(View.GONE);return;}
   // The center is occupied by the ROM capsule on devices that expose it.
   List<?> entrances=(List<?>)XposedHelpers.getObjectField(panel,"entranceViewInfoList");
   if(entrances!=null&&entrances.size()>2){s.zone.setVisibility(View.GONE);return;}
@@ -153,14 +165,31 @@ final class LauncherSwipeHook {
   State s=STATES.get(panel);if(s==null||s.zone==null||panel.getWidth()<=0)return;
   Object controller=XposedHelpers.getObjectField(panel,"mMultiTriggerPanelController");
   Object params=XposedHelpers.callMethod(controller,"getMTriggerParams");
-  int width=dp(panel.getContext(),112),height=Math.round(((Number)XposedHelpers.callMethod(params,"getMBgHeightInNormal")).floatValue());
-  int top=Math.round(((Number)XposedHelpers.callMethod(params,"getMBgNormalMarginTop")).floatValue());
-  float[] box=SwipePanelPolicy.box(panel.getWidth(),panel.getHeight(),panel.getResources().getDisplayMetrics().density,top,height,s.expansion);
-  int left=Math.round(box[0]);width=Math.round(box[2]);height=Math.round(box[3]);
   applyChrome(s);
   s.zone.setTranslationX(0);s.zone.setTranslationY(0);s.zone.setScaleX(1);s.zone.setScaleY(1);
+  int rotation=0;try{rotation=XposedHelpers.getIntField(panel,"currentRotation");}catch(Throwable ignored){}
+  int left,top,width,height;
+  if(SwipePanelPolicy.landscapeStack(rotation)){
+   float[] span=landscapeSpan(params);if(span==null){s.zone.setRotation(0);return;}
+   float[] box=SwipePanelPolicy.landscapeChip(span[0],span[1],span[2],span[3],dp(panel.getContext(),112),s.expansion);
+   left=Math.round(box[0]);top=Math.round(box[1]);width=Math.round(box[2]);height=Math.round(box[3]);
+  }else{
+   width=dp(panel.getContext(),112);height=Math.round(((Number)XposedHelpers.callMethod(params,"getMBgHeightInNormal")).floatValue());
+   top=Math.round(((Number)XposedHelpers.callMethod(params,"getMBgNormalMarginTop")).floatValue());
+   float[] box=SwipePanelPolicy.box(panel.getWidth(),panel.getHeight(),panel.getResources().getDisplayMetrics().density,top,height,s.expansion);
+   left=Math.round(box[0]);width=Math.round(box[2]);height=Math.round(box[3]);
+  }
   s.zone.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY));
   s.zone.layout(left,top,left+width,top+height);
+  s.zone.setPivotX(width/2f);s.zone.setPivotY(height/2f);s.zone.setRotation(SwipePanelPolicy.chipRotation(rotation));
+ }
+ private static float[] landscapeSpan(Object params){
+  Map<?,?> rects=(Map<?,?>)XposedHelpers.callMethod(params,"getMBgRectMap");
+  RectF first=null,second=null;
+  for(Object info:rects.values()){RectF normal=(RectF)XposedHelpers.callMethod(info,"getBgNormalRect");if(normal.isEmpty())continue;if(first==null)first=normal;else second=normal;}
+  if(first==null||second==null)return null;
+  RectF upper=first.centerY()<=second.centerY()?first:second,lower=upper==first?second:first;
+  return new float[]{upper.left,upper.right,upper.bottom,lower.top};
  }
  private static void resetExpansion(View panel,State s){
   if(s.hover!=null){panel.removeCallbacks(s.hover);s.hover=null;}
@@ -215,8 +244,10 @@ final class LauncherSwipeHook {
   State s=STATES.get(panel);if(s==null||s.zone==null||s.zone.getVisibility()!=View.VISIBLE||s.progress<s.trigger)return;
   if(Boolean.TRUE.equals(p.args[4])||Boolean.TRUE.equals(p.args[5]))return;
   PointF up=(PointF)p.args[3];if(up==null)return;
+  int rotation=0;try{rotation=XposedHelpers.getIntField(panel,"currentRotation");}catch(Throwable ignored){}
   int[] pos=new int[2];s.zone.getLocationOnScreen(pos);
-  if(!s.selected||Math.abs(up.x-panel.getWidth()/2f)>dp(panel.getContext(),64)||up.y<pos[1]||up.y>pos[1]+s.zone.getHeight())return;
+  boolean onChip=s.selected&&(SwipePanelPolicy.landscapeStack(rotation)||(Math.abs(up.x-panel.getWidth()/2f)<=dp(panel.getContext(),64)&&up.y>=pos[1]&&up.y<=pos[1]+s.zone.getHeight()));
+  if(!onChip)return;
   Candidate candidate=findCandidate(panel.getContext(),p.thisObject);
   if(candidate==null||s.candidate==null||candidate.task!=s.candidate.task||candidate.container!=s.candidate.container)return;
   Object manager=XposedHelpers.getObjectField(p.thisObject,"mTaskAnimationManager");
