@@ -4,6 +4,21 @@ final class SwipePanelPolicy {
  static boolean selected(float progress,float trigger,float offset,float halfGap){
   return progress>=trigger&&Math.abs(offset)<=halfGap;
  }
+ static boolean landscapeStack(int rotation){return rotation==1||rotation==3;}
+ static float chipRotation(int rotation){return rotation==1?90f:rotation==3?270f:0f;}
+ /** Shorten two stacked [top, bottom] spans toward their outer ends. */
+ static void separateVertical(float[] upper,float[] lower,float length){
+  upper[1]=upper[0]+length;lower[0]=lower[1]-length;
+ }
+ /** Pre-rotation box. A 90° turn makes width the button thickness and height the gap length. */
+ static float[] landscapeChip(float buttonLeft,float buttonRight,float gapTop,float gapBottom,float longSide,float expansion){
+  float f=Math.max(0,Math.min(1,expansion));
+  float thickness=buttonRight-buttonLeft;
+  float gap=Math.max(0,gapBottom-gapTop);
+  float length=longSide+Math.max(0,gap-longSide)*f;
+  float cx=(buttonLeft+buttonRight)/2f,cy=(gapTop+gapBottom)/2f;
+  return new float[]{cx-length/2f,cy-thickness/2f,length,thickness};
+ }
  static float[] box(int screenWidth,int screenHeight,float density,float top,float normalHeight,float fraction){
   float f=Math.max(0,Math.min(1,fraction));
   float normalWidth=112*density;
