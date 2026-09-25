@@ -1,6 +1,6 @@
 # 多窗工作台 · WindowDeck
 
-**当前版本：v0.4.5-beta.1 · Beta 测试版**
+**当前版本：v0.4.7-beta.22 · Beta 测试版**
 
 面向 ColorOS 16 的 LSPosed 多应用工作台，基于系统实时任务嵌入能力，让最多三个应用同时出现在主窗和侧窗中。应用包名：`dev.windowdeck.app`。
 
@@ -8,7 +8,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.4.5-beta.1`。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.4.7-beta.22`。
 
 ## 环境与验收范围
 
@@ -19,9 +19,9 @@
 ## 安装
 
 1. 安装 APK，在 LSPosed 启用“多窗工作台”。
-2. 作用域仅选择“多窗口” `com.oplus.pscanvas`。
+2. 作用域选择“多窗口” `com.oplus.pscanvas` 和“系统桌面” `com.android.launcher`。
 3. 在 Root 管理器中授权“多窗工作台”。
-4. 重新启动 `com.oplus.pscanvas` 进程，使模块加载。
+4. 重新启动 `com.oplus.pscanvas` 和系统桌面，使两个 Hook 重新加载。
 5. 打开应用，选择两个或三个不同应用。恢复已有组合用“打开 / 恢复当前工作台”，重建组合用“用所选应用新建工作台”。
 
 如果安装过旧包名实验版，请先在 LSPosed 停用旧模块，再启用新版并重启宿主进程。新包名会独立安装，不覆盖旧应用，也不自动迁移应用选择、Root 授权和 LSPosed 配置。
@@ -37,6 +37,7 @@
 - 切换动画使用固定 Surface 尺寸；移出恢复期间使用临时任务快照覆盖。
 - 竖握时横屏任务旋转 90° 显示为长卡片，横握时恢复正向。
 - 系统返回优先交给主应用处理键盘、弹窗和内部页面；根页面返回桌面并保留当前组合。
+- 竖屏上滑的分屏/浮窗面板在中间增加“添加到工作台”，样式与系统分屏、浮窗选项一致。有工作台时追加当前任务，没有时新建。
 
 点击 `•••` 打开工作台菜单。手机横握时使用左右布局。左右布局为左侧预览栏、右侧主窗；上下布局为顶部预览、下方主窗。
 
@@ -62,7 +63,7 @@ sh tools/test_layout.sh
 sh tools/build_module.sh
 ```
 
-输出：`build/windowdeck/windowdeck-v0.4.5-beta.1.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
+输出：`build/windowdeck/windowdeck-v0.4.7-beta.22.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
 
 构建使用本地开发签名 `build/windowdeck-test.keystore`，首次构建时生成。请妥善保留自己的密钥以便覆盖升级；密钥和构建产物已从 Git 排除。自行构建的签名与 GitHub 下载版不同，不能直接覆盖安装。当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
 
