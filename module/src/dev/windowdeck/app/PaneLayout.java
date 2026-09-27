@@ -1,6 +1,16 @@
 package dev.windowdeck.app;
 /** Pixel geometry. Each row is left, top, width, height.
- *  {@code gap} is 1 dp in pixels. TOP_BOTTOM plates 74 dp; LEFT_RIGHT 56×(h/5.4). */
+ *  {@code gap} is 1 dp in pixels. TOP_BOTTOM plates 74 dp; LEFT_RIGHT 56×(h/5.4).
+ *
+ *  <p>{@link #visualCount} is the number of side-plate <em>slots</em> reserved in the
+ *  rail, including the ＋ add slot while the rail is not full. It is
+ *  {@code min(MAX_SIDE_SLOTS, count)}: 1,2,3,4,4 for 1..5 windows. The plates and the
+ *  ＋ slot are laid out as one centred run of that many slots, so they never overlap;
+ *  the add slot simply takes the slot right after the last card.
+ *
+ *  <p>The original workbench uses the same plate sizes for four side cards
+ *  (74 dp rail: 4×74 + 3×13 + 2×12 = 359 dp on a 360 dp screen), so nothing here
+ *  rescales the plates when the count grows — only the slot count changes. */
 final class PaneLayout {
   static final int LEFT_RIGHT=0;
   static final int TOP_BOTTOM=1;
@@ -48,7 +58,19 @@ final class PaneLayout {
 
   static int visualCount(int count){
     if(count<=0)return 0;
-    return Math.max(0,count-1)+(count<3?1:0);
+    return Math.min(Caps.MAX_SIDE_SLOTS,count);
+  }
+
+  /** Start of a run of {@code total} px centred on {@code extent}, clamped so the whole
+   *  run stays inside {@code [lo, hi]}. Centring still uses the full extent — the
+   *  documented 3-window geometry depends on that — the clamp only bites once a longer
+   *  run would otherwise spill past the inset. */
+  static int groupStart(int extent,int total,int lo,int hi){
+    int start=(extent-total)/2;
+    int maxStart=hi-total;
+    if(start>maxStart)start=maxStart;
+    if(start<lo)start=lo;
+    return start;
   }
 
   static int[][] compute(int w,int h,int count,int primary,int gap,int sideW,int sideH,int mode){
@@ -62,7 +84,7 @@ final class PaneLayout {
   }
 
   static int[] addBox(int w,int h,int count,int gap,int sideW,int sideH,int mode){
-    if(count>=3||count<0||w<=0||h<=0)return null;
+    if(count>=Caps.MAX_TASKS||count<0||w<=0||h<=0)return null;
     return sideBox(w,h,count,gap,sideW,sideH,mode,Math.max(0,count-1));
   }
 
@@ -88,13 +110,11 @@ final class PaneLayout {
     int item=itemGap(g);
     if(mode==TOP_BOTTOM){
       int total=vis*sw+Math.max(0,vis-1)*item;
-      int x=Math.max(sideInset(g),(w-total)/2)+index*(sw+item);
-      if(x+sw>w-sideInset(g))x=Math.max(sideInset(g),w-sideInset(g)-sw);
+      int x=groupStart(w,total,sideInset(g),w-sideInset(g))+index*(sw+item);
       return new int[]{x,topInset(g),sw,sh};
     }
     int total=vis*sh+Math.max(0,vis-1)*item;
-    int y=Math.max(topInset(g),(h-total)/2)+index*(sh+item);
-    if(y+sh>h-bottomInset(g))y=Math.max(topInset(g),h-bottomInset(g)-sh);
+    int y=groupStart(h,total,topInset(g),h-bottomInset(g))+index*(sh+item);
     return new int[]{sideInset(g),y,sw,sh};
   }
 

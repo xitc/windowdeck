@@ -37,6 +37,9 @@ final class WorkbenchBackdrop {
  private android.view.SurfaceControl underlay;
  private int generation,appliedRotation=-1,appliedW,appliedH;
  private boolean attached;
+ boolean ready;
+ Runnable onReady;
+ private void signalReady(){ready=true;if(onReady!=null)onReady.run();}
 
  void attach(Activity a,Object flexibleManager){
   activity=a;manager=flexibleManager;
@@ -67,7 +70,7 @@ final class WorkbenchBackdrop {
   });
  }
  void detach(){
-  attached=false;main.removeCallbacksAndMessages(null);unregister();
+  attached=false;ready=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
   if(thread!=null){thread.quitSafely();thread=null;bg=null;}
   if(underlay!=null){try(android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){t.reparent(underlay,null).apply();}underlay.release();underlay=null;}
   recycle(nativeBitmap);nativeBitmap=null;
@@ -134,6 +137,7 @@ final class WorkbenchBackdrop {
    Bitmap previous=owned;owned=null;
    appliedRotation=rotation;appliedW=displayW;appliedH=displayH;
    Log.w(TAG,"backdrop_fallback reason="+(prepared==null?"null":prepared.source));
+   signalReady();
    if(previous!=null)main.postDelayed(()->{if(previous!=owned)recycle(previous);},1000);
    return;
   }
@@ -145,6 +149,7 @@ final class WorkbenchBackdrop {
   applyUnderlay(host,owned,displayW,displayH);
   appliedRotation=rotation;appliedW=displayW;appliedH=displayH;
   Log.i(TAG,"backdrop_applied source="+prepared.source+" size="+prepared.bitmap.getWidth()+"x"+prepared.bitmap.getHeight()+" lightBars="+prepared.light);
+  signalReady();
   if(previous!=null&&previous!=owned)main.postDelayed(()->{if(previous!=owned)recycle(previous);},1000);
  }
  private void applyUnderlay(Activity host,Bitmap bitmap,int width,int height){

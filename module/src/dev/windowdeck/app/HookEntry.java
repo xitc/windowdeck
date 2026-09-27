@@ -5,12 +5,14 @@ import de.robv.android.xposed.*;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class HookEntry implements IXposedHookLoadPackage {
+ /** Stamped into every ready line so a stale install is obvious from logcat alone. */
+ static final String VERSION="0.4.8-beta.27";
  public void handleLoadPackage(XC_LoadPackage.LoadPackageParam p) {
   if ("com.android.launcher".equals(p.packageName) || "com.oplus.pscanvas".equals(p.packageName))
-   XposedBridge.log("WindowDeck load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
+   android.util.Log.i("WindowDeck","load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
   if("com.android.launcher".equals(p.packageName)){
-   android.util.Log.i("WindowDeck","launcher_load_package process="+p.processName);
-   try{LauncherSwipeHook.install(p.classLoader);XposedBridge.log("WindowDeck launcher_hook_ready process="+p.processName);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_hook_failed",e);XposedBridge.log(e);}return;
+   android.util.Log.i("WindowDeck","launcher_load_package version="+VERSION+" process="+p.processName);
+   try{LauncherSwipeHook.install(p.classLoader);android.util.Log.i("WindowDeck","launcher_hook_ready version="+VERSION+" process="+p.processName);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_hook_failed",e);XposedBridge.log(e);}return;
   }
   if (!"com.oplus.pscanvas".equals(p.packageName)) return;
   XposedHelpers.findAndHookMethod(Instrumentation.class,"newActivity",ClassLoader.class,String.class,Intent.class,new XC_MethodHook(){
@@ -23,7 +25,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
   });
   try{LeashTransactions.install();}catch(Throwable e){android.util.Log.e("WindowDeck","leash_atomic_hook_failed",e);}
   try{hookBackKeyPassthrough(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","back_key_passthrough_failed",e);XposedBridge.log(e);}
-  android.util.Log.i("WindowDeck","hook_ready version=0.4.8-beta.2");
+  android.util.Log.i("WindowDeck","hook_ready version="+VERSION+" process="+p.processName);
  }
  // Side cards keep mInterceptInputEvent so the container owns their touches.
  // ColorOS copies that field onto the task and then drops KEYCODE_BACK.

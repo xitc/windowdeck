@@ -18,7 +18,7 @@ public final class WorkbenchStateProvider extends ContentProvider {
   if("publish".equals(method)){
    if(!host||extras==null)return null;
    int container=extras.getInt("containerTaskId",-1),count=extras.getInt("count",-1);long token=extras.getLong("instanceToken",0);
-   if(container<0||count<0||count>3)return null;
+   if(container<0||count<0||count>Caps.MAX_TASKS)return null;
    if(count==0&&(prefs.getInt("container",-1)!=container||prefs.getLong("token",0)!=token))return null;
    prefs.edit().putInt("container",container).putInt("count",count).putLong("token",token).apply();
    Log.i("WindowDeck","state_published container="+container+" count="+count);return Bundle.EMPTY;
@@ -27,7 +27,7 @@ public final class WorkbenchStateProvider extends ContentProvider {
   if("add_task".equals(method)){
    if(extras==null)return null;
    int task=extras.getInt("taskId",-1),user=extras.getInt("userId",-1),container=extras.getInt("containerTaskId",-1);
-   if(task<0||user!=0||container < -1||task==container||(container>=0&&(prefs.getInt("container",-1)!=container||prefs.getInt("count",0)<1||prefs.getInt("count",0)>=3)))return null;
+   if(task<0||user!=0||container < -1||task==container||(container>=0&&(prefs.getInt("container",-1)!=container||prefs.getInt("count",0)<1||prefs.getInt("count",0)>=Caps.MAX_TASKS)))return null;
    LauncherIngressReceiver.startTask(getContext(),task,user,container,null);return Bundle.EMPTY;
   }
   if(!"state".equals(method))return null;

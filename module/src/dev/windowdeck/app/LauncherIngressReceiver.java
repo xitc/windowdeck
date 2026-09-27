@@ -20,7 +20,7 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
   if(STATE.equals(intent.getAction())){
    if(!host){Log.w("WindowDeck","state_sender_denied uid="+uid);return;}
    int container=intent.getIntExtra("containerTaskId",-1),count=intent.getIntExtra("count",-1);long token=intent.getLongExtra("instanceToken",0);
-   if(container<0||count<0||count>3)return;
+   if(container<0||count<0||count>Caps.MAX_TASKS)return;
    android.content.SharedPreferences prefs=context.getSharedPreferences("workbench_state",0);
    if(count==0&&(prefs.getInt("container",-1)!=container||prefs.getLong("token",0)!=token))return;
    prefs.edit().putInt("container",container).putInt("count",count).putLong("token",token).apply();
@@ -44,6 +44,7 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
  static void startTask(Context context,int task,int user,int container,Runnable done){
   if(!BUSY.compareAndSet(false,true)){if(done!=null)done.run();return;}
   new Thread(()->{
+   long started=android.os.SystemClock.uptimeMillis();
    try{
     if(container<0){createWorkbench(context,task,user);return;}
     // Deliver to the live container. Starting ContainerActivity from outside can
@@ -52,12 +53,16 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
     Process process=new ProcessBuilder("su","-c",command).redirectErrorStream(true).start();
     if(!process.waitFor(12,TimeUnit.SECONDS)&&process.isAlive()){process.destroy();throw new IOException("am start timed out");}
     if(process.exitValue()!=0)throw new IOException("am broadcast exit="+process.exitValue());
+    long added=android.os.SystemClock.uptimeMillis();
     String apk=context.getPackageCodePath();
     if(!apk.matches("/data/app/[A-Za-z0-9_~=/+.-]+/base\\.apk"))throw new IOException("unexpected apk path");
     Process front=new ProcessBuilder("su","-c","CLASSPATH="+apk+" app_process /system/bin dev.windowdeck.app.TaskFront "+container+" "+task).redirectErrorStream(true).start();
     if(!front.waitFor(12,TimeUnit.SECONDS)&&front.isAlive()){front.destroy();throw new IOException("task front timed out");}
     if(front.exitValue()!=0)throw new IOException("task front exit="+front.exitValue());
-    Log.i("WindowDeck","launcher_ingress_sent task="+task+" container="+container+" front=true");
+    long fronted=android.os.SystemClock.uptimeMillis();
+    // This path is used only when direct launcher dispatch is unavailable. It owns both fronting
+    // and reveal because the failed direct attempt may not have raised the container.
+    Log.i("WindowDeck","launcher_ingress_sent task="+task+" container="+container+" front=true add_ms="+(added-started)+" front_ms="+(fronted-added)+" total_ms="+(fronted-started));
    }catch(Exception e){Log.e("WindowDeck","launcher_ingress_failed task="+task,e);}
    finally{BUSY.set(false);if(done!=null)done.run();}
   },"WindowDeckIngress").start();

@@ -26,12 +26,13 @@ public final class WorkbenchActivity extends Activity {
  private static final String TAG="WindowDeck";
  private final ArrayList<Slot> slots=new ArrayList<>();
  private FrameLayout stage; private TextView status; private Button addCard, more; private PopupWindow primaryPopup; private boolean captionAttached;
- private Field interceptInput,rotateTaskLeash,cornerRadius,taskLeash,reparentAlign; private Method resizeMethod;
+ private Field interceptInput,rotateTaskLeash,cornerRadius,taskLeash,reparentAlign,superLocked; private Method resizeMethod;
  private Method leashMatrix,leashMatrix4,leashRadius; private Field viewTransaction;
  private boolean settlingInput; private int switchGeneration;
  private ViewTreeObserver.OnPreDrawListener settleListener;
  private long switchStarted, lastAnimationFrame, maxFrameGap, resizeNanos; private int animationFrames, resizeCalls;
  private int layoutMode=PaneLayout.LEFT_RIGHT;
+ private boolean atomicRotate=AtomicPresentation.DEFAULT;
  private boolean initialized,closing,layoutPosted; private int primary,nextId,imeBottom;
  private Class<?> viewApi,managerApi; private Object manager; private ValueAnimator animation,addAnimation;
  private Slot dragging; private boolean recovering; private Runnable recoveryFinish;
@@ -49,6 +50,8 @@ public final class WorkbenchActivity extends Activity {
  private String hangNote;
  private long hangStarted;
  private Runnable clearHangSuppress;
+ private long lastExistingSession;
+ private int lastExistingTask=-1;
  private int backGeneration;
  private int modalWindows;
  private boolean backStartedWithIme;
@@ -62,6 +65,7 @@ public final class WorkbenchActivity extends Activity {
  private final Rect naturalBounds=new Rect();
  private final Handler handler=new Handler(Looper.getMainLooper());
  private final long stateToken=SystemClock.elapsedRealtimeNanos();
+ private int statePublishGeneration;
  private static final String ADD_TO_LIVE_WORKBENCH="dev.windowdeck.app.ADD_TO_LIVE_WORKBENCH";
  private static final String REVEAL_ADDED_CARD="dev.windowdeck.app.REVEAL_ADDED_CARD";
  private final BroadcastReceiver addReceiver=new BroadcastReceiver(){
@@ -74,10 +78,34 @@ public final class WorkbenchActivity extends Activity {
   }
  };
  private boolean addReceiverRegistered;
+ private boolean launcherReceiverRegistered;
+ private final BroadcastReceiver launcherReceiver=new BroadcastReceiver(){
+  @Override public void onReceive(Context context,Intent intent){
+   // This separate receiver preserves the DUMP-protected root fallback. Never trust an
+   // intent extra as caller identity; the launcher explicitly shares the system-supplied UID.
+   setResultCode(2);
+   String[] packages=getPackageManager().getPackagesForUid(getSentFromUid());
+   boolean launcher=false;
+   if(packages!=null)for(String pkg:packages)if("com.android.launcher".equals(pkg))launcher=true;
+   if(!launcher||intent==null){Log.w(TAG,"direct_add_sender_denied uid="+getSentFromUid());return;}
+   if(LauncherExistingAppHook.SELECT.equals(intent.getAction())){setResultCode(selectExistingFromLauncher(intent)?1:2);return;}
+   if(LiveWorkbenchState.QUERY.equals(intent.getAction())){
+    if(!closing&&initialized){setResultExtras(liveState(slots.size()));setResultCode(1);}
+    return;
+   }
+   if(addExistingTask(intent)){revealAddedCard(intent);setResultCode(1);}
+   // 3 tells the launcher the host answered and refused: it must raise the container
+   // rather than fall through to the root path. 0 stays reserved for "no host at all".
+   else setResultCode(3);
+  }
+ };
  private Slot pendingEntrance;
  private boolean entranceFrontReady,entranceFrameReady,entranceFramePending,createdFromGesture;
+ private boolean gestureHandoff;
+ private android.os.ResultReceiver handoffReady;
+ private long handoffDeadline;
  private final class Slot {
-  final int id; final ComponentName component; final String label; int taskId=-1,sourceTaskId=-1,sourceUserId=-1,orientationAxis; ComponentName activeComponent; final Rect renderBounds=new Rect(); boolean failed,released,pinned,windowDrawn,entranceWaitScheduled,entranceDrawTimedOut;
+  final int id; final ComponentName component; final String label; int taskId=-1,sourceTaskId=-1,sourceUserId=-1,orientationAxis; ComponentName activeComponent; final Rect renderBounds=new Rect(); boolean failed,released,pinned,windowDrawn,handoffPolling,entranceWaitScheduled,entranceDrawTimedOut;
   SurfaceControl.Transaction transaction; volatile boolean embedded=true; SurfaceControl projectedLeash; boolean perspectiveApplied; int leashWrites;
   PreviewCard card; ImageView icon; RecoveryCover recoveryCover; TextView pin; View surface;
   int pendingTask=-1; boolean quietDetach;
@@ -91,6 +119,8 @@ public final class WorkbenchActivity extends Activity {
   // Root am broadcast may report an unknown sender UID (-1) in onReceive.
   IntentFilter addFilter=new IntentFilter(ADD_TO_LIVE_WORKBENCH);addFilter.addAction(REVEAL_ADDED_CARD);
   registerReceiver(addReceiver,addFilter,android.Manifest.permission.DUMP,handler,Context.RECEIVER_EXPORTED);addReceiverRegistered=true;
+  IntentFilter launcherFilter=new IntentFilter("dev.windowdeck.app.LAUNCHER_ADD_TO_WORKBENCH");launcherFilter.addAction(LiveWorkbenchState.QUERY);launcherFilter.addAction(LauncherExistingAppHook.SELECT);
+  registerReceiver(launcherReceiver,launcherFilter,android.Manifest.permission.REORDER_TASKS,handler,Context.RECEIVER_EXPORTED);launcherReceiverRegistered=true;
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
   LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0);setContentView(root);getWindow().setBackgroundDrawable(new ColorDrawable(Ui.CHROME));Ui.overlaySystemBars(this,false);
@@ -103,6 +133,8 @@ public final class WorkbenchActivity extends Activity {
   });
   layoutMode=state==null?PaneLayout.LEFT_RIGHT:state.getInt("layoutMode",PaneLayout.LEFT_RIGHT);
   if(layoutMode!=PaneLayout.TOP_BOTTOM)layoutMode=PaneLayout.LEFT_RIGHT;
+  atomicRotate=getIntent().getBooleanExtra(AtomicPresentation.EXTRA,AtomicPresentation.DEFAULT);
+  Log.i(TAG,"atomic_rotate="+atomicRotate+" extra="+AtomicPresentation.EXTRA);
   stage=new FrameLayout(this);root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
   addCard=Ui.button(this,"＋");addCard.setTextSize(28);addCard.setTextColor(Ui.FROST_PLUS);addCard.setGravity(Gravity.CENTER);addCard.setIncludeFontPadding(false);addCard.setPadding(0,0,0,0);addCard.setContentDescription("添加应用");addCard.setBackground(Ui.frost(Ui.dp(this,Ui.SIDE_RADIUS)));Ui.round(addCard,Ui.dp(this,Ui.SIDE_RADIUS));addCard.setOnClickListener(v->{hangReplace=false;hangForAdd();});stage.addView(addCard);
   more=Ui.more(this);more.setOnClickListener(v->primaryMenu());
@@ -114,6 +146,10 @@ public final class WorkbenchActivity extends Activity {
    rotateTaskLeash=viewApi.getDeclaredField("mNeedRotateTaskLeash");rotateTaskLeash.setAccessible(true);cornerRadius=viewApi.getDeclaredField("mCornerRadius");cornerRadius.setAccessible(true);
    try{taskLeash=viewApi.getDeclaredField("mTaskLeash");taskLeash.setAccessible(true);reparentAlign=viewApi.getDeclaredField("mReparentAlign");reparentAlign.setAccessible(true);}
    catch(Throwable e){Log.w(TAG,"leash_fields_unavailable",e);}
+   // Read by the view's own surface-destroyed guard before it reports task
+   // visibility; held down during teardown, see releaseSlot.
+   try{superLocked=viewApi.getDeclaredField("mSuperLocked");superLocked.setAccessible(true);}
+   catch(Throwable e){Log.w(TAG,"super_lock_unavailable",e);}
    try{
     viewTransaction=viewApi.getDeclaredField("mTransaction");viewTransaction.setAccessible(true);
     leashMatrix=SurfaceControl.Transaction.class.getDeclaredMethod("setMatrix",SurfaceControl.class,float.class,float.class,float.class,float.class);leashMatrix.setAccessible(true);
@@ -121,18 +157,20 @@ public final class WorkbenchActivity extends Activity {
     leashRadius=SurfaceControl.Transaction.class.getDeclaredMethod("setCornerRadius",SurfaceControl.class,float.class);
     Log.i(TAG,"leash_perspective_api=matrix4x4");
    }catch(Throwable e){Log.w(TAG,"leash_perspective_unavailable",e);}
-   backdrop=new WorkbenchBackdrop();backdrop.attach(this,manager);
+   backdrop=new WorkbenchBackdrop();backdrop.onReady=this::requestEntranceFrame;backdrop.attach(this,manager);
    String[] input=state!=null?state.getStringArray("components"):null;
-   if(input==null)input=new String[]{getIntent().getStringExtra("windowdeck_app_a"),getIntent().getStringExtra("windowdeck_app_b"),getIntent().getStringExtra("windowdeck_app_c")};
+   if(input==null)input=new String[]{getIntent().getStringExtra("windowdeck_app_a"),getIntent().getStringExtra("windowdeck_app_b"),getIntent().getStringExtra("windowdeck_app_c"),getIntent().getStringExtra("windowdeck_app_d"),getIntent().getStringExtra("windowdeck_app_e")};
    int initialSource=state==null?getIntent().getIntExtra("windowdeck_create_source_task",-1):-1;
    if(initialSource>=0){
     Slot fresh=validateSourceTask(initialSource,getIntent().getIntExtra("windowdeck_create_source_user",-1));
-    slots.add(fresh);pendingEntrance=fresh;createdFromGesture=true;
+    slots.add(fresh);pendingEntrance=fresh;createdFromGesture=true;gestureHandoff=true;
+    handoffReady=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
+    handoffDeadline=SystemClock.uptimeMillis()+2000;
     input=new String[0];
    }
    int[] savedSources=state==null?null:state.getIntArray("sourceTaskIds");
    for(String component:input)if(component!=null&&!component.isEmpty()){
-    if(slots.size()==3)break;Slot restored=validate(ComponentName.unflattenFromString(component),null);
+    if(slots.size()>=Caps.MAX_TASKS)break;Slot restored=validate(ComponentName.unflattenFromString(component),null);
     int index=slots.size();if(savedSources!=null&&index<savedSources.length&&savedSources[index]>=0){restored.sourceTaskId=savedSources[index];restored.sourceUserId=android.os.Process.myUid()/100000;}
     slots.add(restored);
    }
@@ -143,10 +181,10 @@ public final class WorkbenchActivity extends Activity {
    stage.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
     if(closing||r-l<100||b-t<100)return;
     if(initialized&&r-l==or-ol&&b-t==ob-ot)return;
-    if(!initialized){initialized=true;updateNaturalBounds();for(Slot s:new ArrayList<>(slots))createWindow(s);if(pendingEntrance!=null&&pendingEntrance.card!=null)pendingEntrance.card.setAlpha(0f);}
+    if(!initialized){initialized=true;updateNaturalBounds();for(Slot s:new ArrayList<>(slots))createWindow(s);if(!gestureHandoff&&pendingEntrance!=null&&pendingEntrance.card!=null)pendingEntrance.card.setAlpha(0f);}
     scheduleLayout();
    });
-   Log.i(TAG,"workbench_created version=0.4.8-beta.2 container="+getTaskId()+" count="+slots.size());
+   Log.i(TAG,"workbench_created version="+HookEntry.VERSION+" container="+getTaskId()+" count="+slots.size()+" cap="+Caps.MAX_TASKS);
   }catch(Throwable e){fail(e);if(getIntent().hasExtra("windowdeck_create_source_task"))finish();}
  }
  private Slot validate(ComponentName c,Slot replacing) throws Exception {
@@ -176,12 +214,12 @@ public final class WorkbenchActivity extends Activity {
    fresh.orientationAxis=OrientationPolicy.axis(getPackageManager().getActivityInfo(task.topActivity,0).screenOrientation);
    return fresh;
  }
- private void addExistingTask(Intent request){
+ private boolean addExistingTask(Intent request){
   int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
   int expectedContainer=request.getIntExtra("windowdeck_container_task_id",-1);
   if((pendingEntrance!=null&&pendingEntrance.taskId>=0)||addAnimation!=null){Log.i(TAG,"add_entrance_preempted slot="+(pendingEntrance==null?-1:pendingEntrance.id));if(addAnimation!=null){ValueAnimator old=addAnimation;addAnimation=null;old.cancel();}releaseEntrance();}
   boolean replace=request.getBooleanExtra("windowdeck_hang_replace",false);
-  if(id<0||user<0||expectedContainer!=getTaskId()||closing||recovering||!initialized||pendingEntrance!=null||addAnimation!=null||(!replace&&slots.size()>=3)){Log.w(TAG,"add_task_rejected id="+id+" user="+user+" container="+expectedContainer+" closing="+closing+" recovering="+recovering+" initialized="+initialized+" entrance="+(pendingEntrance!=null)+" anim="+(addAnimation!=null)+" count="+slots.size()+" replace="+replace);return;}
+  if(id<0||user<0||expectedContainer!=getTaskId()||closing||recovering||!initialized||pendingEntrance!=null||addAnimation!=null||(!replace&&slots.size()>=Caps.MAX_TASKS)){Log.w(TAG,"add_task_rejected id="+id+" user="+user+" container="+expectedContainer+" closing="+closing+" recovering="+recovering+" initialized="+initialized+" entrance="+(pendingEntrance!=null)+" anim="+(addAnimation!=null)+" count="+slots.size()+" replace="+replace);return false;}
   try{
    Slot fresh=validateSourceTask(id,user);
    cancelAnimation();
@@ -193,14 +231,19 @@ public final class WorkbenchActivity extends Activity {
    }else if(hang&&!slots.isEmpty()){
     Slot oldMain=slots.remove(primary);slots.add(0,fresh);slots.add(oldMain);primary=0;
    }else{slots.add(fresh);primary=slots.size()-1;}
-   pendingEntrance=fresh;entranceFrontReady=false;entranceFrameReady=false;
+   pendingEntrance=fresh;entranceFrontReady=false;entranceFrameReady=false;gestureHandoff=!hang&&!replace;
+   handoffReady=gestureHandoff?request.getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class):null;
+   handoffDeadline=SystemClock.uptimeMillis()+2000;
    publishState(slots.size());updateNaturalBounds();createWindow(fresh);layoutCards(false);refreshStatus();
    if(replaced!=null){replaced.quietDetach=true;releaseSlot(replaced);}
    if(fresh.card!=null)fresh.card.setAlpha(1f);
    boolean edge=(hang||replace)&&slots.size()>1,hungMain=hang&&!replace;
-   if(!poseScreenArrival(fresh,edge,hungMain)){Slot arriving=fresh;stage.post(()->poseScreenArrival(arriving,edge,hungMain));}
+   // Launcher already owns the gesture's moving task. Do not restart it from fullscreen
+   // inside the host. Shelf add/replace retains its separate, user-triggered transition.
+   if(!gestureHandoff&&!poseScreenArrival(fresh,edge,hungMain)){Slot arriving=fresh;stage.post(()->poseScreenArrival(arriving,edge,hungMain));}
    Log.i(TAG,"add_existing_requested slot="+fresh.id+" task="+id+" user="+user+" container="+getTaskId()+" replace="+replace);
-  }catch(Throwable e){Log.w(TAG,"add_existing_failed task="+id,e);if(!hangQuiet)Toast.makeText(this,"未能加入："+(e.getMessage()==null?"原应用保持不变":e.getMessage()),Toast.LENGTH_LONG).show();}
+   return true;
+  }catch(Throwable e){Log.w(TAG,"add_existing_failed task="+id,e);if(!hangQuiet)Toast.makeText(this,"未能加入："+(e.getMessage()==null?"原应用保持不变":e.getMessage()),Toast.LENGTH_LONG).show();return false;}
  }
  private void revealAddedCard(Intent request){
   Slot slot=pendingEntrance;
@@ -216,23 +259,120 @@ public final class WorkbenchActivity extends Activity {
  }
  private void requestEntranceFrame(){
   if(pendingEntrance==null||!entranceFrontReady||stopped||backgrounded||closing||stage.getWidth()==0||entranceFramePending)return;
+  if(gestureHandoff&&(pendingEntrance.taskId<0||!pendingEntrance.windowDrawn||(backdrop!=null&&!backdrop.ready)))return;
   Slot expected=pendingEntrance;entranceFramePending=true;
   stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+   if(pendingEntrance!=expected)return;
+   if(gestureHandoff){commitHandoffLayout(expected);return;}
    entranceFramePending=false;
    if(pendingEntrance!=expected||stopped||backgrounded||closing)return;
    entranceFrameReady=true;maybeAnimateAddedCard();
   }));stage.invalidate();
  }
+ // A drawn new task alone says nothing about the old main's SurfaceView. Wait
+ // for every card to reach its final role and size, commit all leash fits together,
+ // then require a host frame with the same geometry before releasing the cover.
+ private String handoffLayoutKey(){
+  if(layoutPosted||stage.isLayoutRequested()||animation!=null||addAnimation!=null)return null;
+  int[][] target=cardGeometry().cards;
+  if(target.length!=slots.size())return null;
+  StringBuilder key=new StringBuilder().append(primary).append(':').append(stage.getWidth()).append('x').append(stage.getHeight());
+  for(int i=0;i<slots.size();i++){
+   Slot s=slots.get(i);int[] r=target[i];
+   if(s.released||s.taskId<0||s.card==null||s.surface==null||s.card.isLayoutRequested()||s.surface.isLayoutRequested()
+    ||s.card.getLeft()!=r[0]||s.card.getTop()!=r[1]||s.card.getWidth()!=r[2]||s.card.getHeight()!=r[3])return null;
+   int[] plate=surfacePlate(s);
+   if(s.surface.getWidth()!=plate[0]||s.surface.getHeight()!=plate[1])return null;
+   try{
+    SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface),surface=((SurfaceView)s.surface).getSurfaceControl();
+    if(leash==null||!leash.isValid()||surface==null||!surface.isValid())return null;
+    key.append('|').append(s.id).append(':').append(s.taskId).append(':').append(Arrays.toString(r))
+     .append(':').append(s.orientationAxis).append(':').append(s.renderBounds).append(':').append(Arrays.toString(plate))
+     .append(':').append(System.identityHashCode(leash)).append(':').append(System.identityHashCode(surface));
+   }catch(Throwable e){return null;}
+  }
+  return key.toString();
+ }
+ private void retryHandoffLayout(Slot expected){
+  if(pendingEntrance!=expected)return;
+  entranceFramePending=false;entranceFrameReady=false;
+  if(SystemClock.uptimeMillis()>=handoffDeadline){
+   Log.w(TAG,"handoff_layout_timeout task="+expected.taskId);
+   android.os.ResultReceiver reply=handoffReady;handoffReady=null;gestureHandoff=false;
+   abandonEntrance(expected);if(reply!=null)reply.send(2,Bundle.EMPTY);return;
+  }
+  stage.postOnAnimation(this::requestEntranceFrame);
+ }
+ private void commitHandoffLayout(Slot expected){
+  if(stopped||backgrounded||closing){entranceFramePending=false;return;}
+  String key=handoffLayoutKey();
+  if(key==null){retryHandoffLayout(expected);return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted slot "+s.id);
+   fit.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(pendingEntrance!=expected)return;
+    if(stopped||backgrounded||closing){entranceFramePending=false;return;}
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+     if(pendingEntrance!=expected)return;
+     if(stopped||backgrounded||closing){entranceFramePending=false;return;}
+     if(!key.equals(handoffLayoutKey())||(backdrop!=null&&!backdrop.ready)){retryHandoffLayout(expected);return;}
+     entranceFramePending=false;entranceFrameReady=true;
+     Log.i(TAG,"handoff_layout_committed task="+expected.taskId+" cards="+slots.size()+" axis="+expected.orientationAxis);
+     maybeAnimateAddedCard();
+    }));stage.invalidate();
+   });fit.apply();
+  }catch(Throwable e){Log.w(TAG,"handoff_layout_commit_failed",e);retryHandoffLayout(expected);}
+ }
  private void maybeAnimateAddedCard(){
   Slot slot=pendingEntrance;
   if(screenArrival&&slot!=null&&entranceFrontReady&&!stopped&&!backgrounded&&!closing){pendingEntrance=null;createdFromGesture=false;entranceFrontReady=false;beginHangEntrance();return;}
   if(slot==null||!entranceFrontReady||stopped||backgrounded||closing||slot.released||slot.taskId<0)return;
+  if(gestureHandoff&&!slot.windowDrawn){pollHandoffDraw(slot);return;}
   if(!entranceFrameReady){requestEntranceFrame();return;}
   if(!slot.windowDrawn&&!slot.entranceDrawTimedOut){
    if(!slot.entranceWaitScheduled){slot.entranceWaitScheduled=true;handler.postDelayed(()->{if(pendingEntrance==slot){slot.entranceDrawTimedOut=true;maybeAnimateAddedCard();}},120);}
    return;
   }
-  pendingEntrance=null;createdFromGesture=false;animateAddedCard(slot);
+  pendingEntrance=null;createdFromGesture=false;
+  if(gestureHandoff){
+   gestureHandoff=false;entranceFrontReady=false;entranceFrameReady=false;
+   if(slot.card!=null)slot.card.setAlpha(1f);
+   raiseMain();layoutCaption();
+   for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
+   focusPrimary("gesture_handoff");
+   Log.i(TAG,"gesture_handoff_visible task="+slot.taskId+" host_animation=false");
+   if(handoffReady!=null){android.os.ResultReceiver reply=handoffReady;handoffReady=null;reply.send(1,Bundle.EMPTY);}
+  }else animateAddedCard(slot);
+ }
+ private void pollHandoffDraw(Slot slot){
+  if(slot.handoffPolling)return;
+  slot.handoffPolling=true;
+  long deadline=SystemClock.uptimeMillis()+2000;
+  Runnable check=new Runnable(){public void run(){
+   if(closing||slot.released||pendingEntrance!=slot||!gestureHandoff){slot.handoffPolling=false;return;}
+   try{
+    Field draw=viewApi.getDeclaredField("mDrawState");draw.setAccessible(true);
+    int state=draw.getInt(slot.surface);
+    SurfaceControl leash=(SurfaceControl)taskLeash.get(slot.surface);
+    SurfaceControl plate=((SurfaceView)slot.surface).getSurfaceControl();
+    if((state==1||state==2)&&leash!=null&&leash.isValid()&&plate!=null&&plate.isValid()){
+     syncSurface(slot);
+     try(SurfaceControl.Transaction committed=new SurfaceControl.Transaction()){
+      writeLeashFit(slot,committed);
+      committed.addTransactionCommittedListener((Executor)handler::post,()->{
+       if(closing||pendingEntrance!=slot||slot.released)return;
+       slot.windowDrawn=true;slot.handoffPolling=false;
+       Log.i(TAG,"handoff_task_surface_committed task="+slot.taskId+" drawState="+state);
+       requestEntranceFrame();
+      });committed.apply();
+     }
+     return;
+    }
+   }catch(Throwable e){Log.w(TAG,"handoff_draw_state_unavailable",e);slot.handoffPolling=false;return;}
+   if(SystemClock.uptimeMillis()<deadline)stage.postOnAnimation(this);
+   else{slot.handoffPolling=false;Log.w(TAG,"handoff_draw_state_timeout task="+slot.taskId);}
+  }};
+  stage.postOnAnimation(check);
  }
  private void releaseEntrance(){
   hangEntranceGeneration++;hangEntranceDue=false;entranceFrontReady=false;entranceFrameReady=false;entranceFramePending=false;
@@ -347,14 +487,15 @@ public final class WorkbenchActivity extends Activity {
  }
  private void hangForAdd(){
   if(closing||!initialized||recovering||dragging!=null||hanging)return;
-  if(!hangReplace&&slots.size()>=3){Toast.makeText(this,"最多同时打开三个应用",Toast.LENGTH_SHORT).show();return;}
+  if(!hangReplace&&slots.size()>=Caps.MAX_TASKS){Toast.makeText(this,"最多同时打开五个应用",Toast.LENGTH_SHORT).show();return;}
   ArrayList<HangShelf.Card> cards=new ArrayList<>();
   Slot main=slots.get(primary);cards.add(new HangShelf.Card(hangFace(main),main.component.getPackageName(),screenRect(main.card),true));
   for(Slot s:slots)if(s!=main&&s.card!=null)cards.add(new HangShelf.Card(hangFace(s),s.component.getPackageName(),screenRect(s.card),false));
   try{hangShelf.show(this,cards,effectiveMode()==PaneLayout.TOP_BOTTOM,this::restoreFromHang);}
   catch(Throwable e){Log.w(TAG,"hang_show_failed",e);hangShelf.hide();if(hangReplace){hangReplace=false;chooseApp(slots.get(primary));}else chooseApp(null);return;}
   hanging=true;hangSawHome=false;hangStarted=SystemClock.uptimeMillis();hangTask=-1;hangUser=-1;hangNote=null;hangStableId=-1;hangStableHits=0;handler.removeCallbacks(hangConsume);
-  if(!backgroundWorkbench(hangReplace?"hang_replace":"hang_add")){hanging=false;hangReplace=false;hangShelf.hide();return;}
+  publishState(slots.size());
+  if(!backgroundWorkbench(hangReplace?"hang_replace":"hang_add")){hanging=false;hangReplace=false;hangShelf.hide();publishState(slots.size());return;}
   handler.removeCallbacks(hangWatch);handler.postDelayed(hangWatch,400);
   Log.i(TAG,"hang_add container="+getTaskId()+" count="+slots.size()+" replace="+hangReplace);
  }
@@ -373,11 +514,20 @@ public final class WorkbenchActivity extends Activity {
    if(id!=lastHangFocus){lastHangFocus=id;Log.i(TAG,"hang_focus task="+id+" top="+topActivity.flattenToShortString()+" type="+top.getClass().getMethod("getActivityType").invoke(top)+" mode="+top.getClass().getMethod("getWindowingMode").invoke(top));}
    boolean home=isHomeTask(top)||id==getTaskId();
    if(home)hangSawHome=isHomeTask(top)||hangSawHome;
-   if(!hangSawHome&&SystemClock.uptimeMillis()-hangStarted>800)hangSawHome=true;
-   boolean embedded=false;for(Slot s:slots)if(s.taskId==id)embedded=true;
-   if(home||embedded||!hangSawHome){hangStableId=-1;hangStableHits=0;handler.postDelayed(hangWatch,300);return;}
+   // A child of ours stays focused while the group is still leaving. Counting that as
+   // "the user re-opened this app" would cancel the add before the launcher is even up,
+   // so a focused child only counts once the workbench has provably gone to the back.
+   Slot focused=null;for(Slot s:slots)if(s.taskId==id)focused=s;
+   if(!hangSawHome){long waited=SystemClock.uptimeMillis()-hangStarted;if(waited<=(focused!=null?1200:800)){hangStableId=-1;hangStableHits=0;handler.postDelayed(hangWatch,300);return;}hangSawHome=true;}
+   if(home){hangStableId=-1;hangStableHits=0;handler.postDelayed(hangWatch,300);return;}
    String pkg=topActivity.getPackageName();
-   for(Slot s:slots)if(s.component.getPackageName().equals(pkg)){hanging=false;hangReplace=false;handler.removeCallbacks(hangWatch);hangShelf.hide();hangNote="已在工作台";Log.i(TAG,"hang_existing pkg="+pkg+" task="+id);bringWorkbenchForward();return;}
+   // The original keeps exactly one window per app: re-opening an app that is already in
+   // the workbench raises the window it holds instead of adding a second one, and only
+   // speaks up when that window is already the main one. It never rejects into a dead end.
+   Slot existing=focused;if(existing==null)for(Slot s:slots)if(s.component.getPackageName().equals(pkg)){existing=s;break;}
+   if(existing!=null){
+    finishExistingHang(existing,false);return;
+   }
    String block=embedBlock(top);
    if(block!=null){hangStableId=-1;hangStableHits=0;Log.i(TAG,"hang_wait task="+id+" pkg="+pkg+" reason="+block);handler.postDelayed(hangWatch,300);return;}
    if(id!=hangStableId){hangStableId=id;hangStableHits=1;handler.postDelayed(hangWatch,300);return;}
@@ -415,8 +565,10 @@ public final class WorkbenchActivity extends Activity {
   return new Rect(loc[0],loc[1],loc[0]+w,loc[1]+h);
  }
  private void acceptHang(int task,int user,String pkg){
-  hanging=false;handler.removeCallbacks(hangWatch);hangShelf.hide();
-  for(Slot s:slots)if(s.component.getPackageName().equals(pkg)){hangReplace=false;hangNote="已在工作台";Log.i(TAG,"hang_existing pkg="+pkg);bringWorkbenchForward();return;}
+  for(Slot s:slots)if(s.component.getPackageName().equals(pkg)){
+   finishExistingHang(s,false);return;
+  }
+  hanging=false;handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();publishState(slots.size());
   hangTask=task;hangUser=user;hangConsumeTries=0;Log.i(TAG,"hang_pick task="+task+" pkg="+pkg);ensureHangConsumed();
  }
  private void ensureHangConsumed(){
@@ -435,10 +587,40 @@ public final class WorkbenchActivity extends Activity {
  }
  private void restoreFromHang(){
   if(!hanging)return;
-  hanging=false;hangReplace=false;handler.removeCallbacks(hangWatch);hangShelf.hide();
+  hanging=false;hangReplace=false;handler.removeCallbacks(hangWatch);hangShelf.hide();publishState(slots.size());
   Log.i(TAG,"hang_restored");bringWorkbenchForward();
  }
  private void bringWorkbenchForward(){try{reorderTask(getTaskId(),true);Log.i(TAG,"hang_front container="+getTaskId());}catch(Throwable e){Log.w(TAG,"hang_front_failed",e);}}
+ private boolean selectExistingFromLauncher(Intent request){
+  if(closing||!initialized||request.getIntExtra("containerTaskId",-1)!=getTaskId()||request.getLongExtra("instanceToken",0)!=stateToken)return false;
+  long session=request.getLongExtra("selectionSession",0);int task=request.getIntExtra("selectedTask",-1);
+  // Two queued clicks from one picker session must never replay a fullscreen start.
+  if(session!=0&&session==lastExistingSession&&lastExistingTask>=0)return true;
+  if(!hanging||session!=hangStarted)return false;
+  String pkg=request.getStringExtra("selectedPackage");
+  for(Slot s:slots)if(!s.released&&s.taskId==task&&s.component.getPackageName().equals(pkg)){
+   if(recovering||dragging!=null){Toast.makeText(this,"请等待窗口恢复后再选择",Toast.LENGTH_SHORT).show();return true;}
+   lastExistingSession=session;lastExistingTask=task;finishExistingHang(s,true);return true;
+  }
+  return false;
+ }
+ private void finishExistingHang(Slot selected,boolean beforeLaunch){
+  boolean replacing=hangReplace;hanging=false;hangReplace=false;
+  handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();
+  int index=slots.indexOf(selected);boolean promote=!replacing&&index>=0&&index!=primary&&!recovering&&dragging==null&&selected.taskId>=0;
+  if(promote)promote(index);else hangNote=selected.label+" 已在前台启动";
+  publishState(slots.size());
+  Log.i(TAG,"hang_existing task="+selected.taskId+" slot="+selected.id+" before_launch="+beforeLaunch+" replace="+replacing+" promote="+promote);
+  if(beforeLaunch){
+   // The task never received a fullscreen launch: retain its existing embedding.
+   raiseHangContainer();
+  }else{
+   // Non-launcher entrances may already have detached the task. Rebind the SAME
+   // task with scenario/container options; Surface reparent alone cannot do that.
+   selected.pendingTask=selected.taskId;pendingHangFront=selected.taskId;
+   bringWorkbenchForward();handler.post(this::restorePendingTasks);
+  }
+ }
  // Focusing this container makes ColorOS mark each embedded task always-on-top and move it to the front.
  // After the new task is in, drop that flag and raise only the container. Block the resume restart that would undo it.
  private void raiseHangContainer(){
@@ -474,7 +656,7 @@ public final class WorkbenchActivity extends Activity {
  private void chooseApp(Slot replacing){
   if(closing||!initialized||recovering||dragging!=null)return;
   if(replacing!=null&&replacing.pinned){Toast.makeText(this,"请先取消固定",Toast.LENGTH_SHORT).show();return;}
-  if(replacing==null&&slots.size()>=3){Toast.makeText(this,"最多同时打开三个应用",Toast.LENGTH_SHORT).show();return;}
+  if(replacing==null&&slots.size()>=Caps.MAX_TASKS){Toast.makeText(this,"最多同时打开五个应用",Toast.LENGTH_SHORT).show();return;}
   Set<String> excluded=new HashSet<>();for(Slot s:slots)excluded.add(s.component.getPackageName());
   AppPicker.show(this,excluded,(c,label)->{
    if(closing||recovering||dragging!=null||(replacing!=null&&replacing.pinned))return;
@@ -783,7 +965,7 @@ public final class WorkbenchActivity extends Activity {
   return new int[]{Math.max(1,w),Math.max(1,h)};
  }
  @Override protected void onPause(){dismissPrimaryMenu();cancelDrag();if(!screenArrival)cancelAnimation();if(initialized&&!closing&&!screenArrival)layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
+ @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;if(initialized&&!closing)publishState(slots.size());if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.post(this::maybeAnimateAddedCard);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
  @Override protected void onStop(){stopped=true;for(Slot s:slots)clearProjection(s);backGeneration++;forwardingBack=false;super.onStop();}
  // Do not refocus on every host touch: doing so cancels a preview's click or
  // long-press stream. Resume, settled promotion and dialog dismissal own focus.
@@ -809,10 +991,17 @@ public final class WorkbenchActivity extends Activity {
   fitRecoveryCover(s,w,h);
   scheduleLeashFit(s,w,h);
  }
+ /** Target quad for a side plate. Without the switch, or without the ROM's
+  *  projective leash API, the plate stays a plain rectangle. With it, the
+  *  left-right rail shares one vertical vanishing point across the column, and
+  *  the top-bottom rail tapers its bottom edge toward the main window below. */
  private float[] displayQuad(Slot s,int w,int h){
-  return slots.indexOf(s)!=primary&&effectiveMode()==PaneLayout.LEFT_RIGHT&&leashMatrix4!=null
-   ?CardPerspective.columnQuad(w,h,getResources().getDisplayMetrics().density,stage.getHeight()/2f-s.card.getTop())
-   :new float[]{0,0,w,0,w,h,0,h};
+  if(!AtomicPresentation.perspective(atomicRotate,slots.indexOf(s)!=primary)||leashMatrix4==null)
+   return new float[]{0,0,w,0,w,h,0,h};
+  float density=getResources().getDisplayMetrics().density;
+  if(effectiveMode()==PaneLayout.LEFT_RIGHT)
+   return CardPerspective.columnQuad(w,h,density,stage.getHeight()/2f-s.card.getTop());
+  return CardPerspective.quad(w,h,effectiveMode(),density);
  }
  private void fitRecoveryCover(Slot s,int w,int h){
   if(s.recoveryCover==null)return;
@@ -834,27 +1023,27 @@ public final class WorkbenchActivity extends Activity {
    leashMatrix4.invoke(reset,leash,(Object)identity4());reset.apply();s.projectedLeash=null;s.perspectiveApplied=false;
   }catch(Throwable e){Log.w(TAG,"projection_clear_failed slot="+s.id,e);}
  }
- private void writeLeashFit(Slot s,SurfaceControl.Transaction t){
-  if(closing||stopped||backgrounded||!s.embedded||s.released||s.surface==null||s.card==null||taskLeash==null)return;
-  int w=s.surface.getWidth(),h=s.surface.getHeight();if(w<2||h<2)return;
+ private boolean writeLeashFit(Slot s,SurfaceControl.Transaction t){
+  if(closing||stopped||backgrounded||!s.embedded||s.released||s.surface==null||s.card==null||taskLeash==null)return false;
+  int w=s.surface.getWidth(),h=s.surface.getHeight();if(w<2||h<2)return false;
   boolean preview=slots.indexOf(s)!=primary,rotate=rotatePresentation(s);
   try{
    SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface);
    SurfaceControl plate=((SurfaceView)s.surface).getSurfaceControl();
-   if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return;
+   if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return false;
    t.setCrop(plate,new Rect(0,0,w,h));
    try{Field bg=SurfaceView.class.getDeclaredField("mBackgroundControl");bg.setAccessible(true);SurfaceControl background=(SurfaceControl)bg.get(s.surface);if(background!=null&&background.isValid())t.setVisibility(background,false);}catch(Throwable ignored){}
-   boolean perspective=preview&&effectiveMode()==PaneLayout.LEFT_RIGHT&&leashMatrix4!=null;
+   boolean perspective=AtomicPresentation.perspective(atomicRotate,preview)&&leashMatrix4!=null;
    if(!perspective&&leashMatrix4!=null)leashMatrix4.invoke(t,leash,(Object)identity4());
    s.perspectiveApplied=perspective;
-   if(s.renderBounds.isEmpty())return;
+   if(s.renderBounds.isEmpty())return false;
    int[] src=presentationSize(s),crop=preview?SurfaceFit.coverCrop(src[0],src[1],w,h):new int[]{0,0,src[0],src[1]};
    float x=crop[0],y=crop[1],r=x+crop[2],b=y+crop[3];
    float[] source=SurfaceFit.sourceQuad(src[0],crop,rotate);
    Rect rect=rotate?new Rect((int)y,src[0]-(int)r,(int)b,src[0]-(int)x):new Rect((int)x,(int)y,(int)r,(int)b);
    float[] target=displayQuad(s,w,h);
    t.setCrop(plate,new Rect(0,(int)Math.floor(Math.min(0,target[3])),w,(int)Math.ceil(Math.max(h,target[5]))));
-   Matrix map=new Matrix();if(!map.setPolyToPoly(source,0,target,0,4))return;
+   Matrix map=new Matrix();if(!map.setPolyToPoly(source,0,target,0,4))return false;
    float[] m=new float[9];map.getValues(m);
    t.setCrop(leash,rect);
    if(leashRadius!=null)leashRadius.invoke(t,leash,preview?Ui.dp(this,Ui.SIDE_RADIUS)/SurfaceFit.coverScale(crop,w,h):0f);
@@ -864,7 +1053,7 @@ public final class WorkbenchActivity extends Activity {
     Matrix base=new Matrix();base.setPolyToPoly(source,0,new float[]{0,0,w,0,w,h,0,h},0,4);
     float[] affine=new float[9];base.getValues(affine);
     leashMatrix.invoke(t,leash,affine[0],affine[3],affine[1],affine[4]);t.setPosition(leash,affine[2],affine[5]);
-    Matrix inverse=new Matrix();if(!base.invert(inverse))return;
+    Matrix inverse=new Matrix();if(!base.invert(inverse))return false;
     Matrix tilt=new Matrix();tilt.setConcat(inverse,map);tilt.getValues(m);
     float[] m4={m[0],m[1],0,m[2],m[3],m[4],0,m[5],0,0,1,0,m[6],m[7],0,m[8]};
     leashMatrix4.invoke(t,leash,(Object)m4);s.projectedLeash=leash;
@@ -872,7 +1061,8 @@ public final class WorkbenchActivity extends Activity {
     leashMatrix.invoke(t,leash,m[0],m[3],m[1],m[4]);t.setPosition(leash,m[2],m[5]);
    }
    if(++s.leashWrites<=3)Log.i(TAG,"leash_atomic slot="+s.id+" perspective="+perspective+" rotate="+rotate+" plate="+w+"x"+h+" matrix="+java.util.Arrays.toString(m));
-  }catch(Throwable e){Log.w(TAG,"leash_fit_failed slot="+s.id,e);}
+   return true;
+  }catch(Throwable e){Log.w(TAG,"leash_fit_failed slot="+s.id,e);return false;}
  }
  private void apply(Slot s,int[] r){
   if(s.card==null)return;
@@ -888,7 +1078,7 @@ public final class WorkbenchActivity extends Activity {
  private void clipSide(View card,int w,int h,boolean side){
   if(card!=null){
    Ui.round(card,Ui.dp(this,side?Ui.SIDE_RADIUS:Ui.MAIN_RADIUS));
-   boolean projective=side&&effectiveMode()==PaneLayout.LEFT_RIGHT;
+   boolean projective=AtomicPresentation.perspective(atomicRotate,side);
    card.setClipToOutline(!projective);
    if(card instanceof android.view.ViewGroup)((android.view.ViewGroup)card).setClipChildren(!projective);
   }
@@ -942,7 +1132,7 @@ public final class WorkbenchActivity extends Activity {
   if(animation!=null){ValueAnimator old=animation;animation=null;old.cancel();}
   if(screenArrival){screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;for(Slot s:slots)if(s.card!=null)resetCardTransform(s);}
  }
- private void promote(int index){if(closing||recovering||dragging!=null||index<0||index>=slots.size()||index==primary)return;if(slots.get(index).taskId<0){Toast.makeText(this,"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}cancelAnimation();primary=index;layoutCards(true);refreshStatus();Log.i(TAG,"switch primary="+primary+" tasks="+taskIds());}
+ private void promote(int index){if(closing||recovering||dragging!=null||index<0||index>=slots.size()||index==primary)return;if(slots.get(index).taskId<0){Toast.makeText(this,"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}cancelAnimation();CardOrder.promote(slots,primary,index);layoutCards(true);refreshStatus();Log.i(TAG,"switch primary="+primary+" tasks="+taskIds());}
  private String taskIds(){StringBuilder b=new StringBuilder();for(Slot s:slots){if(b.length()>0)b.append(',');b.append(s.taskId);}return b.toString();}
  private void refreshStatus(){runOnUiThread(()->{if(closing||slots.isEmpty())return;boolean ready=true,failed=false;for(Slot s:slots){ready&=s.taskId>=0;failed|=s.failed;}status.setVisibility(ready&&!failed?View.GONE:View.VISIBLE);status.setText(failed?"部分窗口未就绪，可长按卡片替换或移出":ready?slots.size()+" 个实时窗口 · 主应用："+slots.get(primary).label:"正在等待应用窗口…");if(status.getVisibility()==View.VISIBLE)status.bringToFront();});}
  private void fail(Throwable e){while(e.getCause()!=null&&e.getCause()!=e)e=e.getCause();Log.e(TAG,"workbench_error",e);if(status!=null){status.setVisibility(View.VISIBLE);status.setText("无法启动："+e.getClass().getSimpleName()+" · "+e.getMessage());}}
@@ -1004,13 +1194,14 @@ public final class WorkbenchActivity extends Activity {
   }
   s.released=true;
   if(!closing&&!s.quietDetach)recovering=true;
-  if(s.surface!=null){
+  View released=s.surface;
+  if(released!=null){
    try{
     // Unlink first: moving a still-linked task can background the whole group.
     // The ROM's move-to-back path resets it without the unsafe direct
     // fullscreen transition used by resetFlexibleTask.
     if(s.taskId>=0){
-     viewApi.getMethod("interceptBackPressedOnTaskRoot",boolean.class).invoke(s.surface,false);
+     viewApi.getMethod("interceptBackPressedOnTaskRoot",boolean.class).invoke(released,false);
      managerApi.getMethod("removeEmbeddedContainerTask",int.class,int.class).invoke(manager,s.taskId,getTaskId());
      if(!toFront){
       Class<?> atm=Class.forName("android.app.OplusActivityTaskManager");
@@ -1019,13 +1210,24 @@ public final class WorkbenchActivity extends Activity {
     }
     // moveTaskToBack owns the server-side transition. Do not race it with
     // detachFromTaskView's second resetFlexibleTask / fullscreen transition.
-    Method extra=viewApi.getDeclaredMethod("releaseExtraView");extra.setAccessible(true);extra.invoke(s.surface);
+    Method extra=viewApi.getDeclaredMethod("releaseExtraView");extra.setAccessible(true);extra.invoke(released);
    }catch(Throwable e){Log.w(TAG,"detach_failed slot="+s.id,e);}
-   try{viewApi.getMethod("release").invoke(s.surface);}catch(Throwable e){Log.w(TAG,"release_failed slot="+s.id,e);}
+   try{viewApi.getMethod("release").invoke(released);}catch(Throwable e){Log.w(TAG,"release_failed slot="+s.id,e);}
    s.surface=null;
   }
   if(pendingEntrance==s){pendingEntrance=null;entranceFrameReady=false;entranceFramePending=false;}
   if(s.card!=null){stage.removeView(s.card);s.card.resetGesture();}
+  // The view reports task visibility from its surface-destroyed callback, and it
+  // posts that callback to the same executor release() just used to clear the
+  // view's own task token. The callback therefore runs with a null token: the
+  // server takes its null-token branch, walks the container's embedded children
+  // and moves every one of them to back -- the whole workbench drops to the
+  // launcher -- and throws inside updateTaskVisibility, taking the pcanvas process
+  // with it. mSuperLocked is the first thing that callback checks, so hold it down
+  // once the view is detached and nothing will read it again.
+  if(released!=null&&superLocked!=null){
+   try{superLocked.setBoolean(released,true);}catch(Throwable e){Log.w(TAG,"super_lock_failed slot="+s.id,e);}
+  }
   if(s.recoveryCover!=null){s.recoveryCover.setBitmap(null);s.recoveryCover=null;}
   if(s.taskId>=0&&!toFront&&!closing&&!s.quietDetach){
    Runnable restore=()->{
@@ -1098,7 +1300,7 @@ public final class WorkbenchActivity extends Activity {
   removeSlot(s,true);
  }
  private void restorePendingTasks(){
-  if(closing||hangTask>=0)return;
+  if(closing||stopped||backgrounded||hangTask>=0)return;
   for(Slot s:new ArrayList<>(slots)){
    if(s.pendingTask<0||s.released)continue;
    int id=s.pendingTask;s.pendingTask=-1;
@@ -1188,8 +1390,34 @@ public final class WorkbenchActivity extends Activity {
  }
  private void closeWorkbench(){dismissHang();dismissPrimaryMenu();detachCaption();if(closing)return;closing=true;publishState(0);releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
  @Override public void onBackPressed(){handleHostBack();}
- @Override protected void onDestroy(){dismissHang();dismissPrimaryMenu();detachCaption();if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
- private void publishState(int count){Bundle state=new Bundle();state.putInt("containerTaskId",getTaskId());state.putInt("count",count);state.putLong("instanceToken",stateToken);try{if(getContentResolver().call(android.net.Uri.parse("content://dev.windowdeck.app.state"),"publish",null,state)!=null)return;}catch(Throwable e){Log.w(TAG,"publish_provider_failed",e);}Intent message=new Intent(LauncherIngressReceiver.STATE).setComponent(new ComponentName("dev.windowdeck.app","dev.windowdeck.app.LauncherIngressReceiver"));message.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES|Intent.FLAG_RECEIVER_FOREGROUND);message.putExtras(state);try{sendBroadcast(message);Log.i(TAG,"publish_broadcast_sent container="+getTaskId()+" count="+count);}catch(Throwable e){Log.w(TAG,"publish_state_failed",e);}}
+ @Override protected void onDestroy(){dismissHang();dismissPrimaryMenu();detachCaption();if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
+ private void publishState(int count){publishState(count,++statePublishGeneration,0);}
+ private Bundle liveState(int count){
+  Bundle state=new Bundle();state.putInt("containerTaskId",getTaskId());state.putInt("count",count);state.putLong("instanceToken",stateToken);
+  state.putBoolean("hanging",hanging&&count>0);state.putLong("selectionSession",hangStarted);state.putInt("userId",android.os.Process.myUid()/100000);
+  String[] packages=new String[slots.size()];int[] tasks=new int[slots.size()];
+  for(int i=0;i<slots.size();i++){packages[i]=slots.get(i).component.getPackageName();tasks[i]=slots.get(i).taskId;}
+  state.putStringArray("packages",packages);state.putIntArray("tasks",tasks);return state;
+ }
+ private void publishState(int count,int generation,int attempt){
+  if(generation!=statePublishGeneration)return;
+  Bundle state=liveState(count);
+  if(attempt==0)try{LiveWorkbenchState.publish(this,state);}catch(Throwable e){Log.w(TAG,"live_state_publish_failed",e);}
+  try{if(getContentResolver().call(android.net.Uri.parse("content://dev.windowdeck.app.state"),"publish",null,state)!=null)return;}
+  catch(Throwable e){Log.w(TAG,"publish_provider_failed attempt="+attempt,e);}
+  if(attempt==0){
+   Intent message=new Intent(LauncherIngressReceiver.STATE).setComponent(new ComponentName("dev.windowdeck.app","dev.windowdeck.app.LauncherIngressReceiver"));
+   message.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES|Intent.FLAG_RECEIVER_FOREGROUND);message.putExtras(state);
+   // Receiver checks getSentFromUid(). Without identity sharing a fallback can
+   // be rejected even though the originating host is trusted.
+   BroadcastOptions options=BroadcastOptions.makeBasic();options.setShareIdentityEnabled(true);
+   try{sendBroadcast(message,null,options.toBundle());Log.i(TAG,"publish_broadcast_sent container="+getTaskId()+" count="+count);}
+   catch(Throwable e){Log.w(TAG,"publish_state_failed",e);}
+  }
+  // Package replacement can temporarily make the provider unavailable. Retry
+  // the current publication only; an older count must never overwrite an add/exit.
+  if(attempt<3)handler.postDelayed(()->publishState(count,generation,attempt+1),250L*(attempt+1));
+ }
  @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[slots.size()];int[] sourceTaskIds=new int[slots.size()];for(int i=0;i<slots.size();i++){Slot s=slots.get(i);components[i]=s.component.flattenToString();sourceTaskIds[i]=s.sourceTaskId>=0?(s.taskId>=0?s.taskId:s.sourceTaskId):-1;}b.putStringArray("components",components);b.putIntArray("sourceTaskIds",sourceTaskIds);b.putInt("primary",primary);b.putInt("layoutMode",layoutMode);for(Slot s:slots)if(s.pinned)b.putString("pinned",s.component.flattenToString());super.onSaveInstanceState(b);}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds());if(backdrop!=null)backdrop.onConfigurationChanged();if(stage!=null)scheduleLayout();}
 }

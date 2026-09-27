@@ -21,6 +21,11 @@ fi
 version=$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$project_dir/module/AndroidManifest.xml")
 case "$version" in ''|*[!a-zA-Z0-9.-]*) printf '%s\n' 'Invalid APK version' >&2; exit 1;; esac
 out="$project_dir/build/windowdeck"
+# Wipe the intermediates first. Without this a deleted or renamed source leaves
+# its old .class behind, and the jar/d8 step happily packs that stale class into
+# the APK — which then shows up in bytecode checks as a feature that no longer
+# exists. The signed APKs in $out are left alone.
+rm -rf "$out/classes" "$out/dex" "$out/gen"
 mkdir -p "$out/classes" "$out/dex" "$out/gen"
 "$build_tools/aapt2" compile --dir "$project_dir/module/res" -o "$out/resources.zip"
 "$build_tools/aapt2" link -o "$out/base.apk" -I "$sdk_path/platforms/android-35/android.jar" --manifest "$project_dir/module/AndroidManifest.xml" --java "$out/gen" -A "$project_dir/module/assets" "$out/resources.zip"
