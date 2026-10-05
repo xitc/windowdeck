@@ -75,7 +75,11 @@ sh tools/build_module.sh
 
 `tools/rom_contract_audit.py` 用于在安装前核对 C17 桌面的混淆符号表。它需要一份 `apkanalyzer dex packages --defined-only` 的输出文件，用 `--dex` 指定或设置 `LAUNCHER_DEX_DUMP`。
 
-构建使用本地开发签名 `build/windowdeck-test.keystore`，首次构建时生成。请妥善保留自己的密钥以便覆盖升级；密钥和构建产物已从 Git 排除。自行构建的签名与 GitHub 下载版不同，不能直接覆盖安装。当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
+本地构建使用 `build/windowdeck-test.keystore`。文件不存在时脚本会生成一把新密钥；密钥和构建产物已从 Git 排除。请保留自己的密钥，否则下一版不能覆盖安装。
+
+推送到 `main` 后，GitHub Actions 用仓库 Secret `WINDOWDECK_KEYSTORE_BASE64` 里的发布密钥签名并校验证书。版本号来自 manifest 的 `versionName`，tag 为 `v<versionName>`。这个 tag 还没有 Release 时，工作流会发布 APK 和名为 `SHA256SUMS` 的校验文件；带 `beta` 的版本标为 Pre-release，标题为「WindowDeck vX · Beta 测试版」。已有同名 Release 时只完成构建和验签，不重复发布，因此要发新版必须先改版本号，并在 `CHANGELOG.md` 写上 `## v<versionName>`。自己生成的密钥和 GitHub 发布版不同，不能直接覆盖安装。
+
+当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
 
 ## 实现边界
 
