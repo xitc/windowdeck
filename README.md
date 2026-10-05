@@ -77,7 +77,18 @@ sh tools/build_module.sh
 
 本地构建使用 `build/windowdeck-test.keystore`。文件不存在时脚本会生成一把新密钥；密钥和构建产物已从 Git 排除。请保留自己的密钥，否则下一版不能覆盖安装。
 
-推送到 `main` 后，GitHub Actions 用仓库 Secret `WINDOWDECK_KEYSTORE_BASE64` 里的发布密钥签名并校验证书。版本号来自 manifest 的 `versionName`，tag 为 `v<versionName>`。这个 tag 还没有 Release 时，工作流会发布 APK 和名为 `SHA256SUMS` 的校验文件；带 `beta` 的版本标为 Pre-release，标题为「WindowDeck vX · Beta 测试版」。已有同名 Release 时只完成构建和验签，不重复发布，因此要发新版必须先改版本号，并在 `CHANGELOG.md` 写上 `## v<versionName>`。自己生成的密钥和 GitHub 发布版不同，不能直接覆盖安装。
+GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的每日测试版；推送本身不触发发布。GitHub 定时调度可能延迟，并不保证在 04:17 准时完成。工作流必须在默认分支 `main` 上才会按时触发；公开仓库连续 60 天没有活动时，GitHub 可能停用定时工作流，需要重新启用。
+
+- 对比上次成功发布的源码、测试、构建配置和更新记录；内容不变或仅修改 README 时，在安装 SDK 前跳过。检查及构建失败时不推进成功发布基线，下次继续重试。
+- 每日版的 APK 版本例如 `0.4.8-nightly.20261006.abcdef123456`，包含北京时间日期与源码提交；标为 Pre-release，标题为「WindowDeck 2026-10-06 · 每日测试版」，不设为稳定版 Latest。
+- `versionCode` 按已有发布与草稿的最大值递增。版本号只改 Actions 工作区中的 manifest，不向仓库提交版本变更；每日版和手动命名的版本共享递增规则，手动 Beta 也能覆盖已安装的每日版。
+- 使用 Secret `WINDOWDECK_KEYSTORE_BASE64` 里的原发布密钥签名，并校验原发布证书。自己生成的密钥与 GitHub 发布版不同，不能覆盖安装。
+- Release 附带 APK、`SHA256SUMS` 和 `BUILD_INFO.json`。先上传到草稿，附件齐全后才公开；失败留下的草稿可重试，已有公开版本不覆盖。
+- 说明按上次发布以来的提交归类，附适配、安装、已知限制、自动验证状态、源码与构建链接。建议提交使用 `feat: 新增功能`、`fix: 修复问题`、`perf:`、`refactor:`、`ci:`、`build:` 或 `test:`，其余归入「其他变更」。自动分类依赖提交说明，不会自动推断功能效果或真机通过状态。
+
+需要立即检查发布时，在 Actions → Release → Run workflow 选择 `main`，保留默认 `channel=nightly`。需要发布手动命名的 Beta/正式版时，先修改 manifest 的 `versionName`，在 `CHANGELOG.md` 写好 `## v<versionName>`，再选择 `channel=version`；版本名采用 manifest，`versionCode` 自动保持递增。已有同名公开 Release 时在编译前跳过。
+
+`.github/RELEASE_CONTEXT.md` 维护 Release 的共同适配要求、安装步骤与已知限制；适配基线变化时应同步更新。每日自动构建只做发布流程回归、布局回归、APK 编译及验签，真机验收需另行记录。发布流程回归可用 `python3 -m unittest discover -s tests -p 'test_release.py' -v` 在本地运行。
 
 当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
 
