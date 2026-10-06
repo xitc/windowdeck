@@ -89,6 +89,8 @@ GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的�
 
 需要立即检查发布时，在 Actions → Release → Run workflow 选择 `main`，保留默认 `channel=nightly`。需要发布手动命名的 Beta/正式版时，先修改 manifest 的 `versionName`，在 `CHANGELOG.md` 写好 `## v<versionName>`，再选择 `channel=version`；版本名采用 manifest，`versionCode` 自动保持递增。已有同名公开 Release 时在编译前跳过。
 
+LSPosed 模块仓库中的 `Sync releases` 工作流每 30 分钟拉取本仓库已公开的新版 Release，将相同 APK、`SHA256SUMS`、`BUILD_INFO.json` 和发布说明同步到 `Xposed-Modules-Repo/io.github.xitc.windowdeck`。使用模块仓库自身的 `GITHUB_TOKEN`，不需要个人 Token。它只同步 `versionCode-versionName` 格式的发布；旧包名的历史 `v` 标签不迁移。同步失败后下一轮补发，草稿可重试，已有公开版本不覆盖。可在模块仓库 Actions 手动运行，指定 `tag` 重试某个版本；留空检查全部缺失版本。定时调度可能延迟。
+
 `.github/RELEASE_CONTEXT.md` 维护 Release 的共同适配要求、安装步骤与已知限制；适配基线变化时应同步更新。每日自动构建只做发布流程回归、布局回归、APK 编译及验签，真机验收需另行记录。发布流程回归可用 `python3 -m unittest discover -s tests -p 'test_release.py' -v` 在本地运行。
 
 当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
