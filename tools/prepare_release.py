@@ -105,12 +105,24 @@ def plan(releases, mode, day, repository, run_url):
             return {"publish": False, "reason": "与上次发布相比，源码、测试、构建配置及更新记录没有变化。"}
     base = original.split("-", 1)[0]
     version = f"{base}-nightly.{day}.{source[:12]}" if mode == "nightly" else original
-    tag = f"v{version}"
-    if any(r["tag_name"] == tag for r in published):
-        return {"publish": False, "reason": f"{tag} 已发布；不会覆盖已有发布。"}
+    legacy_tag = f"v{version}"
+    def same_version(r):
+        return (metadata(r).get("version_name") == version or
+                r["tag_name"] == legacy_tag or
+                re.fullmatch(r"\d+-" + re.escape(version), r["tag_name"]) is not None)
+    if any(same_version(r) for r in published):
+        return {"publish": False, "reason": f"{version} 已发布；不会覆盖已有发布。"}
     # Both nightly and manually named releases share the same monotonic counter.
     # Include drafts, so a failed publication cannot reuse a reserved code.
     code = max(original_code, max((release_code(r) for r in releases), default=0) + 1)
+    # Retry an existing draft with the same code and tag. Published releases
+    # remain immutable, and the normal counter includes all reserved drafts.
+    retry = next((r for r in releases if r.get("draft") and same_version(r)), None)
+    if retry:
+        if release_source(retry) != source:
+            raise ValueError("Draft version belongs to another source commit")
+        code = release_code(retry)
+    tag = retry["tag_name"] if retry else f"{code}-{version}"
     if not 0 < code <= 2100000000:
         raise ValueError("versionCode is outside Android's supported range")
     info = {"source_sha": source, "source_fingerprint": current_fingerprint,
@@ -121,7 +133,7 @@ def plan(releases, mode, day, repository, run_url):
     if mode == "version" and prerelease:
         title += " · 测试版"
     changes = (commit_notes(source, previous, repository) if mode == "nightly" else
-               changelog_section(Path("CHANGELOG.md").read_text(), tag))
+               changelog_section(Path("CHANGELOG.md").read_text(), legacy_tag))
     compare = (f"https://github.com/{repository}/compare/{quote(previous_release['tag_name'], safe='')}...{source}"
                if previous_release else f"https://github.com/{repository}/commits/{source}")
     notes = f"""## 多窗工作台 · WindowDeck
@@ -129,9 +141,9 @@ def plan(releases, mode, day, repository, run_url):
 **{'每日测试版：自动构建，不代表完成真机验收。' if mode == 'nightly' else '测试版本，尚非稳定版。' if prerelease else '版本发布。'}**
 
 - APK 版本：`{version}` / versionCode {code}
-- 包名：`dev.windowdeck.app`
+- 包名：`io.github.xitc.windowdeck`
 - 下载附件中的 APK；`SHA256SUMS` 用于校验文件完整性。
-- 沿用 GitHub 发布签名，可覆盖安装此前发布版。
+- 沿用 GitHub 发布签名，可覆盖安装相同新包名的版本；不能覆盖旧包名 `dev.windowdeck.app`。
 
 ### 本次变化
 

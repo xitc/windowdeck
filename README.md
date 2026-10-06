@@ -1,8 +1,8 @@
 # 多窗工作台 · WindowDeck
 
-**当前版本：v0.4.8-beta.27 · Beta 测试版**
+**当前版本：v0.4.8-beta.28 · Beta 测试版**
 
-面向 **C17（ColorOS 17 / Android 17）** 的 LSPosed 多应用工作台，基于系统实时任务嵌入能力，让最多五个应用同时出现在主窗和侧窗中。应用包名：`dev.windowdeck.app`。
+面向 **C17（ColorOS 17 / Android 17）** 的 LSPosed 多应用工作台，基于系统实时任务嵌入能力，让最多五个应用同时出现在主窗和侧窗中。应用包名：`io.github.xitc.windowdeck`。
 
 **目前优先支持 C17**：基线为一加 13 `PJZ110_17.0.0.100(SP01CN01)`（C17 = F.04）、Android 17、桌面 17.3.9。旧基线 C.93（Android 16）已不再适配，装上不会生效。
 
@@ -10,7 +10,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.4.8-beta.27`。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.4.8-beta.28`。
 
 ## 环境与验收范围
 
@@ -26,7 +26,7 @@
 4. 重新启动 `com.oplus.pscanvas` 和系统桌面，使两个 Hook 重新加载。
 5. 打开应用，选择两个到五个不同应用。恢复已有组合用“打开 / 恢复当前工作台”，重建组合用“用所选应用新建工作台”。
 
-如果安装过旧包名实验版，请先在 LSPosed 停用旧模块，再启用新版并重启宿主进程。新包名会独立安装，不覆盖旧应用，也不自动迁移应用选择、Root 授权和 LSPosed 配置。
+本版包名从 `dev.windowdeck.app` 改为 `io.github.xitc.windowdeck`，适用于 LSPosed 模块仓库的 GitHub 用户命名规则。新版独立安装，不能覆盖旧包名应用。请先在旧版退出工作台并在 LSPosed 停用旧模块，再安装启用新版，重新授予 Root 权限、勾选作用域并重启两个宿主进程。应用选择和 LSPosed 配置不自动迁移。
 
 启动会替换当前多窗口容器。当前仅适配主用户，不支持工作资料或多用户。
 
@@ -71,7 +71,7 @@ sh tools/test_layout.sh
 sh tools/build_module.sh
 ```
 
-输出：`build/windowdeck/windowdeck-v0.4.8-beta.27.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
+输出：`build/windowdeck/windowdeck-v0.4.8-beta.28.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
 
 `tools/rom_contract_audit.py` 用于在安装前核对 C17 桌面的混淆符号表。它需要一份 `apkanalyzer dex packages --defined-only` 的输出文件，用 `--dex` 指定或设置 `LAUNCHER_DEX_DUMP`。
 
@@ -81,6 +81,7 @@ GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的�
 
 - 对比上次成功发布的源码、测试、构建配置和更新记录；内容不变或仅修改 README 时，在安装 SDK 前跳过。检查及构建失败时不推进成功发布基线，下次继续重试。
 - 每日版的 APK 版本例如 `0.4.8-nightly.20261006.abcdef123456`，包含北京时间日期与源码提交；标为 Pre-release，标题为「WindowDeck 2026-10-06 · 每日测试版」，不设为稳定版 Latest。
+- Release 标签采用 LSPosed 要求的 `versionCode-versionName`，例如 `83-0.4.8-beta.28`；历史 `v` 前缀标签保留。
 - `versionCode` 按已有发布与草稿的最大值递增。版本号只改 Actions 工作区中的 manifest，不向仓库提交版本变更；每日版和手动命名的版本共享递增规则，手动 Beta 也能覆盖已安装的每日版。
 - 使用 Secret `WINDOWDECK_KEYSTORE_BASE64` 里的原发布密钥签名，并校验原发布证书。自己生成的密钥与 GitHub 发布版不同，不能覆盖安装。
 - Release 附带 APK、`SHA256SUMS` 和 `BUILD_INFO.json`。先上传到草稿，附件齐全后才公开；失败留下的草稿可重试，已有公开版本不覆盖。
@@ -96,7 +97,7 @@ GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的�
 
 Hook 仅在 `com.oplus.pscanvas` 中对携带本模块标记的容器启动生效。实际任务嵌入复用 ColorOS 的 `FlexibleTaskView`，不修改系统分区、签名检查或 `system_server`。
 
-桌面侧的混淆名只允许出现在 `module/src/dev/windowdeck/app/RomSymbols.java` 一处，主逻辑只引用常量。安装前 `RomSymbols.validate()` 会逐项校验，任何一项对不上就整块跳过安装，不在 `handleLoadPackage` 里抛异常。
+桌面侧的混淆名只允许出现在 `module/src/io/github/xitc/windowdeck/RomSymbols.java` 一处，主逻辑只引用常量。安装前 `RomSymbols.validate()` 会逐项校验，任何一项对不上就整块跳过安装，不在 `handleLoadPackage` 里抛异常。
 
 源码在 `module/`，纯 Java 回归测试在 `tests/`，构建脚本在 `tools/`。仓库不包含本机截图、设备日志、任务快照或签名私钥。
 
@@ -106,4 +107,4 @@ Hook 仅在 `com.oplus.pscanvas` 中对携带本模块标记的容器启动生�
 
 ## 停用
 
-先从工作台菜单退出，在 LSPosed 停用模块，重新启动 `com.oplus.pscanvas` 后卸载 `dev.windowdeck.app`，并撤销 Root 授权。无需清除原应用数据。
+先从工作台菜单退出，在 LSPosed 停用模块，重新启动 `com.oplus.pscanvas` 后卸载 `io.github.xitc.windowdeck`，并撤销 Root 授权。无需清除原应用数据。

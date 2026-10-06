@@ -3,7 +3,7 @@
 - 当前适配基线：一加 13，ColorOS 17 / C17，`PJZ110_17.0.0.100(SP01CN01)`，桌面 17.3.9。
 - 不兼容旧 C.93 / Android 16 基线；其他设备及 OTA 后兼容性尚未验证。
 - 需要 Root 与 LSPosed。启用「多窗工作台」，作用域选择 `com.oplus.pscanvas` 和 `com.android.launcher`，授权 Root 后重启这两个进程。
-- 旧包名实验版需要先停用旧模块，再启用新版；配置不自动迁移。
+- 包名由 `dev.windowdeck.app` 迁移到 `io.github.xitc.windowdeck`。新版独立安装，不能覆盖旧包；先退出旧工作台、停用旧模块，再安装新版并重新授予 Root、启用 LSPosed 和勾选作用域；配置不自动迁移。
 
 ### 已知限制
 

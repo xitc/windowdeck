@@ -101,13 +101,17 @@ jobs:
         if: steps.plan.outputs.publish == 'true'
         run: sh tools/build_module.sh
 
-      - name: Check signed APK certificate
+      - name: Check APK identity and signed certificate
         if: steps.plan.outputs.publish == 'true'
         run: |
           set -euo pipefail
           sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           version=$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' module/AndroidManifest.xml)
           apk="build/windowdeck/windowdeck-v${version}.apk"
+          identity=$("$sdk/build-tools/35.0.0/aapt" dump badging "$apk" | sed -n '1p')
+          [[ "$identity" == *"name='io.github.xitc.windowdeck'"* ]]
+          [[ "$identity" == *"versionCode='${{ steps.plan.outputs.code }}'"* ]]
+          [[ "$identity" == *"versionName='$version'"* ]]
           "$sdk/build-tools/35.0.0/apksigner" verify --print-certs "$apk" \
             | grep a9b3625015d7023dd3e979e871e93a33f83cfcaa7090664348d01a8a23c572ae > /dev/null
 

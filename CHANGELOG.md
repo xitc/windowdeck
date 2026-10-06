@@ -1,5 +1,12 @@
 # 更新记录
 
+## v0.4.8-beta.28
+
+- 包名、源码命名空间、Xposed 入口、Provider authority 和内部通信改为 `io.github.xitc.windowdeck`，符合 LSPosed 模块仓库的 GitHub 用户命名规则。
+- 新包名独立安装，不能覆盖 `dev.windowdeck.app`。先退出旧工作台、停用旧模块，再安装新版并重新配置 Root 与 LSPosed；选择和授权不自动迁移。
+- Actions 的 Release 标签改为 `versionCode-versionName`，保留每日有变更才发布、签名校验和草稿上传流程。
+- 本次基于已发布 beta.27 做包名迁移，不包含本地 dev.128 开发树的动画改动；未进行新版真机安装或行为验收。
+
 ## v0.4.8-beta.27
 
 **本版起优先支持 C17（Android 17）。** 基线切换到一加 13 `PJZ110_17.0.0.100(SP01CN01)`（C17 = F.04）、Android 17、桌面 17.3.9。
@@ -65,7 +72,7 @@ C17 的桌面被 R8 全量混淆：`SplitFloatParams` 变成 `panelparams.b`、`
 首次 GitHub Beta / Pre-release 发布。
 
 - 应用名称：多窗工作台（WindowDeck）。
-- 包名与源码命名空间：`dev.windowdeck.app`。
+- 包名与源码命名空间：`io.github.xitc.windowdeck`。
 - 同步 LSPosed 入口、启动参数、日志标签及 APK 命名。
 - 基于 0.4.3：三应用实时工作台、主侧窗切换、滑动移出、本地固定，以及各应用独立的渲染方向。
 - 保留 0.4.3 的横屏应用显示方式；不包含撤销的横屏模式切换改动。
