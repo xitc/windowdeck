@@ -98,7 +98,8 @@ def sync(only_tag=None):
             else:
                 gh('release', 'create', tag, '--target', branch, '--draft', *common, *files)
             # Verify the draft's uploaded bytes before making it public.
-            uploaded = json.loads(gh('api', f'repos/{TARGET}/releases/tags/{tag}'))
+            # The by-tag endpoint does not expose an unpublished draft.
+            uploaded = next(r for r in releases(TARGET) if r['tag_name'] == tag)
             assets = {a['name']: a for a in uploaded['assets']}
             for name in required:
                 asset = assets[name]
