@@ -7,7 +7,8 @@ import java.util.IdentityHashMap;
 
 /** Fits transforms inside transactions owned by our embedded views. */
 final class LeashTransactions {
- interface Writer { void write(SurfaceControl.Transaction transaction); }
+ /** True means the writer consumed the native transaction into a host draw. */
+ interface Writer { boolean write(SurfaceControl.Transaction transaction); }
  private static final IdentityHashMap<Object,Writer> writers=new IdentityHashMap<>();
  private static boolean installed;
  static synchronized void install(){
@@ -18,7 +19,7 @@ final class LeashTransactions {
     synchronized(LeashTransactions.class){writer=writers.get(param.thisObject);}
     // Append our final crop/rotation to the SAME transaction. A corrective second
     // apply can expose the ROM's intermediate old-main geometry for one frame.
-    if(writer!=null)writer.write((SurfaceControl.Transaction)param.thisObject);
+    if(writer!=null&&writer.write((SurfaceControl.Transaction)param.thisObject))param.setResult(null);
    }
   });
   installed=true;

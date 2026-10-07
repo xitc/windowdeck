@@ -7,8 +7,11 @@ import android.content.pm.*;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Outline;
+import android.graphics.Paint;
 import android.graphics.Matrix;
+import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
 import android.os.*;
 import android.text.TextUtils;
@@ -24,13 +27,26 @@ import java.util.concurrent.Executor;
 
 public final class WorkbenchActivity extends Activity {
  private static final String TAG="WindowDeck";
+ /** True while a workbench is on screen. CanvasImeBridge only pushes IME state for our container. */
+ static volatile boolean foreground;
  private final ArrayList<Slot> slots=new ArrayList<>();
- private FrameLayout stage; private TextView status; private Button addCard, more; private PopupWindow primaryPopup; private boolean captionAttached;
+ private CanvasStage stage; private TextView status; private Button addCard, more; private PopupWindow primaryPopup; private boolean captionAttached;
  private Field interceptInput,rotateTaskLeash,cornerRadius,taskLeash,reparentAlign,superLocked; private Method resizeMethod;
  private Method leashMatrix,leashMatrix4,leashRadius; private Field viewTransaction;
  private boolean settlingInput; private int switchGeneration;
- private ViewTreeObserver.OnPreDrawListener settleListener;
- private long switchStarted, lastAnimationFrame, maxFrameGap, resizeNanos; private int animationFrames, resizeCalls;
+ private ViewTreeObserver.OnPreDrawListener motionFitListener;
+ private final SwitchPreparation switchPreparation=new SwitchPreparation();
+ private int switchPrepareToken;
+ private Slot switchPrepareTarget;
+ private ArrayList<Slot> switchPrepareSlots;
+ private int[] switchPrepareTasks;
+ private int switchPreparePrimary;
+ private long switchPrepareSession;
+ private int switchOriginPrepareToken;
+ private long switchStarted, lastAnimationFrame, maxFrameGap, resizeNanos; private int animationFrames, resizeCalls, motionFitFailures;
+ private long arrivalLastFrame,arrivalFrameGap;private int arrivalFrames,arrivalFaceGeneration;
+ private Slot arrivalFaceSlot;private RecoveryCover arrivalFace;private Bitmap arrivalFaceBitmap;
+ private Bitmap hangSourceFrame;private int hangSourceTask=-1,hangSourceGeneration;
  private int layoutMode=PaneLayout.LEFT_RIGHT;
  private boolean atomicRotate=AtomicPresentation.DEFAULT;
  private boolean initialized,closing,layoutPosted; private int primary,nextId,imeBottom;
@@ -43,8 +59,15 @@ public final class WorkbenchActivity extends Activity {
  private boolean hangEntranceDue,hangQuiet,hangReplace,screenArrival;
  private Slot arrivalSlot;
  private int[][] arrivalFrom;
+ private String arrivalGeometry;
+ private boolean arrivalFromEdge,arrivalHungMain;
+ private int layoutEvidenceGeneration;
+ private MotionSpec.Scene arrivalScene=MotionSpec.Scene.ADD;
  private final Runnable hangConsume=this::ensureHangConsumed;
- private final Runnable arrivalUnlock=this::finishArrival;
+ private final EntranceRun arrivalRun=new EntranceRun();
+ private int arrivalToken;
+ private String entranceWaitReason="none";
+ private final Runnable arrivalUnlock=this::checkArrivalDeadline;
  private View entranceFlying;
  private Slot entranceSlot;
  private String hangNote;
@@ -64,6 +87,8 @@ public final class WorkbenchActivity extends Activity {
  };
  private final Rect naturalBounds=new Rect();
  private final Handler handler=new Handler(Looper.getMainLooper());
+ private HandlerThread contentThread;
+ private Handler contentWorker;
  private final long stateToken=SystemClock.elapsedRealtimeNanos();
  private int statePublishGeneration;
  private static final String ADD_TO_LIVE_WORKBENCH="io.github.xitc.windowdeck.ADD_TO_LIVE_WORKBENCH";
@@ -101,18 +126,85 @@ public final class WorkbenchActivity extends Activity {
  };
  private Slot pendingEntrance;
  private boolean entranceFrontReady,entranceFrameReady,entranceFramePending,createdFromGesture;
+ /** Blocks the entrance until the first frame carrying the final geometry has been committed,
+  *  instead of until the animation ends (TODO D3). */
+ private boolean entranceInputBlocked;
+ private HandoffCover entranceCover;
+ private int coverWaitGeneration;
+ private boolean coverReleasePending;
+ private boolean keepSurfaceOnBackground=TransitionPolicy.KEEP_SURFACE_DEFAULT;
+ private boolean detachLeashBeforeTransition=TransitionPolicy.DETACH_LEASH_DEFAULT;
  private boolean gestureHandoff;
  private android.os.ResultReceiver handoffReady;
+ /** Landscape entrance: one portrait host, with a release snapshot bridging live reparent/rotation. */
+ private boolean deferPortrait,poseHeld,poseQuerySent,portraitAfterPose;
+ private int deferSourceRotation=-1;
+ private float[] heldCorners,heldCrop;
+ private int[] heldStage;
+ private float heldRadius;
+ private int heldLayer=-1;
+ private boolean poseSettling,poseReported;
+ private SourceRelease sourceRelease;
+ private boolean sourceBootstrapFramePending;
+ private ViewTreeObserver.OnPreDrawListener poseFitListener;
+ private ViewTreeObserver.OnPreDrawListener poseBootstrapListener;
+ private RecoveryCover poseBridge;
+ private Bitmap poseBridgeBitmap;
+ private float[] poseBridgeSource;
+ private boolean poseBridgeFitted;
+ private Slot poseSlot;
+ private android.os.ResultReceiver poseReply;
  private long handoffDeadline;
+ private boolean handoffPresentation;
+ private int presentationGeneration;
+ private android.os.ResultReceiver presentationReply;
+ private String presentationLayoutKey,presentationLiveKey;
+ private Bundle presentationGeometry;
+ private boolean presentationLiveReady;
  private final class Slot {
-  final int id; final ComponentName component; final String label; int taskId=-1,sourceTaskId=-1,sourceUserId=-1,orientationAxis; ComponentName activeComponent; final Rect renderBounds=new Rect(); boolean failed,released,pinned,windowDrawn,handoffPolling,entranceWaitScheduled,entranceDrawTimedOut;
+  final int id; final ComponentName component; final String label; int taskId=-1,sourceTaskId=-1,sourceUserId=-1,orientationAxis; ComponentName activeComponent; final Rect renderBounds=new Rect(); boolean failed,released,pinned,windowDrawn,handoffPolling,entranceWaitScheduled,entranceDrawTimedOut,fitPosted;
   SurfaceControl.Transaction transaction; volatile boolean embedded=true; SurfaceControl projectedLeash; boolean perspectiveApplied; int leashWrites;
+  final TaskSurfaceEvidence drawEvidence=new TaskSurfaceEvidence();
+  long nextContentProbe; boolean contentProbeUnavailable; String drawDetail="unobserved";
+  /** Last corner radius written by {@link WorkbenchActivity#transformCard}, so the outline is
+   *  only invalidated when it actually changes (TODO D2). */
+  int renderRadius=-1;
+  float motionFromRadius=-1f;
+  volatile CardMotion.Pose motionPose, fittedPose;
+  int fittedTask=-1,fittedLayer=-1,fittedAxis;final Rect fittedBounds=new Rect();
+  final Rect resizedBounds=new Rect(); int resizedTask=-1;
   PreviewCard card; ImageView icon; RecoveryCover recoveryCover; TextView pin; View surface;
   int pendingTask=-1; boolean quietDetach;
   Slot(ComponentName c,String l){id=nextId++;component=c;label=l;}
  }
  @Override protected void onCreate(Bundle state){
   setTheme(android.R.style.Theme_Material_NoActionBar);super.onCreate(state);
+  // Default ROTATION_ANIMATION_ROTATE fades this portrait window through white.
+  // The landscape cover is already up; the display should cut underneath it.
+  seamlessRotation();
+  // Only this custom container owns a portrait canvas. Embedded activities retain their
+  // orientation requests; do not change global auto-rotate or the native canvas activity.
+  // Keep the host in its final orientation. The source task keeps its landscape buffer.
+  deferPortrait=state==null&&getIntent().getBooleanExtra("windowdeck_defer_portrait",false);
+  if(deferPortrait){
+   if(getIntent().getBooleanExtra("windowdeck_wait_source_release",false))sourceRelease=new SourceRelease();
+   deferSourceRotation=getIntent().getIntExtra("windowdeck_defer_rotation",-1);
+   if(deferSourceRotation!=1&&deferSourceRotation!=3){
+    Log.w(TAG,"defer_source_rotation_invalid rotation="+deferSourceRotation);
+    android.os.ResultReceiver reply=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
+    if(reply!=null)reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
+    finish();return;
+   }
+   // C17 creates the ContainerActivity with fixed rotation 0 before newActivity/onCreate.
+   // Requesting landscape here produces an extra 0→1→0 CHANGE/snapshot transition.
+   // Like its native small-window rotation layer, bridge pixels in the destination
+   // window while the original task is embedded; never rotate the host to fit the task.
+   setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+   Log.i(TAG,"canvas_orientation requested=portrait source_rotation="+deferSourceRotation+" activity_rotation="+(getDisplay()==null?-1:getDisplay().getRotation())+" policy=snapshot_rotation_bridge");
+  }else{
+   setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+   Log.i(TAG,"canvas_orientation requested=portrait policy=independent_tasks");
+  }
   // A stale launcher request must not create an empty replacement container.
   if(state==null&&getIntent().hasExtra("windowdeck_add_task_id")){Log.w(TAG,"add_task_no_container");finish();return;}
   // ActivityManager checks DUMP before delivering this exported receiver.
@@ -123,7 +215,7 @@ public final class WorkbenchActivity extends Activity {
   registerReceiver(launcherReceiver,launcherFilter,android.Manifest.permission.REORDER_TASKS,handler,Context.RECEIVER_EXPORTED);launcherReceiverRegistered=true;
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
-  LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0);setContentView(root);getWindow().setBackgroundDrawable(new ColorDrawable(Ui.CHROME));Ui.overlaySystemBars(this,false);
+  LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0);setContentView(root);getWindow().setBackgroundDrawable(new ColorDrawable(Ui.CHROME));seamlessRotation();Ui.overlaySystemBars(this,false);
   root.setOnApplyWindowInsetsListener((v,insets)->{
    android.graphics.Insets sys=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());
    int keyboard=insets.getInsets(WindowInsets.Type.ime()).bottom;
@@ -135,7 +227,21 @@ public final class WorkbenchActivity extends Activity {
   if(layoutMode!=PaneLayout.TOP_BOTTOM)layoutMode=PaneLayout.LEFT_RIGHT;
   atomicRotate=getIntent().getBooleanExtra(AtomicPresentation.EXTRA,AtomicPresentation.DEFAULT);
   Log.i(TAG,"atomic_rotate="+atomicRotate+" extra="+AtomicPresentation.EXTRA);
-  stage=new FrameLayout(this);root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
+  keepSurfaceOnBackground=getIntent().getBooleanExtra(TransitionPolicy.EXTRA_KEEP_SURFACE,TransitionPolicy.KEEP_SURFACE_DEFAULT);
+  detachLeashBeforeTransition=getIntent().getBooleanExtra(TransitionPolicy.EXTRA_DETACH_LEASH,TransitionPolicy.DETACH_LEASH_DEFAULT);
+  Log.i(TAG,"transition_policy keep_surface="+keepSurfaceOnBackground+" detach_leash="+detachLeashBeforeTransition);
+  stage=new CanvasStage(this);root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
+  if(deferPortrait){
+   // WM must see the destination snapshot on this window's first drawn frame.
+   // This gate does not wait for task draw/SurfaceView readiness (which needs traversal).
+   poseBootstrapListener=()->{
+    if(closing||!deferPortrait||(poseBridgeFitted&&backdrop!=null&&backdrop.ready)){
+     stage.getViewTreeObserver().removeOnPreDrawListener(poseBootstrapListener);poseBootstrapListener=null;return true;
+    }
+    return false;
+   };
+   stage.getViewTreeObserver().addOnPreDrawListener(poseBootstrapListener);
+  }
   addCard=Ui.button(this,"＋");addCard.setTextSize(28);addCard.setTextColor(Ui.FROST_PLUS);addCard.setGravity(Gravity.CENTER);addCard.setIncludeFontPadding(false);addCard.setPadding(0,0,0,0);addCard.setContentDescription("添加应用");addCard.setBackground(Ui.frost(Ui.dp(this,Ui.SIDE_RADIUS)));Ui.round(addCard,Ui.dp(this,Ui.SIDE_RADIUS));addCard.setOnClickListener(v->{hangReplace=false;hangForAdd();});stage.addView(addCard);
   more=Ui.more(this);more.setOnClickListener(v->primaryMenu());
   status=Ui.text(this,"正在准备窗口…",12,Ui.TEXT);status.setGravity(Gravity.CENTER);status.setBackground(Ui.bg(0x99000000,Ui.dp(this,8)));status.setPadding(Ui.dp(this,12),Ui.dp(this,6),Ui.dp(this,12),Ui.dp(this,6));status.setVisibility(View.GONE);
@@ -157,15 +263,16 @@ public final class WorkbenchActivity extends Activity {
     leashRadius=SurfaceControl.Transaction.class.getDeclaredMethod("setCornerRadius",SurfaceControl.class,float.class);
     Log.i(TAG,"leash_perspective_api=matrix4x4");
    }catch(Throwable e){Log.w(TAG,"leash_perspective_unavailable",e);}
-   backdrop=new WorkbenchBackdrop();backdrop.onReady=this::requestEntranceFrame;backdrop.attach(this,manager);
+   backdrop=new WorkbenchBackdrop();backdrop.onReady=this::requestEntranceFrame;backdrop.attach(this);
    String[] input=state!=null?state.getStringArray("components"):null;
    if(input==null)input=new String[]{getIntent().getStringExtra("windowdeck_app_a"),getIntent().getStringExtra("windowdeck_app_b"),getIntent().getStringExtra("windowdeck_app_c"),getIntent().getStringExtra("windowdeck_app_d"),getIntent().getStringExtra("windowdeck_app_e")};
    int initialSource=state==null?getIntent().getIntExtra("windowdeck_create_source_task",-1):-1;
    if(initialSource>=0){
     Slot fresh=validateSourceTask(initialSource,getIntent().getIntExtra("windowdeck_create_source_user",-1));
-    slots.add(fresh);pendingEntrance=fresh;createdFromGesture=true;gestureHandoff=true;
+    slots.add(fresh);pendingEntrance=fresh;createdFromGesture=true;gestureHandoff=true;entranceInputBlocked=true;
     handoffReady=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
-    handoffDeadline=SystemClock.uptimeMillis()+2000;
+    handoffDeadline=SystemClock.uptimeMillis()+(fresh.orientationAxis==2?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS);
+    watchHandoffDeadline(fresh);
     input=new String[0];
    }
    int[] savedSources=state==null?null:state.getIntArray("sourceTaskIds");
@@ -181,10 +288,11 @@ public final class WorkbenchActivity extends Activity {
    stage.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
     if(closing||r-l<100||b-t<100)return;
     if(initialized&&r-l==or-ol&&b-t==ob-ot)return;
-    if(!initialized){initialized=true;updateNaturalBounds();for(Slot s:new ArrayList<>(slots))createWindow(s);if(!gestureHandoff&&pendingEntrance!=null&&pendingEntrance.card!=null)pendingEntrance.card.setAlpha(0f);}
+    if(!initialized){initialized=true;updateNaturalBounds();if(!waitingForSourceRelease())for(Slot s:new ArrayList<>(slots))createWindow(s);if(!gestureHandoff&&pendingEntrance!=null&&pendingEntrance.card!=null)pendingEntrance.card.setAlpha(0f);}
     scheduleLayout();
    });
-   Log.i(TAG,"workbench_created version="+HookEntry.VERSION+" container="+getTaskId()+" count="+slots.size()+" cap="+Caps.MAX_TASKS);
+   Log.i(TAG,"workbench_created version="+Version.NAME+" container="+getTaskId()+" count="+slots.size()+" cap="+Caps.MAX_TASKS);
+   if(deferPortrait)handler.post(()->requestCoverPose(pendingEntrance));
   }catch(Throwable e){fail(e);if(getIntent().hasExtra("windowdeck_create_source_task"))finish();}
  }
  private Slot validate(ComponentName c,Slot replacing) throws Exception {
@@ -231,9 +339,10 @@ public final class WorkbenchActivity extends Activity {
    }else if(hang&&!slots.isEmpty()){
     Slot oldMain=slots.remove(primary);slots.add(0,fresh);slots.add(oldMain);primary=0;
    }else{slots.add(fresh);primary=slots.size()-1;}
-   pendingEntrance=fresh;entranceFrontReady=false;entranceFrameReady=false;gestureHandoff=!hang&&!replace;
+   pendingEntrance=fresh;entranceFrontReady=false;entranceFrameReady=false;entranceInputBlocked=true;gestureHandoff=!hang&&!replace;
    handoffReady=gestureHandoff?request.getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class):null;
    handoffDeadline=SystemClock.uptimeMillis()+2000;
+   if(gestureHandoff)watchHandoffDeadline(fresh);
    publishState(slots.size());updateNaturalBounds();createWindow(fresh);layoutCards(false);refreshStatus();
    if(replaced!=null){replaced.quietDetach=true;releaseSlot(replaced);}
    if(fresh.card!=null)fresh.card.setAlpha(1f);
@@ -251,44 +360,86 @@ public final class WorkbenchActivity extends Activity {
   entranceFrontReady=true;Log.i(TAG,"add_card_front_ready slot="+slot.id+" task="+slot.sourceTaskId);
   requestEntranceFrame();
  }
- private void abandonEntrance(Slot slot){
+private void abandonEntrance(Slot slot){
   if(pendingEntrance!=slot)return;
+  if(gestureHandoff){failHandoff(slot,"task_unavailable");return;}
   pendingEntrance=null;entranceFrameReady=false;entranceFramePending=false;createdFromGesture=false;
+  entranceInputBlocked=false;closeEntranceCover("entrance_abandoned");
   if(slot.card!=null)slot.card.setAlpha(1f);
   if(!closing)layoutCards(false);
- }
- private void requestEntranceFrame(){
+}
+private void watchHandoffDeadline(Slot expected){
+ final long deadline=handoffDeadline;
+ handler.postDelayed(()->{
+  if(pendingEntrance==expected&&gestureHandoff&&handoffDeadline==deadline)failHandoff(expected,"ready_timeout");
+ },Math.max(0L,deadline-SystemClock.uptimeMillis()));
+}
+private void seamlessRotation(){
+ WindowManager.LayoutParams attrs=getWindow().getAttributes();
+ attrs.rotationAnimation=WindowManager.LayoutParams.ROTATION_ANIMATION_SEAMLESS;
+ getWindow().setAttributes(attrs);
+}
+private void failHandoff(Slot expected,String reason){
+ if(sourceRelease!=null)sourceRelease.cancel();
+ if(deferPortrait){clearHeldPose();deferPortrait=false;setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);}
+ if(pendingEntrance!=expected||!gestureHandoff)return;
+ Log.w(TAG,"handoff_result result="+reason+" task="+expected.sourceTaskId);
+ android.os.ResultReceiver reply=handoffReady;handoffReady=null;gestureHandoff=false;
+ abandonEntrance(expected);cancelHandoffPresentation();if(reply!=null)reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
+}
+private void requestEntranceFrame(){
+  if(deferPortrait)return; // The live-pose path owns layout until rotation/final fit commit.
+  sendHandoffBackground();
   if(pendingEntrance==null||!entranceFrontReady||stopped||backgrounded||closing||stage.getWidth()==0||entranceFramePending)return;
-  if(gestureHandoff&&(pendingEntrance.taskId<0||!pendingEntrance.windowDrawn||(backdrop!=null&&!backdrop.ready)))return;
+  // A measured single landscape target can start the opaque snapshot before live
+  // content and wallpaper finish. The launcher only accepts a hole-free expansion.
+  if(gestureHandoff&&slots.size()==1&&pendingEntrance.orientationAxis==2&&pendingEntrance.taskId==pendingEntrance.sourceTaskId&&handoffReady!=null
+    &&handoffGeometryKey()!=null)beginHandoffPresentation(pendingEntrance,false);
+  // Only the window having *something* to draw is required. The wallpaper underlay is loaded on
+  // a background thread, and waiting for it held the whole entrance behind an async task
+  // (TODO A1-4) — the gap the entrance cover exists to hide is exactly that wait.
+  if(gestureHandoff&&(pendingEntrance.taskId<0||!pendingEntrance.windowDrawn||(backdrop!=null&&!backdrop.ready))){
+   // The independent source cover stays visible while the target backdrop settles.
+   // A placeholder is safe for normal host startup, but must match the final wallpaper handoff.
+   stage.postOnAnimation(this::requestEntranceFrame);return;
+  }
   Slot expected=pendingEntrance;entranceFramePending=true;
+  if(gestureHandoff){commitHandoffLayout(expected);return;}
   stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
    if(pendingEntrance!=expected)return;
    if(gestureHandoff){commitHandoffLayout(expected);return;}
    entranceFramePending=false;
    if(pendingEntrance!=expected||stopped||backgrounded||closing)return;
-   entranceFrameReady=true;maybeAnimateAddedCard();
+   entranceFrameReady=true;unlockEntranceInput();maybeAnimateAddedCard();
   }));stage.invalidate();
- }
+}
  // A drawn new task alone says nothing about the old main's SurfaceView. Wait
  // for every card to reach its final role and size, commit all leash fits together,
  // then require a host frame with the same geometry before releasing the cover.
- private String handoffLayoutKey(){
-  if(layoutPosted||stage.isLayoutRequested()||animation!=null||addAnimation!=null)return null;
+ private String handoffGeometryKey(){return handoffLayoutKey(false);}
+ private String handoffLayoutKey(){return handoffLayoutKey(true);}
+ private String handoffLayoutKey(boolean requireLive){
+  if(layoutPosted||stage.isLayoutRequested()||animation!=null||addAnimation!=null||stage.getWidth()>=stage.getHeight()||getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT)return null;
   int[][] target=cardGeometry().cards;
   if(target.length!=slots.size())return null;
-  StringBuilder key=new StringBuilder().append(primary).append(':').append(stage.getWidth()).append('x').append(stage.getHeight());
+  int[] origin=new int[2];stage.getLocationOnScreen(origin);
+  StringBuilder key=new StringBuilder().append(Arrays.toString(origin)).append(':').append(getDisplay().getRotation()).append(':').append(cardRadius(true)).append(':').append(primary).append(':').append(stage.getWidth()).append('x').append(stage.getHeight())
+   .append(':').append(requireLive&&backdrop!=null?backdrop.visualGeneration():0);
   for(int i=0;i<slots.size();i++){
    Slot s=slots.get(i);int[] r=target[i];
    if(s.released||s.taskId<0||s.card==null||s.surface==null||s.card.isLayoutRequested()||s.surface.isLayoutRequested()
     ||s.card.getLeft()!=r[0]||s.card.getTop()!=r[1]||s.card.getWidth()!=r[2]||s.card.getHeight()!=r[3])return null;
    int[] plate=surfacePlate(s);
    if(s.surface.getWidth()!=plate[0]||s.surface.getHeight()!=plate[1])return null;
+   key.append('|').append(s.id).append(':').append(s.taskId).append(':').append(Arrays.toString(r))
+    .append(':').append(s.orientationAxis).append(':').append(s.renderBounds).append(':').append(Arrays.toString(plate));
+   if(!requireLive)continue;
    try{
     SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface),surface=((SurfaceView)s.surface).getSurfaceControl();
-    if(leash==null||!leash.isValid()||surface==null||!surface.isValid())return null;
-    key.append('|').append(s.id).append(':').append(s.taskId).append(':').append(Arrays.toString(r))
-     .append(':').append(s.orientationAxis).append(':').append(s.renderBounds).append(':').append(Arrays.toString(plate))
-     .append(':').append(System.identityHashCode(leash)).append(':').append(System.identityHashCode(surface));
+    int state=taskDrawState(s);
+    if(!TaskSurfaceEvidence.ready(state)||leash==null||!leash.isValid()||surface==null||!surface.isValid()
+      ||!((SurfaceView)s.surface).getHolder().getSurface().isValid())return null;
+    key.append(':').append(LiveTaskContent.layerId(leash)).append(':').append(LiveTaskContent.layerId(surface));
    }catch(Throwable e){return null;}
   }
   return key.toString();
@@ -297,9 +448,7 @@ public final class WorkbenchActivity extends Activity {
   if(pendingEntrance!=expected)return;
   entranceFramePending=false;entranceFrameReady=false;
   if(SystemClock.uptimeMillis()>=handoffDeadline){
-   Log.w(TAG,"handoff_layout_timeout task="+expected.taskId);
-   android.os.ResultReceiver reply=handoffReady;handoffReady=null;gestureHandoff=false;
-   abandonEntrance(expected);if(reply!=null)reply.send(2,Bundle.EMPTY);return;
+   failHandoff(expected,"layout_timeout");return;
   }
   stage.postOnAnimation(this::requestEntranceFrame);
  }
@@ -307,6 +456,10 @@ public final class WorkbenchActivity extends Activity {
   if(stopped||backgrounded||closing){entranceFramePending=false;return;}
   String key=handoffLayoutKey();
   if(key==null){retryHandoffLayout(expected);return;}
+  // L1: measured geometry can travel under the opaque snapshot while the final fit/frame
+  // barrier completes. Multi-card/hot-add retains the existing stable-layout path.
+  if(slots.size()==1&&expected.orientationAxis==2&&handoffReady!=null)
+   beginHandoffPresentation(expected,false);
   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
    for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted slot "+s.id);
    fit.addTransactionCommittedListener((Executor)handler::post,()->{
@@ -316,15 +469,25 @@ public final class WorkbenchActivity extends Activity {
      if(pendingEntrance!=expected)return;
      if(stopped||backgrounded||closing){entranceFramePending=false;return;}
      if(!key.equals(handoffLayoutKey())||(backdrop!=null&&!backdrop.ready)){retryHandoffLayout(expected);return;}
-     entranceFramePending=false;entranceFrameReady=true;
-     Log.i(TAG,"handoff_layout_committed task="+expected.taskId+" cards="+slots.size()+" axis="+expected.orientationAxis);
-     maybeAnimateAddedCard();
+     // Submission is earlier than presentation. Keep the launcher's independent cover until
+     // the same layout and surface identities survive two additional display frames.
+     stage.postOnAnimation(()->stage.postOnAnimation(()->{
+      if(pendingEntrance!=expected)return;
+      if(stopped||backgrounded||closing){entranceFramePending=false;return;}
+      if(!key.equals(handoffLayoutKey())){retryHandoffLayout(expected);return;}
+      // Keep the already-committed input role until the independent motion finishes.
+      // Unlocking here requests layout, making beginHandoffPresentation capture a null key.
+      entranceFramePending=false;entranceFrameReady=true;
+      Log.i(TAG,"handoff_layout_committed task="+expected.taskId+" cards="+slots.size()+" axis="+expected.orientationAxis);
+      maybeAnimateAddedCard();
+     }));
     }));stage.invalidate();
    });fit.apply();
   }catch(Throwable e){Log.w(TAG,"handoff_layout_commit_failed",e);retryHandoffLayout(expected);}
  }
  private void maybeAnimateAddedCard(){
   Slot slot=pendingEntrance;
+  if(deferPortrait){if(slot!=null)requestCoverPose(slot);return;}
   if(screenArrival&&slot!=null&&entranceFrontReady&&!stopped&&!backgrounded&&!closing){pendingEntrance=null;createdFromGesture=false;entranceFrontReady=false;beginHangEntrance();return;}
   if(slot==null||!entranceFrontReady||stopped||backgrounded||closing||slot.released||slot.taskId<0)return;
   if(gestureHandoff&&!slot.windowDrawn){pollHandoffDraw(slot);return;}
@@ -337,55 +500,367 @@ public final class WorkbenchActivity extends Activity {
   if(gestureHandoff){
    gestureHandoff=false;entranceFrontReady=false;entranceFrameReady=false;
    if(slot.card!=null)slot.card.setAlpha(1f);
-   raiseMain();layoutCaption();
+   // layoutCards already established the z-order before commitHandoffLayout. Repeating
+   // bringToFront here requests a new ViewGroup layout even when the order is unchanged,
+   // invalidating the stable geometry immediately before the presentation handshake.
+   layoutCaption();
    for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
    focusPrimary("gesture_handoff");
-   Log.i(TAG,"gesture_handoff_visible task="+slot.taskId+" host_animation=false");
-   if(handoffReady!=null){android.os.ResultReceiver reply=handoffReady;handoffReady=null;reply.send(1,Bundle.EMPTY);}
+   Log.i(TAG,"gesture_handoff_ready task="+slot.taskId+" host_animation=false");
+   if(handoffReady!=null||handoffPresentation)beginHandoffPresentation(slot,true);
+   else{unlockEntranceInput();focusPrimary("gesture_without_presentation");}
   }else animateAddedCard(slot);
  }
  private void pollHandoffDraw(Slot slot){
   if(slot.handoffPolling)return;
   slot.handoffPolling=true;
-  long deadline=SystemClock.uptimeMillis()+2000;
+  final long deadline=handoffDeadline;
   Runnable check=new Runnable(){public void run(){
    if(closing||slot.released||pendingEntrance!=slot||!gestureHandoff){slot.handoffPolling=false;return;}
+   if(slot.windowDrawn){slot.handoffPolling=false;return;}
    try{
-    Field draw=viewApi.getDeclaredField("mDrawState");draw.setAccessible(true);
-    int state=draw.getInt(slot.surface);
+    int state=taskDrawState(slot);
     SurfaceControl leash=(SurfaceControl)taskLeash.get(slot.surface);
     SurfaceControl plate=((SurfaceView)slot.surface).getSurfaceControl();
-    if((state==1||state==2)&&leash!=null&&leash.isValid()&&plate!=null&&plate.isValid()){
-     syncSurface(slot);
-     try(SurfaceControl.Transaction committed=new SurfaceControl.Transaction()){
-      writeLeashFit(slot,committed);
-      committed.addTransactionCommittedListener((Executor)handler::post,()->{
-       if(closing||pendingEntrance!=slot||slot.released)return;
-       slot.windowDrawn=true;slot.handoffPolling=false;
-       Log.i(TAG,"handoff_task_surface_committed task="+slot.taskId+" drawState="+state);
-       requestEntranceFrame();
-      });committed.apply();
+    boolean surface=leash!=null&&leash.isValid()&&plate!=null&&plate.isValid();
+    // Landscape pixels decide. drawState 0 is a cold embed, not a presented frame.
+    if(slot.orientationAxis==2){
+     if(!surface){
+      if(SystemClock.uptimeMillis()<deadline){stage.postOnAnimation(this);return;}
+      slot.handoffPolling=false;failHandoff(slot,"draw_state_timeout");return;
      }
-     return;
+     if(!slot.drawEvidence.hasContent()){
+      probeLandscapePresented(slot,leash);
+      if(SystemClock.uptimeMillis()<deadline){stage.postOnAnimation(this);return;}
+      Log.i(TAG,"handoff_black_held task="+slot.taskId);
+      slot.handoffPolling=false;failHandoff(slot,"presented_timeout");return;
+     }
+    }else if(!TaskSurfaceEvidence.ready(state)||!surface){
+     if(SystemClock.uptimeMillis()<deadline){stage.postOnAnimation(this);return;}
+     slot.handoffPolling=false;failHandoff(slot,"draw_state_timeout");return;
     }
-   }catch(Throwable e){Log.w(TAG,"handoff_draw_state_unavailable",e);slot.handoffPolling=false;return;}
-   if(SystemClock.uptimeMillis()<deadline)stage.postOnAnimation(this);
-   else{slot.handoffPolling=false;Log.w(TAG,"handoff_draw_state_timeout task="+slot.taskId);}
+    syncSurface(slot);
+    try(SurfaceControl.Transaction committed=new SurfaceControl.Transaction()){
+     writeLeashFit(slot,committed);
+     committed.addTransactionCommittedListener((Executor)handler::post,()->{
+      if(closing||pendingEntrance!=slot||slot.released)return;
+      if(slot.orientationAxis==2&&!slot.drawEvidence.hasContent()){slot.handoffPolling=false;stage.postOnAnimation(()->pollHandoffDraw(slot));return;}
+      slot.windowDrawn=true;slot.handoffPolling=false;
+      Log.i(TAG,"handoff_task_surface_committed task="+slot.taskId+" drawState="+state);
+      requestEntranceFrame();
+     });committed.apply();
+    }
+   }catch(Throwable e){Log.w(TAG,"handoff_draw_state_unavailable",e);slot.handoffPolling=false;failHandoff(slot,"draw_state_unavailable");}
   }};
   stage.postOnAnimation(check);
  }
- private void releaseEntrance(){
+private void beginHandoffPresentation(Slot slot,boolean liveReady){
+ if(handoffPresentation){
+  if(!liveReady)return;
+  if(presentationGeometry==null||presentationGeometry.getInt(HandoffProtocol.TASK,-1)!=slot.sourceTaskId
+    ||!Objects.equals(presentationLayoutKey,handoffGeometryKey())||handoffLayoutKey()==null||stopped||backgrounded||closing){
+   cancelHandoffPresentation();return;
+  }
+  presentationLiveKey=handoffLayoutKey();
+  presentationLiveReady=true;
+  if(!putHandoffBackdrop(presentationGeometry)){cancelHandoffPresentation();return;}
+  presentationReply.send(HandoffProtocol.READY,presentationGeometry);
+  Log.i(TAG,"handoff_live_ready task="+slot.taskId+" overlapped=true");return;
+ }
+ final int generation=++presentationGeneration;
+ final String key=handoffGeometryKey();
+ if(key==null||(liveReady&&handoffLayoutKey()==null))return;
+ presentationLayoutKey=key;presentationLiveReady=liveReady;presentationLiveKey=liveReady?handoffLayoutKey():null;
+ handoffPresentation=true;presentationReply=handoffReady;handoffReady=null;
+ android.os.ResultReceiver done=new android.os.ResultReceiver(handler){
+  @Override protected void onReceiveResult(int code,Bundle data){
+   if(!handoffPresentation||generation!=presentationGeneration)return;
+   String finalKey=handoffLayoutKey();
+   boolean valid=code==HandoffProtocol.READY&&presentationLiveReady&&!slot.released&&!closing&&!stopped&&!backgrounded&&key.equals(handoffGeometryKey())&&Objects.equals(presentationLiveKey,finalKey)&&finalKey!=null;
+   handoffPresentation=false;presentationReply=null;presentationGeometry=null;presentationLayoutKey=null;presentationLiveKey=null;presentationLiveReady=false;
+   if(pendingEntrance==slot&&gestureHandoff){gestureHandoff=false;abandonEntrance(slot);}
+   entranceInputBlocked=false;
+   Log.i(TAG,"handoff_presentation_result result="+(valid?"completed":"degraded")+" code="+code+" task="+slot.taskId+" stable_start="+(key!=null)+" stable_end="+(finalKey!=null)+" stable_same="+valid);
+   for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
+   if(!closing&&!stopped&&!backgrounded)focusPrimary("handoff_presentation");
+   scheduleLayoutEvidence("handoff");
+  }
+ };
+ Rect target=screenRect(slot.card);
+ Bundle data=new Bundle();data.putInt(HandoffProtocol.TASK,slot.sourceTaskId);data.putInt(HandoffProtocol.CONTAINER,getTaskId());
+ data.putInt(HandoffProtocol.ROTATION,getDisplay().getRotation());
+ data.putIntArray(HandoffProtocol.TARGET,new int[]{target.left,target.top,target.right,target.bottom});
+ data.putFloat(HandoffProtocol.RADIUS,cardRadius(true));data.putParcelable(HandoffProtocol.COMPLETE,HandoffProtocol.transport(done));
+ if(!putHandoffBackdrop(data)){cancelHandoffPresentation();return;}
+ presentationGeometry=data;
+ presentationReply.send(liveReady?HandoffProtocol.READY:HandoffProtocol.PREPARED,data);
+ Log.i(TAG,"handoff_geometry_prepared task="+slot.taskId+" live_ready="+liveReady+" backdrop_ready="+(backdrop==null||backdrop.ready));
+ handler.postDelayed(()->{if(handoffPresentation&&generation==presentationGeneration){
+  Log.w(TAG,"handoff_presentation_timeout task="+slot.taskId);cancelHandoffPresentation();
+ }},handoffHoldMs());
+}
+private long handoffHoldMs(){
+ if(handoffDeadline<=0)return MotionSpec.COVER_TIMEOUT_MS;
+ return Math.max(MotionSpec.ADD_CARD_MS,handoffDeadline-SystemClock.uptimeMillis());
+}
+private boolean putHandoffBackdrop(Bundle data){
+ try{if(backdrop!=null&&backdrop.ready&&backdrop.currentBitmap()!=null){
+  Bitmap background=backdrop.currentBitmap().copy(Bitmap.Config.HARDWARE,false);
+  if(background!=null){data.putParcelable(HandoffProtocol.BACKDROP,background);handler.postDelayed(background::recycle,handoffHoldMs());}
+ }return true;}catch(Throwable e){Log.w(TAG,"handoff_backdrop_transport_failed",e);return false;}
+}
+/** Wallpaper loading can finish before child pixels. It must not unlock live content. */
+private void sendHandoffBackground(){
+ if(!handoffPresentation||presentationReply==null||presentationGeometry==null||backdrop==null||!backdrop.ready
+   ||presentationGeometry.containsKey(HandoffProtocol.BACKDROP)||presentationGeometry.getBoolean("background_sent")||stopped||backgrounded||closing)return;
+ if(!Objects.equals(presentationLayoutKey,handoffGeometryKey()))return;
+ if(!putHandoffBackdrop(presentationGeometry)){cancelHandoffPresentation();return;}
+ // A settled fallback has no bitmap; mark it too so polling does not resend it.
+ presentationGeometry.putBoolean("background_sent",true);
+ presentationReply.send(HandoffProtocol.BACKGROUND,new Bundle(presentationGeometry));
+ Log.i(TAG,"handoff_background_prepared task="+presentationGeometry.getInt(HandoffProtocol.TASK));
+}
+private void cancelHandoffPresentation(){
+ if(!handoffPresentation)return;
+ handoffPresentation=false;presentationGeneration++;entranceInputBlocked=false;
+ android.os.ResultReceiver reply=presentationReply;presentationReply=null;
+ presentationGeometry=null;presentationLayoutKey=null;presentationLiveKey=null;presentationLiveReady=false;
+ if(reply!=null)reply.send(HandoffProtocol.CANCELLED,Bundle.EMPTY);
+ for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
+ Log.i(TAG,"handoff_presentation_result result=cancelled");
+}
+private void releaseEntrance(){
+  cancelHandoffPresentation();
+  if(pendingEntrance!=null&&gestureHandoff)failHandoff(pendingEntrance,"preempted");
   hangEntranceGeneration++;hangEntranceDue=false;entranceFrontReady=false;entranceFrameReady=false;entranceFramePending=false;
+  entranceInputBlocked=false;closeEntranceCover("entrance_released");
   Slot shown=entranceSlot!=null?entranceSlot:pendingEntrance;pendingEntrance=null;entranceSlot=null;
   if(entranceFlying!=null){if(entranceFlying.getParent()==stage)stage.removeView(entranceFlying);entranceFlying=null;}
   if(shown!=null&&shown.card!=null)shown.card.setAlpha(1f);
   for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
+}
+/** Drops the entrance input block as soon as the first frame with the final geometry is
+ *  committed, so a card becomes tappable ~500 ms earlier than it used to (TODO D3). */
+private void unlockEntranceInput(){
+  if(!entranceInputBlocked)return;
+  entranceInputBlocked=false;
+  for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
+  Log.i(TAG,"entrance_input_unlocked slots="+slots.size());
+}
+/** Raises the full-screen buffer for a container raise.
+ *
+ *  <p>Created at raise time on purpose. The hang flow hands the screen to the launcher so the
+ *  user can pick an app; a cover spanning the whole hang would black the launcher out. The gap
+ *  that needs covering is the container surface rebuild after {@code backgroundWorkbench()}
+ *  destroyed it — see {@code docs/启动动画对比与改进.md} §1.1.1. */
+private void raiseEntranceCover(String reason){
+  if(entranceCover!=null&&entranceCover.isClosed())entranceCover=null;
+  if(entranceCover!=null||closing||isFinishing()||stage==null)return;
+  Bitmap source="hang_front".equals(reason)&&hangSourceTask==hangTask?hangSourceFrame:null;
+  entranceCover=HandoffCover.create(this,reason,this::snapshotWorkbench,source);
+  entranceCover.onClosed(why->{
+   if(screenArrival&&("watchdog".equals(why)||"commit_timeout".equals(why)))finishArrival("cover_"+why);
+   if(switchPreparation.pending()&&("watchdog".equals(why)||"commit_timeout".equals(why)))failSwitchPreparation(switchPrepareToken,"cover_"+why);
+  });
+}
+/** All container raises wait for the independent cover, including retries and restore. */
+private void withEntranceCover(String reason,Runnable action){
+  if(closing||isFinishing())return;
+  if(stopped||backgrounded)raiseEntranceCover(reason);
+  HandoffCover cover=entranceCover;
+  Runnable guarded=()->{if(!closing&&!isFinishing())action.run();};
+  if(cover==null)guarded.run();else cover.dispatchWhenDrawn(guarded);
+}
+private void closeEntranceCover(String why){
+  coverWaitGeneration++;coverReleasePending=false;
+  HandoffCover cover=entranceCover;if(cover==null)return;
+  entranceCover=null;cover.close(why);
+}
+/** Closes the cover on the first frame the workbench actually commits after the raise. That is
+ *  the moment the rebuilt surface is on screen, so the hand-over is invisible. A watchdog keeps
+ *  a never-drawing window from leaving the buffer up (TODO A1). */
+private void releaseEntranceCoverWhenDrawn(){
+  if(entranceCover==null)return;
+  if(stage==null||stage.getWidth()==0){closeEntranceCover("no_stage");return;}
+  if(coverReleasePending)return;
+  coverReleasePending=true;
+  final int generation=++coverWaitGeneration;
+  awaitCoveredSurfaces(generation);
+}
+/** A host frame can contain only a SurfaceView hole. Require live children and a committed
+ *  fit transaction before asking for the host frame that will replace the independent cover. */
+private void awaitCoveredSurfaces(int generation){
+  if(generation!=coverWaitGeneration||entranceCover==null)return;
+  if(entranceCover.isClosed()){closeEntranceCover("cover_expired");return;}
+  String key=entranceSurfaceKey();
+  if(key==null){handler.postDelayed(()->awaitCoveredSurfaces(generation),MotionSpec.SURFACE_RETRY_MS);return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted entrance slot "+s.id);
+   fit.addTransactionCommittedListener((Executor)handler::post,()->commitCoveredFrame(generation,key));
+   fit.apply();
+  }catch(Throwable e){Log.w(TAG,"entrance_surface_commit_failed",e);handler.postDelayed(()->awaitCoveredSurfaces(generation),MotionSpec.SURFACE_RETRY_MS);}
+}
+private String entranceSurfaceKey(){
+  if(closing||stopped||backgrounded||stage==null||layoutPosted||stage.isLayoutRequested()||slots.isEmpty()||stage.getWidth()>=stage.getHeight()||getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT){
+   entranceWaitReason="host closing="+closing+" stopped="+stopped+" backgrounded="+backgrounded+" layout="+layoutPosted;
+   return null;
+  }
+  StringBuilder key=new StringBuilder().append(primary).append(':').append(stage.getWidth()).append('x').append(stage.getHeight());
+  for(Slot s:slots){
+   if(s.released||s.failed||s.taskId<0||s.surface==null||s.card==null||s.card.isLayoutRequested()||s.surface.isLayoutRequested()){
+    entranceWaitReason="slot="+s.id+" task="+s.taskId+" released="+s.released+" failed="+s.failed+" layout_pending";return null;
+   }
+   try{
+    SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface),plate=((SurfaceView)s.surface).getSurfaceControl();
+    int state=taskDrawState(s);
+    if(!TaskSurfaceEvidence.ready(state)||leash==null||!leash.isValid()||plate==null||!plate.isValid()
+     ||!((SurfaceView)s.surface).getHolder().getSurface().isValid()){
+     entranceWaitReason="slot="+s.id+" task="+s.taskId+" draw="+state+" "+s.drawDetail+" leash="+(leash!=null&&leash.isValid())+" plate="+(plate!=null&&plate.isValid())+" holder="+((SurfaceView)s.surface).getHolder().getSurface().isValid();return null;
+    }
+    key.append('|').append(s.id).append(':').append(s.taskId).append(':').append(LiveTaskContent.layerId(leash))
+     .append(':').append(LiveTaskContent.layerId(plate)).append(':').append(s.surface.getWidth()).append('x').append(s.surface.getHeight())
+     .append(':').append(s.orientationAxis).append(':').append(s.renderBounds);
+   }catch(Throwable e){entranceWaitReason="slot="+s.id+" task="+s.taskId+" exception="+e.getClass().getSimpleName();return null;}
+  }
+  entranceWaitReason="ready";
+  return key.toString();
+}
+/** C17 only publishes hasDrawnWindow in certain canvas transitions. An absent key is unknown;
+ * for that case sample the current task's child layers, not a cached task snapshot. */
+private int taskDrawState(Slot s) throws Exception {
+  Field draw=viewApi.getDeclaredField("mDrawState");draw.setAccessible(true);int cached=draw.getInt(s.surface);
+  Field info=viewApi.getDeclaredField("mTaskInfo");info.setAccessible(true);Object task=info.get(s.surface);
+  int actual=task==null?-1:task.getClass().getField("taskId").getInt(task);
+  boolean hasState=false;int bundleState=-1;
+  if(task!=null){
+   Object value=task.getClass().getField("mOplusExtraBundle").get(task);
+   Field key=viewApi.getDeclaredField("HAS_DRAWN_WINDOW");key.setAccessible(true);String name=(String)key.get(null);
+   if(value instanceof Bundle){hasState=((Bundle)value).containsKey(name);bundleState=((Bundle)value).getInt(name,-1);}
+  }
+  s.drawDetail="cached="+cached+" info_task="+actual+" bundle_has_draw="+hasState+" bundle_draw="+bundleState;
+  if(actual!=s.taskId||!s.embedded||!((SurfaceView)s.surface).getHolder().getSurface().isValid()) {s.drawEvidence.invalidate();return -1;}
+  SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface),plate=((SurfaceView)s.surface).getSurfaceControl();
+  if(!s.drawEvidence.bind(actual,LiveTaskContent.layerId(leash),LiveTaskContent.layerId(plate),s.surface.getWidth(),s.surface.getHeight(),s.renderBounds.width(),s.renderBounds.height()))return -1;
+  int state=s.drawEvidence.resolve(cached,bundleState,hasState);
+  if(state<0)probeTaskContent(s,leash);
+  return state;
+}
+private void probeTaskContent(Slot s,SurfaceControl leash){
+ if(closing||stopped||backgrounded||s.released||s.contentProbeUnavailable||SystemClock.uptimeMillis()<s.nextContentProbe)return;
+ int token=s.drawEvidence.beginProbe();if(token<0)return;
+ final SurfaceControl captured;
+ try{captured=(SurfaceControl)de.robv.android.xposed.XposedHelpers.newInstance(SurfaceControl.class,leash,"WindowDeckContentProbe");}
+ catch(Throwable e){s.drawEvidence.completeProbe(token,false);s.contentProbeUnavailable=true;Log.w(TAG,"task_content_probe_copy_failed",e);return;}
+ if(contentThread==null){contentThread=new HandlerThread("WindowDeckLiveContent");contentThread.start();contentWorker=new Handler(contentThread.getLooper());}
+ final int task=s.taskId,width=s.renderBounds.width(),height=s.renderBounds.height();
+ s.nextContentProbe=SystemClock.uptimeMillis()+80;
+ contentWorker.post(()->{
+  boolean content=false;Throwable failure=null;
+  try{content=s.orientationAxis==2?LiveTaskContent.presented(captured,width,height):LiveTaskContent.sample(captured,width,height);}catch(Throwable e){failure=e;}finally{captured.release();}
+  final boolean ready=content;final Throwable error=failure;
+  handler.post(()->{
+   if(closing||stopped||backgrounded||s.released||s.taskId!=task)return;
+   try{
+    // Rebind first: a replacement layer/plate invalidates an in-flight sample.
+    taskDrawState(s);
+    if(!s.drawEvidence.completeProbe(token,ready))return;
+    if(error!=null){s.contentProbeUnavailable=true;Log.w(TAG,"task_content_probe_unavailable slot="+s.id+" task="+task,error);}
+    else if(ready){Log.i(TAG,"task_content_ready slot="+s.id+" task="+task+" evidence=live_child_layers "+s.drawDetail);maybeAnimateAddedCard();}
+   }catch(Throwable e){s.drawEvidence.invalidate();Log.w(TAG,"task_content_probe_stale slot="+s.id,e);}
+  });
+ });
+}
+/** Draw state 2 can be a black buffer after the game has left the release frame. Hold the snapshot until a non-black child frame, then let the poll commit it. */
+private void probeLandscapePresented(Slot s,SurfaceControl leash){
+ if(closing||stopped||backgrounded||s.released||s.contentProbeUnavailable||SystemClock.uptimeMillis()<s.nextContentProbe)return;
+ if(s.renderBounds.width()<2||s.renderBounds.height()<2)return;
+ int token=s.drawEvidence.beginProbe();if(token<0)return;
+ final SurfaceControl captured;
+ try{captured=(SurfaceControl)de.robv.android.xposed.XposedHelpers.newInstance(SurfaceControl.class,leash,"WindowDeckContentProbe");}
+ catch(Throwable e){s.drawEvidence.completeProbe(token,false);s.contentProbeUnavailable=true;Log.w(TAG,"handoff_presented_copy_failed",e);return;}
+ if(contentThread==null){contentThread=new HandlerThread("WindowDeckLiveContent");contentThread.start();contentWorker=new Handler(contentThread.getLooper());}
+ final int task=s.taskId,width=s.renderBounds.width(),height=s.renderBounds.height();
+ s.nextContentProbe=SystemClock.uptimeMillis()+80;
+ contentWorker.post(()->{
+  boolean shown=false;Throwable failure=null;
+  try{shown=LiveTaskContent.presented(captured,width,height);}catch(Throwable e){failure=e;}finally{captured.release();}
+  final boolean ready=shown;final Throwable error=failure;
+  handler.post(()->{
+   if(closing||stopped||backgrounded||s.released||s.taskId!=task)return;
+   try{
+    taskDrawState(s);
+    if(!s.drawEvidence.completeProbe(token,ready))return;
+    if(error!=null){s.contentProbeUnavailable=true;Log.w(TAG,"handoff_presented_unavailable slot="+s.id+" task="+task,error);}
+    else if(ready){Log.i(TAG,"handoff_frame_presented task="+task);maybeAnimateAddedCard();}
+   }catch(Throwable e){s.drawEvidence.invalidate();Log.w(TAG,"handoff_presented_stale slot="+s.id,e);}
+  });
+ });
+}
+private void commitCoveredFrame(int generation,String key){
+  if(generation!=coverWaitGeneration||entranceCover==null)return;
+  if(!key.equals(entranceSurfaceKey())){awaitCoveredSurfaces(generation);return;}
+  stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+   if(generation!=coverWaitGeneration||entranceCover==null)return;
+   // Two animation frames on top of the commit, the same margin releaseSlot() uses before it
+   // uncovers resumed tasks. A commit is a submission; the compositor presents it a frame later,
+   // and closing on the commit itself could expose one frame of the still-hidden launcher.
+   stage.postOnAnimation(()->stage.postOnAnimation(()->{
+    if(generation!=coverWaitGeneration||entranceCover==null)return;
+    if(!key.equals(entranceSurfaceKey())){awaitCoveredSurfaces(generation);return;}
+    closeEntranceCover("frame_committed");unlockEntranceInput();
+   }));
+  }));
+  stage.invalidate();
+  // HandoffCover owns the absolute watchdog; retries never extend its deadline.
+}
+/** Fallback face for the cover when the privileged display capture is refused in this process:
+ *  the wallpaper plus every card's own task snapshot, i.e. the workbench as it was last drawn.
+ *  "最差也是上一次画面" instead of pure black (TODO A1-2). */
+private Bitmap snapshotWorkbench(){
+  try{
+   int width=stage==null?0:stage.getWidth(),height=stage==null?0:stage.getHeight();
+   if(width<2||height<2){Log.w(TAG,"entrance_cover_snapshot_skipped size="+width+"x"+height);return null;}
+   Rect display=getWindowManager().getMaximumWindowMetrics().getBounds();
+   int displayW=Math.min(display.width(),display.height()),displayH=Math.max(display.width(),display.height());
+   int[] origin=new int[2];stage.getLocationOnScreen(origin);
+   if(!DisplayGeometry.fitsContent(width,height,origin[0],origin[1],displayW,displayH)){
+    Log.w(TAG,"entrance_cover_snapshot_skipped reason=unstable_stage");return null;
+   }
+   Bitmap out=Bitmap.createBitmap(displayW,displayH,Bitmap.Config.ARGB_8888);
+   Canvas canvas=new Canvas(out);canvas.drawColor(Ui.CHROME);
+   Bitmap wallpaper=backdrop==null?null:backdrop.currentBitmap();
+   if(wallpaper!=null&&!wallpaper.isRecycled()){
+    Rect dst=new Rect(0,0,displayW,displayH);
+    canvas.drawBitmap(wallpaper,new Rect(0,0,wallpaper.getWidth(),wallpaper.getHeight()),dst,null);
+   }
+   canvas.translate(origin[0],origin[1]);
+   for(Slot s:slots){
+    if(s.card==null||s.released)continue;
+    int left=Math.round(s.card.getLeft()+s.card.getTranslationX());
+    int top=Math.round(s.card.getTop()+s.card.getTranslationY());
+    int w=Math.round(s.card.getWidth()*s.card.getScaleX()),h=Math.round(s.card.getHeight()*s.card.getScaleY());
+    if(w<=0||h<=0)continue;
+    Rect dst=new Rect(left,top,left+w,top+h);
+    Bitmap face=s.surface==null?null:hangFace(s);
+    if(face!=null&&!face.isRecycled())canvas.drawBitmap(face,new Rect(0,0,face.getWidth(),face.getHeight()),dst,null);
+    else canvas.drawRoundRect(new RectF(dst),Ui.dp(this,Ui.MAIN_RADIUS),Ui.dp(this,Ui.MAIN_RADIUS),cardFill());
+   }
+   Log.i(TAG,"entrance_cover_snapshot slots="+slots.size()+" size="+displayW+"x"+displayH+" stage="+width+"x"+height+" origin="+Arrays.toString(origin));
+   return out;
+  }catch(Throwable e){Log.w(TAG,"entrance_cover_snapshot_failed",e);return null;}
  }
+private android.graphics.Paint cardFill(){
+  android.graphics.Paint paint=new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+  paint.setColor(Ui.CARD);return paint;
+}
  private void beginHangEntrance(){
   if(!hangEntranceDue||closing||!screenArrival||stopped||backgrounded||animation!=null)return;
   hangEntranceDue=false;playScreenArrival();
  }
  private boolean poseScreenArrival(Slot fresh,boolean fromEdge,boolean hungMain){
+  return poseScreenArrival(fresh,fromEdge,hungMain,MotionSpec.ARRIVAL_UNLOCK_MS);
+ }
+ private boolean poseScreenArrival(Slot fresh,boolean fromEdge,boolean hungMain,long waitMs){
   if(fresh==null||fresh.card==null||stage.getWidth()==0||slots.isEmpty())return false;
   fresh.card.setAlpha(1f);
   int[] loc=new int[2];stage.getLocationOnScreen(loc);
@@ -398,13 +873,33 @@ public final class WorkbenchActivity extends Activity {
    if(s==fresh)from[i]=new int[]{-loc[0],-loc[1],Math.max(1,screen.width()),Math.max(1,screen.height())};
    else if(placed!=null)from[i]=new int[]{placed.left-loc[0],placed.top-loc[1],Math.max(1,placed.width()),Math.max(1,placed.height())};
    else from[i]=new int[]{target[i][0],target[i][1],target[i][2],target[i][3]};
+   s.motionFromRadius=s==fresh?0f:Ui.dp(this,hungMain&&i==slots.size()-1?Ui.MAIN_RADIUS:(i==primary?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS));
    apply(s,target[i]);transformCard(s,from[i],target[i],0f);
   }
-  raiseMain();arrivalSlot=fresh;arrivalFrom=from;screenArrival=true;hangEntranceDue=true;
-  handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,1500);
+  raiseMain();arrivalSlot=fresh;arrivalFrom=from;screenArrival=true;hangEntranceDue=true;entranceInputBlocked=true;
+  arrivalGeometry=arrivalGeometryKey();arrivalFromEdge=fromEdge;arrivalHungMain=hungMain;
+  arrivalScene=hangReplace?MotionSpec.Scene.REPLACE:MotionSpec.Scene.ADD;
+  arrivalToken=arrivalRun.begin(SystemClock.uptimeMillis(),waitMs);
+  handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,waitMs);
   if(!stopped&&!backgrounded)handler.post(this::beginHangEntrance);
-  Log.i(TAG,"arrive_posed edge="+fromEdge+" screen="+screen.width()+"x"+screen.height());
+  Log.i(TAG,"arrive_posed token="+arrivalToken+" task="+fresh.sourceTaskId+" edge="+fromEdge+" screen="+screen.width()+"x"+screen.height());
   return true;
+}
+ private String arrivalGeometryKey(){
+  StringBuilder key=new StringBuilder().append(stage.getWidth()).append('x').append(stage.getHeight()).append(':').append(effectiveMode());
+  for(Slot s:slots)key.append('|').append(s.id).append(':').append(s.orientationAxis).append(':').append(s.renderBounds);
+  return key.toString();
+ }
+ private void rebaseArrivalLayout(){
+  if(!screenArrival||Objects.equals(arrivalGeometry,arrivalGeometryKey()))return;
+  if(arrivalRun.phase()!=EntranceRun.Phase.WAITING){finishArrival("cancelled_geometry_changed");layoutCards(false);return;}
+  long remaining=arrivalRun.remaining(SystemClock.uptimeMillis());
+  if(remaining==0){checkArrivalDeadline();layoutCards(false);return;}
+  Slot fresh=arrivalSlot;boolean edge=arrivalFromEdge,hung=arrivalHungMain;
+  if(animation!=null){ValueAnimator old=animation;animation=null;old.cancel();}
+  clearArrivalFace("orientation_rebase");arrivalRun.cancel();
+  Log.i(TAG,"arrive_layout_rebased task="+(fresh==null?-1:fresh.taskId)+" old_token="+arrivalToken+" remaining_ms="+remaining);
+  if(!poseScreenArrival(fresh,edge,hung,remaining)){finishArrival("cancelled_geometry_unavailable");layoutCards(false);}
  }
  private java.util.HashMap<Slot,Rect> edgeRects(Slot fresh,int[][] target,int[] loc,Rect screen,boolean hungMain){
   java.util.HashMap<Slot,Rect> map=new java.util.HashMap<>();
@@ -420,65 +915,180 @@ public final class WorkbenchActivity extends Activity {
  }
  private Rect placed(Slot s,int[][] target,int[] loc){int i=slots.indexOf(s);int[] r=target[Math.max(0,i)];return new Rect(r[0]+loc[0],r[1]+loc[1],r[0]+loc[0]+r[2],r[1]+loc[1]+r[3]);}
  private void playScreenArrival(){
-  if(!screenArrival||arrivalFrom==null||animation!=null||closing)return;
+  if(!screenArrival||arrivalFrom==null||animation!=null||closing||arrivalRun.phase()!=EntranceRun.Phase.WAITING)return;
+  // A fullscreen landscape launch can still be returning the display to our portrait
+  // container. Wait for its actual canvas instead of animating against the old display.
+  if(stage.getWidth()>=stage.getHeight()||getResources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT){handler.postDelayed(this::playScreenArrival,MotionSpec.SURFACE_RETRY_MS);return;}
   // The entrance flag swallows every card touch. Drop it before the spring so the end state can receive input.
   pendingEntrance=null;entranceFrontReady=false;entranceFrameReady=false;entranceFramePending=false;createdFromGesture=false;
   final int[][] from=arrivalFrom;final int[][] target=cardGeometry().cards;
   final ArrayList<Slot> current=new ArrayList<>(slots);
-  animation=ValueAnimator.ofFloat(0f,1f);animation.setDuration(600);animation.setInterpolator(HangShelf::settle);
+  final int token=arrivalToken;
+  // Scene timing is explicit: ordinary add 500 ms, replace 300 ms, and only a
+  // MULTI_WINDOW scene uses vivo's fixed 600 ms timeline with position delays.
+  // Apply the curve after local time conversion, never re-time an already-curved value.
+  final MotionSpec.Scene scene=arrivalScene;
+  final long total=MotionSpec.duration(scene);
+  final int arrivalPrimary=primary;
+  final boolean[] moving=new boolean[current.size()];
+  final boolean[] faceAttempted={false};
+  animation=ValueAnimator.ofFloat(0f,1f);animation.setDuration(total);animation.setInterpolator(null);
   for(int i=0;i<current.size();i++)inputRole(current.get(i),i==primary);
-  animation.addUpdateListener(a->{float f=(Float)a.getAnimatedValue();for(int i=0;i<current.size()&&i<from.length&&i<target.length;i++)if(current.get(i).card!=null)transformCard(current.get(i),from[i],target[i],f);});
-  animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){if(animation!=a)return;animation=null;finishArrival();handler.post(()->focusPrimary("arrive"));}});
-  animation.start();Log.i(TAG,"arrive_animation_start slots="+current.size());
+  animation.addUpdateListener(a->{float raw=(Float)a.getAnimatedValue();
+   long now=SystemClock.uptimeMillis();if(arrivalLastFrame>0)arrivalFrameGap=Math.max(arrivalFrameGap,now-arrivalLastFrame);arrivalLastFrame=now;arrivalFrames++;
+   for(int i=0;i<current.size()&&i<from.length&&i<target.length;i++)if(current.get(i).card!=null){
+    int position=MotionSpec.entrancePosition(i,arrivalPrimary);
+    float local=MotionSpec.entranceFraction(raw,scene,position);
+    if(local>0f&&!moving[i]){moving[i]=true;Log.i(TAG,"arrive_card_start slot="+current.get(i).id+" position="+position+" primary="+(i==arrivalPrimary)+" delay_ms="+MotionSpec.delayFor(scene,position)+" elapsed_ms="+Math.round(raw*total));}
+    transformCard(current.get(i),from[i],target[i],scene==MotionSpec.Scene.MULTI_WINDOW?MotionSpec.geometry(local):EntranceMotion.fraction(local,0));
+   }});
+  animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){
+   Log.i(TAG,"arrive_animation_end token="+token+" current="+(animation==a)+" phase="+arrivalRun.phase());
+   if(animation!=a)return;
+   if(!arrivalRun.settle(token,SystemClock.uptimeMillis(),MotionSpec.ARRIVAL_UNLOCK_MS)){checkArrivalDeadline();return;}
+   animation=null;entranceInputBlocked=true;stage.watch("arrival_"+token);
+   for(int i=0;i<slots.size();i++){resetCardTransform(slots.get(i));inputRole(slots.get(i),i==primary);}
+   handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,arrivalRun.remaining(SystemClock.uptimeMillis()));
+   Log.i(TAG,"arrive_settling token="+token+" task="+(arrivalSlot==null?-1:arrivalSlot.taskId));
+   settleArrivalFrame(token,true);
+  }});
+  final ValueAnimator expected=animation;
+  final boolean[] started={false};
+  final int[] waits={0};
+  Runnable start=()->{
+   if(started[0]||animation!=expected||!screenArrival||closing||stopped||backgrounded)return;
+   if(entranceSurfaceKey()==null)return;
+   if(!arrivalRun.start(token,SystemClock.uptimeMillis(),total+MotionSpec.FRAME_TIMEOUT_MS)){checkArrivalDeadline();return;}
+   handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,arrivalRun.remaining(SystemClock.uptimeMillis()));
+   started[0]=true;arrivalLastFrame=arrivalFrameGap=0;arrivalFrames=0;unlockEntranceInput();expected.start();releaseEntranceCoverWhenDrawn();
+   Log.i(TAG,"arrive_animation_start token="+token+" slots="+current.size()+" scene="+scene+" duration_ms="+total+" curve="+(scene==MotionSpec.Scene.MULTI_WINDOW?"coui_geometry":"c17_rapid_path"));
+  };
+  Runnable prepare=new Runnable(){public void run(){
+   if(started[0]||animation!=expected||!screenArrival||closing||!arrivalRun.waiting(token))return;
+   if(arrivalRun.remaining(SystemClock.uptimeMillis())==0){checkArrivalDeadline();return;}
+   String key=entranceSurfaceKey();
+   if(key==null){
+    if(++waits[0]==30)for(Slot s:current)try{Log.w(TAG,"arrival_surface_wait slot="+s.id+" task="+s.taskId+" draw="+taskDrawState(s)+" "+s.drawDetail+" stage_layout="+stage.isLayoutRequested()+" card_layout="+s.card.isLayoutRequested()+" surface_layout="+s.surface.isLayoutRequested()+" holder_valid="+((SurfaceView)s.surface).getHolder().getSurface().isValid());}catch(Throwable e){Log.w(TAG,"arrival_surface_wait_failed",e);}
+    handler.postDelayed(this,MotionSpec.SURFACE_RETRY_MS);return;
+   }
+   if(!faceAttempted[0]){faceAttempted[0]=true;if(prepareArrivalFace(arrivalSlot,this)){return;}}
+   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+    for(Slot s:current)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted arrival slot "+s.id);
+    fit.addTransactionCommittedListener((Executor)handler::post,()->{
+     if(animation!=expected||started[0])return;
+     stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+      if(key.equals(entranceSurfaceKey()))start.run();
+      if(!started[0])handler.post(this);
+     }));stage.invalidate();
+    });fit.apply();
+   }catch(Throwable e){Log.w(TAG,"arrival_surface_commit_failed",e);handler.postDelayed(this,MotionSpec.SURFACE_RETRY_MS);}
+  }};
+  handler.post(prepare);
+  Log.i(TAG,"arrive_waiting_surfaces slots="+current.size());
+}
+ private void checkArrivalDeadline(){
+  EntranceRun.Phase phase=arrivalRun.phase();
+  if(phase!=EntranceRun.Phase.WAITING&&phase!=EntranceRun.Phase.RUNNING&&phase!=EntranceRun.Phase.SETTLING)return;
+  long remaining=arrivalRun.remaining(SystemClock.uptimeMillis());
+  if(remaining>0){handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,remaining+1);return;}
+  if(arrivalRun.timeout(arrivalToken,SystemClock.uptimeMillis())){
+   Log.w(TAG,"arrive_timeout phase="+phase+" token="+arrivalToken+" waiting_for="+entranceWaitReason+" "+stage.trace());
+   finishArrival("timeout_"+phase);
+  }
  }
- private void finishArrival(){
+ private void finishArrival(String result){
+  if(!"completed".equals(result))arrivalRun.cancel();
+  Log.i(TAG,"arrive_result result="+result+" token="+arrivalToken+" task="+(arrivalSlot==null?-1:arrivalSlot.taskId));
+  Log.i(TAG,"arrive_motion_frames callbacks="+arrivalFrames+" max_gap_ms="+arrivalFrameGap+" owner=ui_animator");
+  stage.stopWatching();
   handler.removeCallbacks(arrivalUnlock);
   if(animation!=null){ValueAnimator old=animation;animation=null;old.cancel();}
   boolean locked=screenArrival||pendingEntrance!=null||settlingInput;
   screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;
   pendingEntrance=null;entranceFrontReady=false;entranceFrameReady=false;entranceFramePending=false;createdFromGesture=false;settlingInput=false;
-  if(settleListener!=null&&stage!=null){stage.getViewTreeObserver().removeOnPreDrawListener(settleListener);settleListener=null;}
+  entranceInputBlocked=false;closeEntranceCover("arrival_"+result);
   for(Slot s:slots)if(s.card!=null)resetCardTransform(s);
   for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
   try{Method method=viewApi.getMethod("setNoNeedStartEmbedded",boolean.class);for(Slot s:slots)if(s.surface!=null)method.invoke(s.surface,false);}catch(Throwable ignored){}
   layoutCaption();
+  clearArrivalFace("completed".equals(result)?"frame_committed":"cancelled");
+  scheduleLayoutEvidence("arrival_"+result);
   if(locked)Log.i(TAG,"arrive_unlocked");
  }
+ private boolean prepareArrivalFace(Slot slot,Runnable resume){
+  clearArrivalFace("superseded");
+  if(slot==null||slot.released||slot.taskId<0||slot.surface==null)return false;
+  try{
+   if(hangSourceTask==slot.taskId&&hangSourceFrame!=null&&!hangSourceFrame.isRecycled()){
+    Bitmap bitmap=hangSourceFrame;hangSourceFrame=null;hangSourceTask=-1;
+    attachArrivalFace(slot,bitmap,"pre_reparent_task",0);handler.post(resume);return true;
+   }
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(slot.surface);
+   final int layer=LiveTaskContent.layerId(leash),task=slot.taskId,generation=arrivalFaceGeneration;
+   final int width=slot.renderBounds.width(),height=slot.renderBounds.height();
+   final SurfaceControl copied=(SurfaceControl)de.robv.android.xposed.XposedHelpers.newInstance(SurfaceControl.class,leash,"WindowDeckArrivalContent");
+   if(contentThread==null){contentThread=new HandlerThread("WindowDeckLiveContent");contentThread.start();contentWorker=new Handler(contentThread.getLooper());}
+   final long began=SystemClock.uptimeMillis();
+   contentWorker.post(()->{
+    Bitmap frame=null;
+    try{frame=LiveTaskContent.captureFrame(copied,width,height,1440);}catch(Throwable e){Log.w(TAG,"arrive_content_capture_failed",e);}finally{copied.release();}
+    final Bitmap bitmap=frame;
+    handler.post(()->{
+     boolean valid=false;
+     try{valid=generation==arrivalFaceGeneration&&screenArrival&&!closing&&!stopped&&!slot.released&&slot.taskId==task&&slot.renderBounds.width()==width&&slot.renderBounds.height()==height&&LiveTaskContent.layerId((SurfaceControl)taskLeash.get(slot.surface))==layer;}catch(Throwable ignored){}
+     if(valid&&bitmap!=null){
+      attachArrivalFace(slot,bitmap,"live_child_layers",SystemClock.uptimeMillis()-began);
+     }else{if(bitmap!=null)bitmap.recycle();Log.w(TAG,"arrive_content_cover_unavailable task="+task+" current="+valid);}
+     if(generation==arrivalFaceGeneration&&screenArrival&&!closing&&!stopped&&!slot.released)handler.post(resume);
+    });
+   });return true;
+  }catch(Throwable e){Log.w(TAG,"arrive_content_cover_unavailable",e);return false;}
+ }
+ private void attachArrivalFace(Slot slot,Bitmap bitmap,String source,long captureMs){
+  RecoveryCover cover=new RecoveryCover(this);cover.setBitmap(bitmap);
+  slot.card.addView(cover,1,new FrameLayout.LayoutParams(slot.surface.getWidth(),slot.surface.getHeight()));
+  int[] src=presentationSize(slot);cover.fit(SurfaceFit.sourceQuad(src[0],new int[]{0,0,src[0],src[1]},rotatePresentation(slot)),displayQuad(slot,slot.surface.getWidth(),slot.surface.getHeight()),slot.renderBounds.width(),slot.renderBounds.height());
+  arrivalFaceSlot=slot;arrivalFace=cover;arrivalFaceBitmap=bitmap;
+  Log.i(TAG,"arrive_content_cover task="+slot.taskId+" source="+source+" size="+bitmap.getWidth()+"x"+bitmap.getHeight()+" capture_ms="+captureMs);
+ }
+ /** Animator end only starts settling. Confirm live fit, then remove the face and
+  * traverse input-region changes before reporting success or focusing the task. */
+ private void settleArrivalFrame(int token,boolean reveal){
+  if(!arrivalRun.settling(token)||!screenArrival||closing||stopped||backgrounded)return;
+  if(arrivalRun.remaining(SystemClock.uptimeMillis())==0){checkArrivalDeadline();return;}
+  String key=entranceSurfaceKey();
+  if(key==null){handler.postDelayed(()->settleArrivalFrame(token,reveal),MotionSpec.SURFACE_RETRY_MS);return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted final arrival slot "+s.id);
+   fit.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(!arrivalRun.settling(token)||!screenArrival)return;
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+     if(!arrivalRun.settling(token)||!screenArrival)return;
+     if(!key.equals(entranceSurfaceKey())){settleArrivalFrame(token,reveal);return;}
+     if(reveal){
+      clearArrivalFace("frame_committed");entranceInputBlocked=false;
+      for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
+      handler.post(()->settleArrivalFrame(token,false));
+     }else if(arrivalRun.complete(token,SystemClock.uptimeMillis())){
+      finishArrival("completed");handler.post(()->focusPrimary("arrive"));
+     }else checkArrivalDeadline();
+    }));stage.invalidate();
+   });fit.apply();
+  }catch(Throwable e){Log.w(TAG,"arrival_final_commit_failed",e);handler.postDelayed(()->settleArrivalFrame(token,reveal),MotionSpec.SURFACE_RETRY_MS);}
+ }
+ private void clearArrivalFace(String reason){
+  arrivalFaceGeneration++;
+  if(arrivalFace==null)return;
+  RecoveryCover cover=arrivalFace;Slot slot=arrivalFaceSlot;arrivalFace=null;arrivalFaceSlot=null;
+  Bitmap bitmap=arrivalFaceBitmap;arrivalFaceBitmap=null;cover.setBitmap(null);if(bitmap!=null)handler.postDelayed(()->{if(!bitmap.isRecycled())bitmap.recycle();},1000);if(cover.getParent() instanceof android.view.ViewGroup)((android.view.ViewGroup)cover.getParent()).removeView(cover);
+  Log.i(TAG,"arrive_content_reveal result="+reason+" task="+(slot==null?-1:slot.taskId)+" waiting_for="+entranceWaitReason);
+ }
+ /** Unsupported ingress has no trustworthy source frame. Show the committed live task
+  *  rather than inventing a 112 dp launch point or reporting a snapshot animation as live. */
  private void animateAddedCard(Slot slot){
-  if(slot.card==null)return;
-  int index=slots.indexOf(slot);if(index<0||stage.getWidth()==0||stage.getHeight()==0)return;
-  int[] target=cardGeometry().cards[index];
-  int width=target[2],height=target[3];
-  float startScale=Math.min(0.45f,Ui.dp(this,112)/(float)Math.max(1,width));
-  float startX=(stage.getWidth()-width*startScale)/2f,startY=Ui.dp(this,40);
-  if(addAnimation!=null){addAnimation.cancel();addAnimation=null;}
-  Bitmap snapshot=null;
-  try{Method capture=viewApi.getDeclaredMethod("getSnapBitMap",boolean.class);capture.setAccessible(true);snapshot=(Bitmap)capture.invoke(slot.surface,false);}
-  catch(Throwable e){Log.w(TAG,"add_snapshot_unavailable slot="+slot.id,e);}
-  ImageView flying=new ImageView(this);flying.setBackgroundColor(0xff202838);flying.setClickable(false);
-  if(snapshot!=null){flying.setImageBitmap(snapshot);flying.setScaleType(ImageView.ScaleType.FIT_XY);}
-  else {try{flying.setImageDrawable(getPackageManager().getActivityIcon(slot.component));}catch(Throwable ignored){}flying.setScaleType(ImageView.ScaleType.CENTER_INSIDE);}
-  flying.setPivotX(0f);flying.setPivotY(0f);flying.setElevation(Ui.dp(this,24));
-  entranceFlying=flying;entranceSlot=slot;stage.addView(flying,new FrameLayout.LayoutParams(width,height));flying.bringToFront();
-  flying.setTranslationX(startX);flying.setTranslationY(startY);flying.setScaleX(startScale);flying.setScaleY(startScale);
-  Ui.round(flying,Ui.dp(this,Ui.MAIN_RADIUS));
-  if(slot.card!=null)slot.card.setAlpha(0f);
-  ValueAnimator entrance=ValueAnimator.ofFloat(0f,1f);addAnimation=entrance;
-  for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
-  final int[] frames={0};
-  entrance.setDuration(650);entrance.setInterpolator(f->1f-(1f-f)*(1f-f)*(1f-f));
-  entrance.addUpdateListener(a->{if(addAnimation!=a)return;frames[0]++;float f=(Float)a.getAnimatedValue();
-   flying.setTranslationX(startX+(target[0]-startX)*f);flying.setTranslationY(startY+(target[1]-startY)*f);
-   flying.setScaleX(startScale+(1f-startScale)*f);flying.setScaleY(startScale+(1f-startScale)*f);
-  });
-  entrance.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
-   if(addAnimation!=a)return;addAnimation=null;if(entranceFlying==flying)entranceFlying=null;if(entranceSlot==slot)entranceSlot=null;stage.removeView(flying);if(slot.card!=null)slot.card.setAlpha(1f);raiseMain();layoutCaption();
-   for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
-   if(!closing&&!stopped&&!backgrounded)focusPrimary("add_animation_end");
-   Log.i(TAG,"add_card_animation_end slot="+slot.id+" frames="+frames[0]);
-  }});
-  entrance.start();
-  Log.i(TAG,"add_card_animation slot="+slot.id+" snapshot="+(snapshot!=null)+" from="+width+"x"+height+" target="+target[2]+"x"+target[3]);
+  Log.w(TAG,"add_card_result result=degraded_source_unavailable task="+slot.taskId);
+  releaseEntrance();raiseMain();layoutCaption();
+  if(!closing&&!stopped&&!backgrounded)focusPrimary("add_without_source");
  }
  private void hangForReplace(){
   if(closing||!initialized||recovering||dragging!=null||hanging||slots.isEmpty())return;
@@ -488,6 +1098,7 @@ public final class WorkbenchActivity extends Activity {
  private void hangForAdd(){
   if(closing||!initialized||recovering||dragging!=null||hanging)return;
   if(!hangReplace&&slots.size()>=Caps.MAX_TASKS){Toast.makeText(this,"最多同时打开五个应用",Toast.LENGTH_SHORT).show();return;}
+  cancelSwitchPreparation("new_picker");
   ArrayList<HangShelf.Card> cards=new ArrayList<>();
   Slot main=slots.get(primary);cards.add(new HangShelf.Card(hangFace(main),main.component.getPackageName(),screenRect(main.card),true));
   for(Slot s:slots)if(s!=main&&s.card!=null)cards.add(new HangShelf.Card(hangFace(s),s.component.getPackageName(),screenRect(s.card),false));
@@ -569,28 +1180,61 @@ public final class WorkbenchActivity extends Activity {
    finishExistingHang(s,false);return;
   }
   hanging=false;handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();publishState(slots.size());
-  hangTask=task;hangUser=user;hangConsumeTries=0;Log.i(TAG,"hang_pick task="+task+" pkg="+pkg);ensureHangConsumed();
+  hangTask=task;hangUser=user;hangConsumeTries=0;Log.i(TAG,"hang_pick task="+task+" pkg="+pkg);
+  final int generation=++hangSourceGeneration;final boolean[] finished={false};final long began=SystemClock.uptimeMillis();
+  if(hangSourceFrame!=null){hangSourceFrame.recycle();hangSourceFrame=null;}hangSourceTask=-1;
+  if(contentThread==null){contentThread=new HandlerThread("WindowDeckLiveContent");contentThread.start();contentWorker=new Handler(contentThread.getLooper());}
+  final Runnable[] attempt={null};
+  attempt[0]=()->{
+   if(finished[0]||generation!=hangSourceGeneration||closing||hangTask!=task)return;
+   contentWorker.post(()->{
+   Bitmap frame=null;
+   try{
+    Object wm=de.robv.android.xposed.XposedHelpers.callStaticMethod(Class.forName("android.view.WindowManagerGlobal"),"getWindowManagerService");
+    frame=(Bitmap)de.robv.android.xposed.XposedHelpers.callMethod(wm,"snapshotTaskForRecents",task);
+   }catch(Throwable e){Log.w(TAG,"hang_source_capture_failed task="+task,e);}
+   final Bitmap captured=frame;
+   final boolean presented=HandoffCover.visibleTaskFrame(captured);
+   handler.post(()->{
+    if(finished[0]||generation!=hangSourceGeneration||closing||hangTask!=task){if(captured!=null)captured.recycle();return;}
+    if(!presented){
+     HandoffCover.recycle(captured);
+     handler.postDelayed(attempt[0],80);return;
+    }
+    finished[0]=true;hangSourceFrame=captured;hangSourceTask=task;
+    Log.i(TAG,"hang_source_capture task="+task+" available=true presented=true ms="+(SystemClock.uptimeMillis()-began));ensureHangConsumed();
+   });
+   });
+  };
+  attempt[0].run();
+  handler.postDelayed(()->{if(!finished[0]&&generation==hangSourceGeneration&&!closing&&hangTask==task){finished[0]=true;Log.w(TAG,"hang_source_capture_timeout task="+task+" pixels_unavailable=true");ensureHangConsumed();}},1200);
  }
  private void ensureHangConsumed(){
   if(closing||hangTask<0)return;
-  if(stopped||backgrounded){bringWorkbenchForward();moveHangContainerFront();scheduleHangRetry();return;}
+  if(stopped||backgrounded){bringWorkbenchForward();scheduleHangRetry();return;}
   hangQuiet=true;consumeHangAdd();hangQuiet=false;
   if(hangTask>=0)scheduleHangRetry();
  }
  private void scheduleHangRetry(){
-  if(++hangConsumeTries>10){Log.w(TAG,"hang_consume_gave_up task="+hangTask);hangTask=-1;hangUser=-1;pendingHangFront=-1;hangReplace=false;Toast.makeText(this,"未能加入，请再试一次",Toast.LENGTH_SHORT).show();bringWorkbenchForward();moveHangContainerFront();return;}
+  if(++hangConsumeTries>10){Log.w(TAG,"hang_consume_gave_up task="+hangTask);hangTask=-1;hangUser=-1;pendingHangFront=-1;hangReplace=false;Toast.makeText(this,"未能加入，请再试一次",Toast.LENGTH_SHORT).show();bringWorkbenchForward();return;}
   handler.postDelayed(hangConsume,250);
- }
- private void moveHangContainerFront(){
-  try{ActivityManager am=(ActivityManager)getSystemService(ACTIVITY_SERVICE);am.getClass().getMethod("moveTaskToFront",int.class,int.class).invoke(am,getTaskId(),0);Log.i(TAG,"hang_move_front container="+getTaskId());}
-  catch(Throwable e){Log.w(TAG,"hang_move_front_failed",e);}
  }
  private void restoreFromHang(){
   if(!hanging)return;
   hanging=false;hangReplace=false;handler.removeCallbacks(hangWatch);hangShelf.hide();publishState(slots.size());
-  Log.i(TAG,"hang_restored");bringWorkbenchForward();
+  Log.i(TAG,"hang_restored");bringWorkbenchForward(this::releaseEntranceCoverWhenDrawn);
  }
- private void bringWorkbenchForward(){try{reorderTask(getTaskId(),true);Log.i(TAG,"hang_front container="+getTaskId());}catch(Throwable e){Log.w(TAG,"hang_front_failed",e);}}
+ private void bringWorkbenchForward(){bringWorkbenchForward(null);}
+ private void bringWorkbenchForward(Runnable afterRaised){
+  withEntranceCover("hang_front",()->{
+   try{reorderTask(getTaskId(),true);Log.i(TAG,"hang_front container="+getTaskId());}
+   catch(Throwable e){
+    Log.w(TAG,"hang_front_failed",e);
+    try{settleHangContainer();}catch(Throwable fallback){Log.w(TAG,"hang_settle_failed",fallback);closeEntranceCover("raise_failed");return;}
+   }
+   if(afterRaised!=null)afterRaised.run();
+  });
+ }
  private boolean selectExistingFromLauncher(Intent request){
   if(closing||!initialized||request.getIntExtra("containerTaskId",-1)!=getTaskId()||request.getLongExtra("instanceToken",0)!=stateToken)return false;
   long session=request.getLongExtra("selectionSession",0);int task=request.getIntExtra("selectedTask",-1);
@@ -608,26 +1252,29 @@ public final class WorkbenchActivity extends Activity {
   boolean replacing=hangReplace;hanging=false;hangReplace=false;
   handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();
   int index=slots.indexOf(selected);boolean promote=!replacing&&index>=0&&index!=primary&&!recovering&&dragging==null&&selected.taskId>=0;
-  if(promote)promote(index);else hangNote=selected.label+" 已在前台启动";
+  if(promote)queueExistingSwitch(selected,hangStarted);else hangNote=selected.label+" 已在前台启动";
   publishState(slots.size());
-  Log.i(TAG,"hang_existing task="+selected.taskId+" slot="+selected.id+" before_launch="+beforeLaunch+" replace="+replacing+" promote="+promote);
+  Log.i(TAG,"hang_existing task="+selected.taskId+" slot="+selected.id+" before_launch="+beforeLaunch+" replace="+replacing+" promote_requested="+promote);
   if(beforeLaunch){
    // The task never received a fullscreen launch: retain its existing embedding.
-   raiseHangContainer();
+   withEntranceCover("hang_raise",()->{raiseHangContainerNow();releaseEntranceCoverWhenDrawn();});
   }else{
    // Non-launcher entrances may already have detached the task. Rebind the SAME
    // task with scenario/container options; Surface reparent alone cannot do that.
    selected.pendingTask=selected.taskId;pendingHangFront=selected.taskId;
-   bringWorkbenchForward();handler.post(this::restorePendingTasks);
+   bringWorkbenchForward(()->handler.post(()->{restorePendingTasks();releaseEntranceCoverWhenDrawn();}));
   }
  }
  // Focusing this container makes ColorOS mark each embedded task always-on-top and move it to the front.
  // After the new task is in, drop that flag and raise only the container. Block the resume restart that would undo it.
  private void raiseHangContainer(){
+  withEntranceCover("hang_raise",this::raiseHangContainerNow);
+ }
+ private void raiseHangContainerNow(){
   if(closing||isFinishing())return;
   try{Method method=viewApi.getMethod("setNoNeedStartEmbedded",boolean.class);for(Slot s:slots)if(s.surface!=null)method.invoke(s.surface,true);}
   catch(Throwable e){Log.w(TAG,"hang_suppress_failed",e);}
-  try{settleHangContainer();}catch(Throwable e){Log.w(TAG,"hang_settle_failed",e);bringWorkbenchForward();}
+  try{settleHangContainer();}catch(Throwable e){Log.w(TAG,"hang_settle_failed",e);closeEntranceCover("raise_failed");}
   if(clearHangSuppress!=null)handler.removeCallbacks(clearHangSuppress);
   clearHangSuppress=()->{clearHangSuppress=null;if(pendingHangFront>=0)return;try{Method method=viewApi.getMethod("setNoNeedStartEmbedded",boolean.class);for(Slot s:slots)if(s.surface!=null)method.invoke(s.surface,false);}catch(Throwable e){Log.w(TAG,"hang_suppress_failed",e);}Log.i(TAG,"hang_suppress_cleared");};
   handler.postDelayed(clearHangSuppress,900);
@@ -638,7 +1285,7 @@ public final class WorkbenchActivity extends Activity {
   Class<?> token=Class.forName("android.window.WindowContainerToken"),wct=Class.forName("android.window.WindowContainerTransaction");
   Object tx=wct.getConstructor().newInstance();int container=getTaskId();boolean raised=false;
   for(Object value:tasks){ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)value;boolean child=false;for(Slot s:slots)if(!s.released&&s.taskId==task.taskId)child=true;if(!child&&task.taskId!=container)continue;Object t=task.getClass().getField("token").get(task);if(child)wct.getMethod("setAlwaysOnTop",token,boolean.class).invoke(tx,t,false);if(task.taskId==container){wct.getMethod("setHidden",token,boolean.class).invoke(tx,t,false);wct.getMethod("reorder",token,boolean.class).invoke(tx,t,true);raised=true;}}
-  if(!raised){bringWorkbenchForward();return;}
+  if(!raised)throw new IllegalStateException("Missing container "+container);
   Class<?> organizer=Class.forName("android.window.WindowOrganizer");organizer.getMethod("applyTransaction",wct).invoke(organizer.getConstructor().newInstance(),tx);
   Log.i(TAG,"hang_settle container="+container);
  }
@@ -743,11 +1390,12 @@ public final class WorkbenchActivity extends Activity {
   if(commit)removeSlot(s);
  }
  private void createWindow(Slot slot){
+  if(waitingForSourceRelease()&&slot==pendingEntrance){Log.i(TAG,"defer_embed_wait task="+slot.sourceTaskId);return;}
   try{
    updateRenderBounds(slot);
    slot.card=new PreviewCard(this);applyCardRadius(slot,slots.indexOf(slot)==primary);
    slot.card.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
-    if(!closing&&!slot.released&&r>l&&b>t){fitRecoveryCover(slot,r-l,b-t);scheduleLeashFit(slot,r-l,b-t);}
+    if(!closing&&!slot.released&&r>l&&b>t&&(l!=ol||t!=ot||r!=or||b!=ob)){fitRecoveryCover(slot,r-l,b-t);scheduleLeashFit(slot,r-l,b-t);}
    });
    slot.card.setOnClickListener(v->promote(slots.indexOf(slot)));
    slot.card.beginDrag=()->beginDrag(slot);slot.card.cancelDrag=()->finishDrag(slot,false);slot.card.dismiss=()->finishDrag(slot,true);
@@ -755,13 +1403,13 @@ public final class WorkbenchActivity extends Activity {
    slot.surface=(View)viewApi.getConstructor(Context.class).newInstance(this);
    EmbeddedTaskGuard.watch(slot.surface,getTaskId(),embedded->{
     slot.embedded=embedded;
-    if(!embedded){clearProjection(slot);Log.i(TAG,"task_transform_released slot="+slot.id+" task="+slot.taskId);}
+    if(!embedded){slot.drawEvidence.invalidate();slot.resizedTask=-1;slot.fittedPose=null;clearProjection(slot);Log.i(TAG,"task_transform_released slot="+slot.id+" task="+slot.taskId);}
    });
    ((SurfaceView)slot.surface).getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
    ((SurfaceView)slot.surface).getHolder().addCallback(new SurfaceHolder.Callback(){
     public void surfaceCreated(SurfaceHolder holder){restorePlate();}
     public void surfaceChanged(SurfaceHolder holder,int format,int w,int h){restorePlate();}
-    public void surfaceDestroyed(SurfaceHolder holder){}
+    public void surfaceDestroyed(SurfaceHolder holder){slot.drawEvidence.invalidate();slot.windowDrawn=false;slot.contentProbeUnavailable=false;slot.fittedPose=null;slot.resizedTask=-1;}
     private void restorePlate(){handler.post(()->{
      if(closing||slot.released)return;
      if(backdrop!=null)backdrop.restoreSurface();
@@ -778,7 +1426,7 @@ public final class WorkbenchActivity extends Activity {
     if(m.getName().equals("onTaskCreated")||m.getName().equals("onTaskChanged")){
      ComponentName top=(ComponentName)args[1];if(top!=null&&!top.equals(slot.activeComponent)){slot.activeComponent=top;try{slot.orientationAxis=OrientationPolicy.axis(getPackageManager().getActivityInfo(top,0).screenOrientation);handler.post(this::scheduleLayout);}catch(PackageManager.NameNotFoundException ignored){}}
      int id=(Integer)args[0];if(slot.sourceTaskId>=0&&slot.taskId<0&&id!=slot.sourceTaskId){slot.failed=true;Log.e(TAG,"add_existing_identity_mismatch expected="+slot.sourceTaskId+" actual="+id);handler.post(()->removeSlot(slot,true));return null;}
-     if(slot.taskId!=id)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;slot.failed=false;refreshStatus();handler.post(()->{syncSurface(slot);focusPrimary("task_ready");maybeAnimateAddedCard();if(id==pendingHangFront){pendingHangFront=-1;raiseHangContainer();handler.postDelayed(this::raiseHangContainer,220);handler.postDelayed(this::raiseHangContainer,480);}});
+     if(slot.taskId!=id)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;slot.failed=false;refreshStatus();handler.post(()->{syncSurface(slot);focusPrimary("task_ready");maybeAnimateAddedCard();if(deferPortrait&&id==slot.sourceTaskId)requestCoverPose(slot);if(id==pendingHangFront){pendingHangFront=-1;raiseHangContainer();}});
     }else if(m.getName().equals("onTaskRectOrientationChanged")){
      ActivityManager.RunningTaskInfo info=(ActivityManager.RunningTaskInfo)args[0];Rect requested=args[1] instanceof Rect?new Rect((Rect)args[1]):null;
      if(info.taskId==slot.taskId&&requested!=null&&!requested.isEmpty()&&requested.width()!=requested.height()){
@@ -786,14 +1434,19 @@ public final class WorkbenchActivity extends Activity {
       if(slot.orientationAxis!=axis){slot.orientationAxis=axis;Log.i(TAG,"task_orientation slot="+slot.id+" axis="+axis);handler.post(this::scheduleLayout);}
      }
     }else if(m.getName().equals("onInitialized")&&Boolean.FALSE.equals(args[0])){slot.failed=true;Log.e(TAG,"task_start_failed slot="+slot.id);handler.post(()->abandonEntrance(slot));refreshStatus();}
-    else if(m.getName().equals("onTaskWindowDraw")){Log.i(TAG,"task_draw slot="+slot.id+" drawn="+args[1]);if(Boolean.TRUE.equals(args[1])){slot.windowDrawn=true;handler.post(()->{syncSurface(slot);maybeAnimateAddedCard();});}}
+    else if(m.getName().equals("onTaskWindowDraw")&&((Integer)args[0])==slot.taskId){boolean drawn=Boolean.TRUE.equals(args[1]);Log.i(TAG,"task_draw slot="+slot.id+" drawn="+drawn);if(!drawn){slot.windowDrawn=false;slot.drawEvidence.invalidate();}else if(gestureHandoff&&slot.orientationAxis==2&&!slot.drawEvidence.hasContent())handler.post(()->{syncSurface(slot);maybeAnimateAddedCard();});else{slot.windowDrawn=true;handler.post(()->{syncSurface(slot);maybeAnimateAddedCard();});}}
     else if(m.getName().equals("onBackPressedOnTaskRoot")){int task=(Integer)args[0];handler.post(()->handleTaskRootBack(slot,task));}
     else if(m.getName().equals("onTaskRemovalStarted")){int task=(Integer)args[0];handler.post(()->onEmbeddedTaskVanished(slot,task));}
     return null;
    });
    viewApi.getMethod("setListener",Executor.class,listener).invoke(slot.surface,(Executor)this::runOnUiThread,proxy);
    Bundle config=new Bundle();config.putInt("scenario",2);config.putParcelable("launchBounds",new Rect(slot.renderBounds));
-   config.putBoolean("need_rotate_task_leash",rotatePresentation(slot));
+   config.putBoolean("flexible_embeed_task_config_with_container",false);
+   // reparentRotate otherwise adds a ColorDrawable which our transparent plate
+   // immediately clears. That requests layout, and the layout callback reparents
+   // again. Our wallpaper and content covers already own the plate background.
+   config.putBoolean("use_default_background_color",false);
+   config.putBoolean("need_rotate_task_leash",deferPortrait&&slot.sourceTaskId>=0&&slot.sourceTaskId==getIntent().getIntExtra("windowdeck_create_source_task",-1)?false:rotatePresentation(slot));
    // Native rotation otherwise promotes the Surface above the host window,
    // bypassing preview interception and recovery covers. Keep host controls on top.
    config.putBoolean("zorder_on_top",false);
@@ -802,7 +1455,20 @@ public final class WorkbenchActivity extends Activity {
    config.putInt("userId",slot.sourceTaskId>=0?slot.sourceUserId:android.os.Process.myUid()/100000);config.putFloat("cornerRadius",cardRadius(slots.indexOf(slot)==primary));config.putInt("reparent_align",slots.indexOf(slot)==primary?0:2);
    config.putBoolean("intercept_input_event",true);config.putBoolean("allow_task_detach_from_embedding",true);config.putBoolean("key_intercept_back_key",true);config.putBoolean("flexible_key_remove_task_detach",false);config.putInt("use_view_snapshot",1);
    viewApi.getMethod("init",Bundle.class).invoke(slot.surface,config);viewApi.getMethod("setEnforceStart",boolean.class).invoke(slot.surface,true);
-   if(viewTransaction!=null){slot.transaction=(SurfaceControl.Transaction)viewTransaction.get(slot.surface);LeashTransactions.register(slot.transaction,t->writeLeashFit(slot,t));}
+   if(viewTransaction!=null){
+    slot.transaction=(SurfaceControl.Transaction)viewTransaction.get(slot.surface);
+    LeashTransactions.register(slot.transaction,t->{
+     boolean fitted=writeLeashFit(slot,t);
+     // The native reparent applies this same transaction. During this entrance,
+     // consume it into ViewRoot's pending transaction rather than applying it
+     // before the new SurfaceView layout. C17 ViewRoot.merge empties the source.
+     if(fitted&&deferPortrait&&slot==poseSlot&&!closing&&!stopped&&!backgrounded
+       &&Looper.myLooper()==handler.getLooper()&&stage.isAttachedToWindow()&&stage.isHardwareAccelerated()){
+      submitMotionFit(t);stage.invalidate();return true;
+     }
+     return false;
+    });
+   }
    int[] presentation=presentationSize(slot);
    slot.card.addView(slot.surface,new FrameLayout.LayoutParams(presentation[0],presentation[1]));
    slot.icon=new ImageView(this);slot.icon.setImageDrawable(getPackageManager().getActivityIcon(slot.component));slot.icon.setScaleType(ImageView.ScaleType.FIT_CENTER);Ui.round(slot.icon,Ui.dp(this,6));
@@ -848,7 +1514,7 @@ public final class WorkbenchActivity extends Activity {
   scheduleLayout();
   Log.i(TAG,"layout_mode="+layoutMode+" tasks="+taskIds());
  }
- private int effectiveMode(){return getResources().getConfiguration().orientation==Configuration.ORIENTATION_LANDSCAPE?PaneLayout.LEFT_RIGHT:layoutMode;}
+ private int effectiveMode(){return layoutMode;}
  private boolean rotatePresentation(Slot s){
   android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
   return s.orientationAxis==2&&OrientationPolicy.rotatePresentation(s.renderBounds.width(),s.renderBounds.height(),dm.widthPixels,dm.heightPixels);
@@ -906,8 +1572,14 @@ public final class WorkbenchActivity extends Activity {
   layoutCaption();
  }
  private void inputRole(Slot s,boolean isPrimary){
-  boolean preview=!isPrimary||switching()||recovering||pendingEntrance!=null||addAnimation!=null;s.card.preview=preview;
-  s.card.gesturesEnabled=!recovering&&pendingEntrance==null&&addAnimation==null;s.card.vertical=effectiveMode()==PaneLayout.TOP_BOTTOM;s.pin.setVisibility(s.pinned?View.VISIBLE:View.GONE);
+  // The entrance must not hand the main card's touches to its task while the plate is still
+  // moving — but it has no reason to hold the whole rail, because side cards are previews
+  // either way. Both flags now drop at the first committed entrance frame rather than at the
+  // end of the animation (TODO D3); finishArrival() keeps the 1500 ms escape hatch.
+  boolean blocked=switching()||switchPreparation.pending()||recovering||handoffPresentation;
+  boolean entranceRunning=entranceInputBlocked||animation!=null||addAnimation!=null;
+  boolean preview=!isPrimary||blocked||entranceRunning;s.card.preview=preview;
+  s.card.gesturesEnabled=!handoffPresentation&&TransitionPolicy.gesturesEnabled(isPrimary,recovering,entranceRunning,entranceInputBlocked);s.card.vertical=effectiveMode()==PaneLayout.TOP_BOTTOM;s.pin.setVisibility(s.pinned?View.VISIBLE:View.GONE);
   s.card.setContentDescription(s.label+(isPrimary?"主应用，顶部菜单":"，点击切换，长按管理"));
   s.icon.setVisibility(isPrimary?View.GONE:View.VISIBLE);
   applyCardRadius(s,isPrimary);
@@ -916,9 +1588,16 @@ public final class WorkbenchActivity extends Activity {
  private int cardRadius(boolean isPrimary){return Ui.dp(this,isPrimary?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS);}
  private void applyCardRadius(Slot s,boolean isPrimary){
   if(s.card==null)return;
+  if(s.motionPose!=null){motionOutline(s);return;}
   int radius=cardRadius(isPrimary);
-  s.card.setBackground(isPrimary?Ui.bg(Ui.CARD,radius):null);clipSide(s.card,s.card.getWidth(),s.card.getHeight(),!isPrimary);
+  s.renderRadius=radius;
+  if(isPrimary){
+   if(s.card.getBackground() instanceof android.graphics.drawable.GradientDrawable)((android.graphics.drawable.GradientDrawable)s.card.getBackground()).setCornerRadius(radius);
+   else s.card.setBackground(Ui.bg(Ui.CARD,radius));
+  }else if(s.card.getBackground()!=null)s.card.setBackground(null);
+  clipSide(s.card,s.card.getWidth(),s.card.getHeight(),!isPrimary);
   if(s.surface==null||cornerRadius==null)return;
+  Ui.round(s.surface,radius);
   try{
    if(Math.abs(cornerRadius.getFloat(s.surface)-radius)<0.5f)return;
    cornerRadius.setFloat(s.surface,radius);
@@ -941,8 +1620,11 @@ public final class WorkbenchActivity extends Activity {
  private void resizeSurface(Slot s){
   if(s.surface==null||s.released||s.renderBounds.isEmpty())return;
   boolean measure=switching();long start=measure?System.nanoTime():0;
-  try{resizeMethod.invoke(s.surface,new Rect(s.renderBounds));}catch(Throwable e){fail(e);}
-  finally{if(measure){resizeCalls++;resizeNanos+=System.nanoTime()-start;}}
+  if(s.resizedTask!=s.taskId||!s.resizedBounds.equals(s.renderBounds)){
+   try{resizeMethod.invoke(s.surface,new Rect(s.renderBounds));s.resizedBounds.set(s.renderBounds);s.resizedTask=s.taskId;}
+   catch(Throwable e){fail(e);}
+   finally{if(measure){resizeCalls++;resizeNanos+=System.nanoTime()-start;}}
+  }
   int[] plate=surfacePlate(s);scheduleLeashFit(s,plate[0],plate[1]);
  }
  private void reparentSurface(Slot s){
@@ -950,7 +1632,7 @@ public final class WorkbenchActivity extends Activity {
   try{Method method=viewApi.getDeclaredMethod("reparent");method.setAccessible(true);method.invoke(s.surface);s.surface.setBackground(null);
    // reparent may return early while a task is being restored. Reapply our
    // display transform explicitly, including when the plate was recreated.
-   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){writeLeashFit(s,fit);fit.apply();}}
+   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){if(writeLeashFit(s,fit)){if(s.motionPose!=null||(poseHeld&&s==poseSlot))submitMotionFit(fit);else fit.apply();}}}
   catch(Throwable e){Log.w(TAG,"surface_sync_failed slot="+s.id,e);}
  }
  private void syncSurface(Slot s){
@@ -964,13 +1646,15 @@ public final class WorkbenchActivity extends Activity {
   int h=lp!=null&&lp.height>0?lp.height:s.surface.getHeight();
   return new int[]{Math.max(1,w),Math.max(1,h)};
  }
- @Override protected void onPause(){dismissPrimaryMenu();cancelDrag();if(!screenArrival)cancelAnimation();if(initialized&&!closing&&!screenArrival)layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();stopped=false;backgrounded=false;if(initialized&&!closing)publishState(slots.size());if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.post(this::maybeAnimateAddedCard);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
- @Override protected void onStop(){stopped=true;for(Slot s:slots)clearProjection(s);backGeneration++;forwardingBack=false;super.onStop();}
+ // A transient pause while the task takes focus must not cancel the live rotation pose.
+ // A real background transition still fails and clears the handoff in onStop().
+ @Override protected void onPause(){dismissPrimaryMenu();cancelDrag();if(!screenArrival&&!deferPortrait)cancelAnimation();if(initialized&&!closing&&!screenArrival&&!deferPortrait)layoutCards(false);super.onPause();}
+ @Override protected void onResume(){super.onResume();foreground=true;stopped=false;backgrounded=false;if(initialized&&!closing)publishState(slots.size());if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.post(this::maybeAnimateAddedCard);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
+ @Override protected void onStop(){clearArrivalFace("host_stopped");foreground=false;stopped=true;if(screenArrival||handoffPresentation)cancelAnimation();if(gestureHandoff&&pendingEntrance!=null)failHandoff(pendingEntrance,"host_stopped");for(Slot s:slots){s.drawEvidence.invalidate();clearProjection(s);}backGeneration++;forwardingBack=false;super.onStop();}
  // Do not refocus on every host touch: doing so cancels a preview's click or
  // long-press stream. Resume, settled promotion and dialog dismissal own focus.
  @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);backgrounded=false;stopped=false;if(intent.hasExtra("windowdeck_add_task_id"))handler.post(()->addExistingTask(intent));Log.i(TAG,"workbench_resume container="+getTaskId()+" primary="+primary+" layout="+layoutMode+" tasks="+taskIds());handler.post(()->{for(Slot s:slots)syncSurface(s);focusPrimary("entry");});}
- private void scheduleLayout(){if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){cancelDrag();if(!screenArrival){cancelAnimation();updateNaturalBounds();layoutCards(false);}for(Slot s:slots)resizeSurface(s);requestEntranceFrame();Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+slots.size());}});}
+ private void scheduleLayout(){if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){cancelDrag();updateNaturalBounds();if(deferPortrait&&poseHeld){if(!poseSettling)expandPosePlate(poseSlot);}else if(screenArrival)rebaseArrivalLayout();else{cancelAnimation();layoutCards(false);}for(Slot s:slots)resizeSurface(s);requestEntranceFrame();Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+slots.size());scheduleLayoutEvidence("layout");}});}
  private void fitSurface(Slot s,int width,int height){
   if(s.surface==null||s.renderBounds.isEmpty())return;
   boolean rotate=rotatePresentation(s);
@@ -987,7 +1671,7 @@ public final class WorkbenchActivity extends Activity {
   if(lp.width!=w||lp.height!=h){lp.width=w;lp.height=h;s.surface.setLayoutParams(lp);}
   s.surface.setPivotX(0);s.surface.setPivotY(0);s.surface.setScaleX(1);s.surface.setScaleY(1);
   s.surface.setTranslationX(0);s.surface.setTranslationY(0);
-  s.surface.setClipBounds(preview&&effectiveMode()!=PaneLayout.LEFT_RIGHT?new Rect(0,0,w,h):null);
+  s.surface.setClipBounds(s.motionPose==null&&preview&&effectiveMode()!=PaneLayout.LEFT_RIGHT?new Rect(0,0,w,h):null);
   fitRecoveryCover(s,w,h);
   scheduleLeashFit(s,w,h);
  }
@@ -996,23 +1680,57 @@ public final class WorkbenchActivity extends Activity {
   *  left-right rail shares one vertical vanishing point across the column, and
   *  the top-bottom rail tapers its bottom edge toward the main window below. */
  private float[] displayQuad(Slot s,int w,int h){
-  if(!AtomicPresentation.perspective(atomicRotate,slots.indexOf(s)!=primary)||leashMatrix4==null)
+  if(s.motionPose!=null)return CardMotion.localQuad(s.motionPose,w,h);
+  return roleQuad(w,h,s.card.getTop(),slots.indexOf(s)!=primary);
+ }
+ private float[] roleQuad(int w,int h,float top,boolean preview){
+  if(!AtomicPresentation.perspective(atomicRotate,preview)||leashMatrix4==null)
    return new float[]{0,0,w,0,w,h,0,h};
   float density=getResources().getDisplayMetrics().density;
   if(effectiveMode()==PaneLayout.LEFT_RIGHT)
-   return CardPerspective.columnQuad(w,h,density,stage.getHeight()/2f-s.card.getTop());
+   return CardPerspective.columnQuad(w,h,density,stage.getHeight()/2f-top);
   return CardPerspective.quad(w,h,effectiveMode(),density);
  }
- private void fitRecoveryCover(Slot s,int w,int h){
-  if(s.recoveryCover==null)return;
-  RecoveryCover cover=s.recoveryCover;FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)cover.getLayoutParams();
+ private CardMotion.Pose rolePose(Slot s,float[] box,boolean preview){
+  int[] src=presentationSize(s),crop=preview?SurfaceFit.coverCrop(src[0],src[1],Math.round(box[2]),Math.round(box[3])):new int[]{0,0,src[0],src[1]};
+  return CardMotion.at(box,roleQuad(Math.round(box[2]),Math.round(box[3]),box[1],preview),
+   new float[]{crop[0],crop[1],crop[2],crop[3]},cardRadius(!preview));
+ }
+ private float[] cardBox(Slot s){return new float[]{s.card.getX(),s.card.getY(),Math.max(1,s.card.getWidth()*s.card.getScaleX()),Math.max(1,s.card.getHeight()*s.card.getScaleY())};}
+ private CardMotion.Pose currentPose(Slot s){
+  if(s.released||!s.embedded||s.surface==null)return null;
+  float[] box=cardBox(s);
+  CardMotion.Pose pose=s.motionPose!=null?s.motionPose:s.fittedPose;
+  if(s.motionPose==null){
+   try{if(s.fittedTask!=s.taskId||s.fittedAxis!=s.orientationAxis||!s.fittedBounds.equals(s.renderBounds)||s.fittedLayer!=LiveTaskContent.layerId((SurfaceControl)taskLeash.get(s.surface)))pose=null;}
+   catch(Throwable e){pose=null;}
+  }
+  return pose==null?null:CardMotion.rebox(pose,box);
+ }
+ private CardMotion.Pose surfacePose(Slot s,int w,int h){
+  if(s.motionPose!=null)return s.motionPose;
+  boolean preview=slots.indexOf(s)!=primary;
+  float[] box=cardBox(s),quad=displayQuad(s,w,h);int[] src=presentationSize(s);
+  int[] crop=preview?SurfaceFit.coverCrop(src[0],src[1],w,h):new int[]{0,0,src[0],src[1]};
+  for(int i=0;i<8;i+=2){quad[i]*=box[2]/Math.max(1,w);quad[i+1]*=box[3]/Math.max(1,h);}
+  float radius=(s.renderRadius<0?cardRadius(!preview):s.renderRadius)*Math.min(s.card.getScaleX(),s.card.getScaleY());
+  return CardMotion.at(box,quad,new float[]{crop[0],crop[1],crop[2],crop[3]},radius);
+ }
+ private void fitCover(Slot s,RecoveryCover cover,int w,int h){
+  FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)cover.getLayoutParams();
   if(lp.width!=w||lp.height!=h){lp.width=w;lp.height=h;cover.setLayoutParams(lp);}
-  int[] src=presentationSize(s),crop=slots.indexOf(s)!=primary?SurfaceFit.coverCrop(src[0],src[1],w,h):new int[]{0,0,src[0],src[1]};
-  cover.fit(SurfaceFit.sourceQuad(src[0],crop,rotatePresentation(s)),displayQuad(s,w,h),s.renderBounds.width(),s.renderBounds.height());
+  int[] src=presentationSize(s);
+  CardMotion.Pose pose=surfacePose(s,w,h);
+  cover.fit(CardMotion.sourceQuad(pose,src[0],rotatePresentation(s)),displayQuad(s,w,h),s.renderBounds.width(),s.renderBounds.height(),CardMotion.sourceRadius(pose));
+ }
+ private void fitRecoveryCover(Slot s,int w,int h){
+  if(s.recoveryCover!=null)fitCover(s,s.recoveryCover,w,h);
+  if(arrivalFaceSlot==s&&arrivalFace!=null)fitCover(s,arrivalFace,w,h);
  }
  private void scheduleLeashFit(Slot s,int w,int h){
-  if(s.surface==null)return;
-  s.surface.post(()->{if(!closing&&!s.released&&s.surface!=null)reparentSurface(s);});
+  if(s.surface==null||s.fitPosted)return;
+  s.fitPosted=true;
+  s.surface.post(()->{s.fitPosted=false;if(!closing&&!s.released&&s.surface!=null)reparentSurface(s);});
  }
  private static float[] identity4(){return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};}
  private void clearProjection(Slot s){
@@ -1023,7 +1741,323 @@ public final class WorkbenchActivity extends Activity {
    leashMatrix4.invoke(reset,leash,(Object)identity4());reset.apply();s.projectedLeash=null;s.perspectiveApplied=false;
   }catch(Throwable e){Log.w(TAG,"projection_clear_failed slot="+s.id,e);}
  }
+ /** Bootstrap the destination's first frame from the release snapshot. This is visual
+  *  continuity only: live content is still required by awaitCoverPoseCommit. */
+ private void requestCoverPose(Slot slot){
+  if(!deferPortrait||poseQuerySent||portraitAfterPose||handoffReady==null||slot==null||slot.released||slot.sourceTaskId<0)return;
+  // Multiple task callbacks may ask; reserve this wait before posting it.
+  poseQuerySent=true;
+  Runnable wait=new Runnable(){public void run(){
+   if(!deferPortrait||portraitAfterPose||closing||slot.released)return;
+   if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"pose_content_timeout");return;}
+   poseSlot=slot;
+   Log.i(TAG,"defer_snapshot_pose_query task="+slot.sourceTaskId+" before_live=true");
+   poseReply=new android.os.ResultReceiver(handler){
+    @Override protected void onReceiveResult(int code,Bundle data){
+     if(!deferPortrait||closing||slot.released)return;
+     if(code==HandoffProtocol.POSE_QUERY){if(!poseHeld&&!portraitAfterPose)applyCoverPose(slot,data);}
+     else if(code==HandoffProtocol.SOURCE_RELEASED){
+      if(data==null||data.getInt(HandoffProtocol.TASK,-1)!=slot.sourceTaskId||sourceRelease==null||!sourceRelease.completeRelease())return;
+      Log.i(TAG,"defer_source_released task="+slot.sourceTaskId+" bootstrap_committed=true");
+      if(!initialized){failHandoff(slot,"source_release_before_layout");return;}
+      for(Slot s:new ArrayList<>(slots))if(s.card==null)createWindow(s);
+      expandPosePlate(slot);if(slot.card!=null)motionOutline(slot);scheduleLayout();awaitCoverPoseCommit(slot);
+     }
+     else if(code==HandoffProtocol.OWNERSHIP)requestPortraitAfterPose("ownership");
+     else failHandoff(slot,"pose_rejected_"+code);
+    }
+   };
+   Bundle ask=new Bundle();ask.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+   ask.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
+   try{handoffReady.send(HandoffProtocol.POSE_QUERY,ask);}
+   catch(Throwable e){Log.w(TAG,"defer_pose_query_failed",e);failHandoff(slot,"pose_query_failed");}
+  }};
+  handler.post(wait);
+ }
+ private void applyCoverPose(Slot slot,Bundle data){
+  // The first frame is a snapshot only. Constructing FlexibleTaskView here would
+  // let it steal the task while Launcher still owns the recents leash.
+  if(stage==null||getWindow().getDecorView().getWidth()<2||getWindow().getDecorView().getHeight()<2){
+   if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"pose_bootstrap_timeout");return;}
+   handler.postDelayed(()->{if(deferPortrait&&!closing&&!slot.released&&!poseHeld)applyCoverPose(slot,data);},MotionSpec.SURFACE_RETRY_MS);return;
+  }
+  float[] corners=data==null?null:data.getFloatArray(HandoffProtocol.CORNERS);
+  float[] crop=data==null?null:data.getFloatArray(HandoffProtocol.CROP);
+  int[] space=data==null?null:data.getIntArray(HandoffProtocol.POSE_STAGE);
+  float radius=data==null?Float.NaN:data.getFloat(HandoffProtocol.RADIUS,Float.NaN);
+  if(data==null||data.getInt(HandoffProtocol.TASK,-1)!=slot.sourceTaskId||corners==null||corners.length!=8
+    ||crop==null||crop.length!=4||space==null||space.length!=3||space[0]<2||space[1]<=space[0]
+    ||space[2]!=deferSourceRotation||!Float.isFinite(radius)||radius<0){failHandoff(slot,"pose_malformed");return;}
+  for(float point:corners)if(!Float.isFinite(point)){failHandoff(slot,"pose_nonfinite");return;}
+  Bitmap snapshot=null;
+  android.hardware.HardwareBuffer shared=data.getParcelable(HandoffProtocol.SNAPSHOT,android.hardware.HardwareBuffer.class);
+  try{
+   if(shared!=null&&(shared.getUsage()&android.hardware.HardwareBuffer.USAGE_PROTECTED_CONTENT)==0){
+    android.graphics.ParcelableColorSpace color=data.getParcelable(HandoffProtocol.SNAPSHOT_COLOR_SPACE,android.graphics.ParcelableColorSpace.class);
+    snapshot=Bitmap.wrapHardwareBuffer(shared,color==null?android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB):color.getColorSpace());
+   }
+  }catch(Throwable e){Log.w(TAG,"defer_snapshot_buffer_failed",e);}
+  finally{if(shared!=null)shared.close();}
+  float[] pixels=data.getFloatArray(HandoffProtocol.SNAPSHOT_CROP);
+  float[] snapshotSource=snapshot==null||snapshot.isRecycled()?null:DisplayGeometry.snapshotQuad(pixels,snapshot.getWidth(),snapshot.getHeight());
+  if(snapshotSource==null){if(snapshot!=null&&!snapshot.isRecycled())snapshot.recycle();failHandoff(slot,"pose_snapshot_invalid");return;}
+  heldCorners=corners.clone();heldCrop=crop.clone();heldStage=space.clone();heldRadius=radius;
+  poseHeld=true;poseSlot=slot;
+  poseBridgeBitmap=snapshot;poseBridgeSource=snapshotSource;
+  poseBridge=new RecoveryCover(this);poseBridge.setBitmap(snapshot);
+  ((ViewGroup)getWindow().getDecorView()).getOverlay().add(poseBridge);
+  fitPoseBridge();
+  Log.i(TAG,"defer_snapshot_bridge task="+slot.sourceTaskId+" source=launcher_release live=false size="+snapshot.getWidth()+"x"+snapshot.getHeight());
+  expandPosePlate(slot);if(slot.card!=null)motionOutline(slot);
+  poseFitListener=()->{
+   if(poseHeld&&!closing&&!stopped&&!backgrounded){
+    fitPoseBridge();
+    if(slot.surface!=null)try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+     if(writeHeldPose(slot,fit))submitMotionFit(fit);
+    }catch(Throwable e){Log.w(TAG,"defer_pose_frame_fit_failed",e);}
+   }
+   return true;
+  };
+  stage.getViewTreeObserver().addOnPreDrawListener(poseFitListener);
+  Log.i(TAG,"defer_pose_received stage="+Arrays.toString(heldStage)+" quad="+Arrays.toString(heldCorners)
+    +" capture_crop="+Arrays.toString(heldCrop)+" task_buffer="+taskBuffer(slot));
+  if(waitingForSourceRelease())awaitSourceBootstrap(slot);else awaitCoverPoseCommit(slot);
+ }
+ private boolean waitingForSourceRelease(){return deferPortrait&&sourceRelease!=null&&!sourceRelease.mayEmbed();}
+ private void awaitSourceBootstrap(Slot slot){
+  if(!waitingForSourceRelease()||!poseHeld||closing||stopped||slot.released||sourceBootstrapFramePending)return;
+  if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"source_bootstrap_timeout");return;}
+  fitPoseBridge();
+  if(!poseBridgeFitted||backdrop==null||!backdrop.ready||stage.isLayoutRequested()){
+   handler.postDelayed(()->awaitSourceBootstrap(slot),MotionSpec.SURFACE_RETRY_MS);return;
+  }
+  sourceBootstrapFramePending=true;
+  stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+   sourceBootstrapFramePending=false;
+   if(!waitingForSourceRelease()||closing||stopped||backgrounded||slot.released)return;
+   if(!poseBridgeFitted||poseBridge==null||!backdrop.ready||stage.isLayoutRequested()){
+    awaitSourceBootstrap(slot);return;
+   }
+   if(!sourceRelease.commitBootstrap()||!sourceRelease.requestRelease())return;
+   Bundle done=new Bundle();done.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+   done.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
+   Log.i(TAG,"defer_bootstrap_committed task="+slot.sourceTaskId+" live=false embed_started=false");
+   if(handoffReady==null||poseReply==null){failHandoff(slot,"source_release_reply_missing");return;}
+   handoffReady.send(HandoffProtocol.BOOTSTRAP_COMMITTED,done);
+  }));getWindow().getDecorView().invalidate();stage.invalidate();
+ }
+ private void fitPoseBridge(){
+  poseBridgeFitted=false;
+  if(poseBridge==null||poseBridgeBitmap==null||heldStage==null)return;
+  View decor=getWindow().getDecorView();int[] loc=new int[2];decor.getLocationOnScreen(loc);
+  float[] local=DisplayGeometry.localQuad(heldCorners,heldStage[0],heldStage[1],heldStage[2],decor.getWidth(),decor.getHeight(),loc[0],loc[1]);
+  if(local==null)return;
+  poseBridge.layout(0,0,decor.getWidth(),decor.getHeight());
+  // SurfaceView's native background may exist beyond the fitted task during
+  // its first resize. Keep the whole bootstrap scene above that background.
+  poseBridge.setBackdrop(backdrop==null?null:backdrop.currentBitmap());
+  Matrix map=new Matrix();if(!map.setPolyToPoly(poseBridgeSource,0,local,0,4))return;
+  float[] m=new float[9];map.getValues(m);
+  float scale=(float)Math.max(0.01d,Math.max(Math.hypot(m[0],m[3]),Math.hypot(m[1],m[4])));
+  poseBridge.fit(poseBridgeSource,local,poseBridgeBitmap.getWidth(),poseBridgeBitmap.getHeight(),heldRadius/scale);
+  poseBridgeFitted=true;
+ }
+ private void clearPoseBridge(String reason){
+  poseBridgeFitted=false;
+  if(poseBootstrapListener!=null&&stage!=null){stage.getViewTreeObserver().removeOnPreDrawListener(poseBootstrapListener);poseBootstrapListener=null;}
+  if(poseBridge==null)return;
+  RecoveryCover cover=poseBridge;poseBridge=null;
+  ((ViewGroup)getWindow().getDecorView()).getOverlay().remove(cover);cover.setBitmap(null);
+  Bitmap bitmap=poseBridgeBitmap;poseBridgeBitmap=null;poseBridgeSource=null;
+  if(bitmap!=null)handler.postDelayed(()->{if(!bitmap.isRecycled())bitmap.recycle();},1000);
+  Log.i(TAG,"defer_snapshot_reveal result="+reason+" task="+(poseSlot==null?-1:poseSlot.taskId));
+ }
+ /** Full display plate: the inverse portrait pose can lie above the stage's status-bar
+  *  inset. Expanding only to content bounds would clip it before rotation. */
+ private void expandPosePlate(Slot slot){
+  if(slot==null||stage==null||slot.card==null||slot.surface==null)return;
+  View decor=getWindow().getDecorView();int w=decor.getWidth(),h=decor.getHeight();
+  if(w<2||h<2)return;
+  int[] stageLocation=new int[2],windowLocation=new int[2];
+  stage.getLocationOnScreen(stageLocation);decor.getLocationOnScreen(windowLocation);
+  stage.setClipChildren(false);stage.setClipToPadding(false);
+  if(stage.getParent() instanceof ViewGroup){ViewGroup parent=(ViewGroup)stage.getParent();parent.setClipChildren(false);parent.setClipToPadding(false);}
+  FrameLayout.LayoutParams card=(FrameLayout.LayoutParams)slot.card.getLayoutParams();
+  if(card==null)card=new FrameLayout.LayoutParams(w,h);
+  int x=windowLocation[0]-stageLocation[0],y=windowLocation[1]-stageLocation[1];
+  if(card.width!=w||card.height!=h||card.leftMargin!=x||card.topMargin!=y){
+   card.width=w;card.height=h;card.leftMargin=x;card.topMargin=y;slot.card.setLayoutParams(card);
+  }
+  FrameLayout.LayoutParams plate=(FrameLayout.LayoutParams)slot.surface.getLayoutParams();
+  if(plate==null)plate=new FrameLayout.LayoutParams(w,h);
+  if(plate.width!=w||plate.height!=h){plate.width=w;plate.height=h;slot.surface.setLayoutParams(plate);}
+  slot.card.setClipToOutline(false);slot.card.setClipChildren(false);
+ }
+ /** Identity includes current buffer, viewport, plate location and actual child content.
+  *  No capture-space crop is used as a substitute for a task buffer. */
+ private String poseSurfaceKey(Slot slot){
+  if(closing||stopped||backgrounded||slot==null||slot.released||slot.taskId!=slot.sourceTaskId
+    ||slot.surface==null||slot.card==null||slot.surface.isLayoutRequested()||slot.card.isLayoutRequested()
+    ||stage==null||stage.isLayoutRequested()||layoutPosted||(backdrop!=null&&!backdrop.ready))return null;
+  Rect buffer=taskBuffer(slot);
+  if(buffer==null||buffer.width()!=slot.renderBounds.width()||buffer.height()!=slot.renderBounds.height())return null;
+  try{
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(slot.surface),plate=((SurfaceView)slot.surface).getSurfaceControl();
+   if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return null;
+   taskDrawState(slot);
+   if(!slot.drawEvidence.hasContent()){probeLandscapePresented(slot,leash);return null;}
+   View decor=getWindow().getDecorView();int[] loc=new int[2];slot.surface.getLocationOnScreen(loc);
+   return slot.taskId+":"+LiveTaskContent.layerId(leash)+":"+LiveTaskContent.layerId(plate)+":"+buffer
+     +":"+slot.surface.getWidth()+"x"+slot.surface.getHeight()+":"+Arrays.toString(loc)
+     +":"+decor.getWidth()+"x"+decor.getHeight()+":"+(backdrop==null?0:backdrop.visualGeneration());
+  }catch(Throwable e){Log.w(TAG,"defer_live_pose_unavailable",e);return null;}
+ }
+ private void awaitCoverPoseCommit(Slot slot){
+  if(!deferPortrait||!poseHeld||poseReported||closing||slot.released)return;
+  if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"pose_frame_timeout");return;}
+  View decor=getWindow().getDecorView();
+  String key=poseSurfaceKey(slot);
+  if(key==null||slot.surface.getWidth()!=decor.getWidth()||slot.surface.getHeight()!=decor.getHeight()){
+   handler.postDelayed(()->awaitCoverPoseCommit(slot),MotionSpec.SURFACE_RETRY_MS);return;
+  }
+  try(SurfaceControl.Transaction committed=new SurfaceControl.Transaction()){
+   if(!writeHeldPose(slot,committed))throw new IllegalStateException("No live pose fit");
+   committed.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(!deferPortrait||!poseHeld||poseReported||closing||slot.released)return;
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->
+     stage.postOnAnimation(()->stage.postOnAnimation(()->{
+      if(!deferPortrait||!poseHeld||poseReported||closing||slot.released)return;
+      if(!key.equals(poseSurfaceKey(slot))){awaitCoverPoseCommit(slot);return;}
+      poseReported=true;logHeldLayer("defer_live_pose_committed");
+      Bundle done=new Bundle();done.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+      done.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
+      if(handoffReady==null||poseReply==null){failHandoff(slot,"pose_reply_missing");return;}
+      handoffReady.send(HandoffProtocol.POSE_COMMITTED,done);
+     }))));stage.invalidate();
+   });submitMotionFit(committed);stage.invalidate();
+  }catch(Throwable e){Log.w(TAG,"defer_pose_apply_failed",e);failHandoff(slot,"pose_apply_failed");}
+ }
+ private void requestPortraitAfterPose(String reason){
+  if(portraitAfterPose||!deferPortrait)return;
+  if(!poseHeld||!poseReported||poseSlot==null){failHandoff(pendingEntrance,"pose_ownership_not_ready");return;}
+  portraitAfterPose=true;
+  Log.i(TAG,"canvas_orientation retained=portrait after="+reason+" layer="+heldLayer);
+  awaitPortraitPose(poseSlot);
+ }
+ private void awaitPortraitPose(Slot slot){
+  if(!deferPortrait||!poseHeld||closing||slot.released)return;
+  if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"pose_rotation_timeout");return;}
+  View decor=getWindow().getDecorView();
+  boolean portrait=getResources().getConfiguration().orientation==Configuration.ORIENTATION_PORTRAIT
+    &&decor.getWidth()==heldStage[0]&&decor.getHeight()==heldStage[1]
+    &&stage.getWidth()>0&&stage.getWidth()<stage.getHeight();
+  if(!portrait){handler.postDelayed(()->awaitPortraitPose(slot),MotionSpec.SURFACE_RETRY_MS);return;}
+  if(!poseSettling){
+   poseSettling=true;layoutCards(false);
+   Log.i(TAG,"defer_portrait_layout task="+slot.taskId+" quad="+Arrays.toString(heldCorners));
+  }
+  String key=handoffLayoutKey();
+  if(key==null||poseSurfaceKey(slot)==null){handler.postDelayed(()->awaitPortraitPose(slot),MotionSpec.SURFACE_RETRY_MS);return;}
+  // The normal final card now has the same display-space quad as the held pose.
+  // Exchange the writer and fit with this host draw, without cancelling the handoff.
+  poseHeld=false;removePoseFitListener();
+  commitPortraitPose(slot);
+ }
+ private void commitPortraitPose(Slot slot){
+  if(!deferPortrait||closing||stopped||slot.released)return;
+  if(SystemClock.uptimeMillis()>=handoffDeadline){failHandoff(slot,"pose_final_frame_timeout");return;}
+  String key=handoffLayoutKey();
+  if(key==null||poseSurfaceKey(slot)==null){handler.postDelayed(()->commitPortraitPose(slot),MotionSpec.SURFACE_RETRY_MS);return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   if(!writeLeashFit(slot,fit))throw new IllegalStateException("No final portrait fit");
+   fit.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(!deferPortrait||closing||slot.released)return;
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->
+     stage.postOnAnimation(()->stage.postOnAnimation(()->{
+      if(!deferPortrait||closing||slot.released)return;
+      if(!key.equals(handoffLayoutKey())||poseSurfaceKey(slot)==null){commitPortraitPose(slot);return;}
+      revealPortraitPose(slot,key);
+     }))));stage.invalidate();
+   });submitMotionFit(fit);stage.invalidate();
+  }catch(Throwable e){Log.w(TAG,"defer_portrait_fit_failed",e);failHandoff(slot,"pose_final_fit_failed");}
+ }
+ private void revealPortraitPose(Slot slot,String key){
+  if(poseBridge==null){failHandoff(slot,"pose_bridge_missing");return;}
+  poseBridge.setVisibility(View.INVISIBLE);
+  stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+   if(!deferPortrait||closing||stopped||slot.released)return;
+   if(!key.equals(handoffLayoutKey())||poseSurfaceKey(slot)==null){
+    if(poseBridge!=null)poseBridge.setVisibility(View.VISIBLE);
+    commitPortraitPose(slot);return;
+   }
+   clearPoseBridge("live_frame_committed");deferPortrait=false;restorePoseClipping();logHeldLayer("defer_portrait_live_committed");
+   slot.windowDrawn=true;entranceFramePending=false;entranceFrameReady=true;
+   Log.i(TAG,"handoff_layout_committed task="+slot.taskId+" cards="+slots.size()+" axis="+slot.orientationAxis+" pose_rotation=true");
+   maybeAnimateAddedCard();
+  }));getWindow().getDecorView().invalidate();stage.invalidate();
+ }
+ private void removePoseFitListener(){
+  if(poseFitListener!=null&&stage!=null){stage.getViewTreeObserver().removeOnPreDrawListener(poseFitListener);poseFitListener=null;}
+ }
+ private void restorePoseClipping(){
+  if(stage!=null){stage.setClipChildren(true);stage.setClipToPadding(true);
+   if(stage.getParent() instanceof ViewGroup){ViewGroup parent=(ViewGroup)stage.getParent();parent.setClipChildren(true);parent.setClipToPadding(true);}}
+  if(poseSlot!=null&&poseSlot.card!=null){applyCardRadius(poseSlot,slots.indexOf(poseSlot)==primary);clipSide(poseSlot.card,poseSlot.card.getWidth(),poseSlot.card.getHeight(),slots.indexOf(poseSlot)!=primary);}
+ }
+ private void clearHeldPose(){if(sourceRelease!=null)sourceRelease.cancel();sourceBootstrapFramePending=false;poseHeld=false;removePoseFitListener();clearPoseBridge("cancelled");restorePoseClipping();}
+ private Rect taskBuffer(Slot slot){
+  try{
+   Field info=viewApi.getDeclaredField("mTaskInfo");info.setAccessible(true);
+   ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)info.get(slot.surface);
+   if(task==null||task.taskId!=slot.taskId)return null;
+   // configuration is inherited from TaskInfo: getDeclaredField on RunningTaskInfo
+   // always failed in dev.134 and silently selected the release crop as buffer size.
+   Object config=task.getClass().getField("configuration").get(task);
+   Object wc=config.getClass().getField("windowConfiguration").get(config);
+   Rect bounds=(Rect)wc.getClass().getMethod("getBounds").invoke(wc);
+   return bounds!=null&&bounds.width()>1&&bounds.height()>1?new Rect(0,0,bounds.width(),bounds.height()):null;
+  }catch(Throwable e){return null;}
+ }
+ private boolean writeHeldPose(Slot s,SurfaceControl.Transaction t){
+  try{
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface),plate=((SurfaceView)s.surface).getSurfaceControl();
+   Rect buffer=taskBuffer(s);View decor=getWindow().getDecorView();
+   if(leash==null||!leash.isValid()||plate==null||!plate.isValid()||buffer==null||heldStage==null
+     ||buffer.width()!=s.renderBounds.width()||buffer.height()!=s.renderBounds.height())return false;
+   int[] loc=new int[2];s.surface.getLocationOnScreen(loc);
+   float[] local=DisplayGeometry.localQuad(heldCorners,heldStage[0],heldStage[1],heldStage[2],decor.getWidth(),decor.getHeight(),loc[0],loc[1]);
+   if(local==null)return false;
+   float[] src={0,0,buffer.width(),0,buffer.width(),buffer.height(),0,buffer.height()};
+   Matrix map=new Matrix();if(!map.setPolyToPoly(src,0,local,0,4))return false;
+   float[] m=new float[9];map.getValues(m);
+   try{Field bg=SurfaceView.class.getDeclaredField("mBackgroundControl");bg.setAccessible(true);SurfaceControl background=(SurfaceControl)bg.get(s.surface);if(background!=null&&background.isValid())t.setVisibility(background,false);}catch(Throwable ignored){}
+   if(leashRadius!=null)leashRadius.invoke(t,plate,0f);
+   t.setCrop(plate,new Rect(0,0,Math.max(1,s.surface.getWidth()),Math.max(1,s.surface.getHeight())));
+   t.setCrop(leash,buffer);
+   if(leashMatrix==null)return false;
+   leashMatrix.invoke(t,leash,m[0],m[3],m[1],m[4]);t.setPosition(leash,m[2],m[5]);
+   float scale=(float)Math.max(0.01d,Math.max(Math.hypot(m[0],m[3]),Math.hypot(m[1],m[4])));
+   if(leashRadius!=null)leashRadius.invoke(t,leash,heldRadius/scale);
+   t.setAlpha(leash,1f);t.setVisibility(leash,true);t.setAlpha(plate,1f);t.setVisibility(plate,true);
+   heldLayer=LiveTaskContent.layerId(leash);s.fittedLayer=heldLayer;s.fittedTask=s.taskId;
+   return true;
+  }catch(Throwable e){Log.w(TAG,"defer_pose_fit_failed slot="+s.id,e);return false;}
+ }
+ private void logHeldLayer(String event){
+  if(poseSlot==null||poseSlot.surface==null||taskLeash==null){Log.i(TAG,event+" leash=missing");return;}
+  try{
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(poseSlot.surface);
+   SurfaceControl plate=((SurfaceView)poseSlot.surface).getSurfaceControl();
+   logLayer(event,poseSlot,leash,plate);
+  }catch(Throwable e){Log.w(TAG,event+"_failed",e);}
+ }
+ private void logLayer(String event,Slot slot,SurfaceControl leash,SurfaceControl plate){
+  int leashId=LiveTaskContent.layerId(leash),plateId=LiveTaskContent.layerId(plate);
+  if(leashId>=0)heldLayer=leashId;
+  Log.i(TAG,event+" task="+(slot==null?-1:slot.taskId)+" leash="+leashId+" name="+leash+" plate="+plateId+" plate_name="+plate+" leash_valid="+(leash!=null&&leash.isValid())+" plate_valid="+(plate!=null&&plate.isValid()));
+ }
  private boolean writeLeashFit(Slot s,SurfaceControl.Transaction t){
+  if(poseHeld&&s==poseSlot)return writeHeldPose(s,t);
   if(closing||stopped||backgrounded||!s.embedded||s.released||s.surface==null||s.card==null||taskLeash==null)return false;
   int w=s.surface.getWidth(),h=s.surface.getHeight();if(w<2||h<2)return false;
   boolean preview=slots.indexOf(s)!=primary,rotate=rotatePresentation(s);
@@ -1033,20 +2067,28 @@ public final class WorkbenchActivity extends Activity {
    if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return false;
    t.setCrop(plate,new Rect(0,0,w,h));
    try{Field bg=SurfaceView.class.getDeclaredField("mBackgroundControl");bg.setAccessible(true);SurfaceControl background=(SurfaceControl)bg.get(s.surface);if(background!=null&&background.isValid())t.setVisibility(background,false);}catch(Throwable ignored){}
-   boolean perspective=AtomicPresentation.perspective(atomicRotate,preview)&&leashMatrix4!=null;
+   float[] target=displayQuad(s,w,h);
+   boolean perspective=CardMotion.projective(target,w,h)&&leashMatrix4!=null;
    if(!perspective&&leashMatrix4!=null)leashMatrix4.invoke(t,leash,(Object)identity4());
    s.perspectiveApplied=perspective;
    if(s.renderBounds.isEmpty())return false;
-   int[] src=presentationSize(s),crop=preview?SurfaceFit.coverCrop(src[0],src[1],w,h):new int[]{0,0,src[0],src[1]};
-   float x=crop[0],y=crop[1],r=x+crop[2],b=y+crop[3];
-   float[] source=SurfaceFit.sourceQuad(src[0],crop,rotate);
-   Rect rect=rotate?new Rect((int)y,src[0]-(int)r,(int)b,src[0]-(int)x):new Rect((int)x,(int)y,(int)r,(int)b);
-   float[] target=displayQuad(s,w,h);
+   int[] src=presentationSize(s);
+   CardMotion.Pose pose=surfacePose(s,w,h);
+   // FlexibleTaskView also rounds the parent SurfaceView plate. During a main→side
+   // exchange the retained plate is initially scaled about 5x; its fixed radius
+   // would clip the correctly rounded task into an excessively round rectangle.
+   // The task leash alone owns the moving outline. Restore the plate's local
+   // radius when the pose settles, inside this same atomic fitting transaction.
+   if(leashRadius!=null)leashRadius.invoke(t,plate,s.motionPose!=null?0f:
+     (float)(s.renderRadius<0?cardRadius(!preview):s.renderRadius));
+   float x=pose.crop[0],y=pose.crop[1],r=x+pose.crop[2],b=y+pose.crop[3];
+   float[] source=CardMotion.sourceQuad(pose,src[0],rotate);
+   Rect rect=rotate?new Rect((int)Math.floor(y),(int)Math.floor(src[0]-r),(int)Math.ceil(b),(int)Math.ceil(src[0]-x)):new Rect((int)Math.floor(x),(int)Math.floor(y),(int)Math.ceil(r),(int)Math.ceil(b));
    t.setCrop(plate,new Rect(0,(int)Math.floor(Math.min(0,target[3])),w,(int)Math.ceil(Math.max(h,target[5]))));
    Matrix map=new Matrix();if(!map.setPolyToPoly(source,0,target,0,4))return false;
    float[] m=new float[9];map.getValues(m);
    t.setCrop(leash,rect);
-   if(leashRadius!=null)leashRadius.invoke(t,leash,preview?Ui.dp(this,Ui.SIDE_RADIUS)/SurfaceFit.coverScale(crop,w,h):0f);
+   if(leashRadius!=null)leashRadius.invoke(t,leash,CardMotion.sourceRadius(pose));
    // A native wallpaper underlay fills the SurfaceView hole. No rectangular
    // card-colored layer may remain outside the projective task outline.
    if(perspective){
@@ -1060,6 +2102,8 @@ public final class WorkbenchActivity extends Activity {
    }else if(leashMatrix!=null){
     leashMatrix.invoke(t,leash,m[0],m[3],m[1],m[4]);t.setPosition(leash,m[2],m[5]);
    }
+   s.fittedPose=pose;
+   s.fittedTask=s.taskId;s.fittedAxis=s.orientationAxis;s.fittedLayer=LiveTaskContent.layerId(leash);s.fittedBounds.set(s.renderBounds);
    if(++s.leashWrites<=3)Log.i(TAG,"leash_atomic slot="+s.id+" perspective="+perspective+" rotate="+rotate+" plate="+w+"x"+h+" matrix="+java.util.Arrays.toString(m));
    return true;
   }catch(Throwable e){Log.w(TAG,"leash_fit_failed slot="+s.id,e);return false;}
@@ -1079,60 +2123,263 @@ public final class WorkbenchActivity extends Activity {
   if(card!=null){
    Ui.round(card,Ui.dp(this,side?Ui.SIDE_RADIUS:Ui.MAIN_RADIUS));
    boolean projective=AtomicPresentation.perspective(atomicRotate,side);
+   for(Slot s:slots)if(s.card==card&&s.motionPose!=null){projective=true;break;}
    card.setClipToOutline(!projective);
    if(card instanceof android.view.ViewGroup)((android.view.ViewGroup)card).setClipChildren(!projective);
   }
  }
  private void layoutCards(boolean animate){
-  if(slots.isEmpty()||closing)return;CardLayout.Result geometry=cardGeometry();layoutAddCard(geometry.add);int[][] target=geometry.cards;final ArrayList<Slot> current=new ArrayList<>(slots);int[][] from=new int[current.size()][4];
-  for(int i=0;i<current.size();i++){Slot s=current.get(i);if(s.card==null)return;from[i]=new int[]{Math.round(s.card.getX()),Math.round(s.card.getY()),Math.round(s.card.getWidth()*s.card.getScaleX()),Math.round(s.card.getHeight()*s.card.getScaleY())};inputRole(s,i==primary);}
-  if(!animate){for(int i=0;i<current.size();i++){resetCardTransform(current.get(i));apply(current.get(i),target[i]);}raiseMain();layoutCaption();return;}
+  if(slots.isEmpty()||closing)return;
+  CardLayout.Result geometry=cardGeometry();layoutAddCard(geometry.add);int[][] target=geometry.cards;
+  final ArrayList<Slot> current=new ArrayList<>(slots);
+  if(!animate){for(int i=0;i<current.size();i++){Slot s=current.get(i);if(s.card==null)return;s.motionPose=null;resetCardTransform(s);inputRole(s,i==primary);apply(s,target[i]);}raiseMain();layoutCaption();scheduleLayoutEvidence("settled");return;}
+  final CardMotion.Pose[] from=new CardMotion.Pose[current.size()],to=new CardMotion.Pose[current.size()];
+  for(int i=0;i<current.size();i++){
+   Slot s=current.get(i);if(s.card==null)return;
+   from[i]=currentPose(s);
+   if(from[i]==null){Log.w(TAG,"switch_degraded reason=missing_source_pose slot="+s.id+" task="+s.taskId);layoutCards(false);return;}
+   int[] r=target[i];to[i]=rolePose(s,new float[]{r[0],r[1],r[2],r[3]},i!=primary);
+  }
   final int generation=++switchGeneration;
-  switchStarted=SystemClock.uptimeMillis();lastAnimationFrame=0;maxFrameGap=0;animationFrames=0;resizeCalls=0;resizeNanos=0;
-  animation=ValueAnimator.ofFloat(0,1);for(int i=0;i<current.size();i++)inputRole(current.get(i),i==primary);animation.setDuration(360);animation.setInterpolator(GesturePolicy::spring);
-  // Keep SurfaceView dimensions fixed throughout the transition. RenderThread
-  // transforms the card and its child Surface together; no per-frame task resize.
-  for(int i=0;i<current.size();i++){apply(current.get(i),target[i]);transformCard(current.get(i),from[i],target[i],0);}
+  switchStarted=SystemClock.uptimeMillis();lastAnimationFrame=0;maxFrameGap=0;animationFrames=0;resizeCalls=0;resizeNanos=0;motionFitFailures=0;
+  animation=ValueAnimator.ofFloat(0,1);animation.setDuration(MotionSpec.SWITCH_MS);animation.setInterpolator(MotionSpec::geometry);
+  // Capture before role changes. Keep render bounds fixed; interpolate the buffer
+  // window and all four stage-space corners along with the View's screen box.
+  for(int i=0;i<current.size();i++){
+   Slot s=current.get(i);s.motionPose=from[i];inputRole(s,i==primary);apply(s,target[i]);poseCard(s,from[i],to[i]);
+  }
   raiseMain();
+  motionFitListener=()->{
+   if(generation==switchGeneration&&!closing&&!stopped&&!backgrounded){
+    try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+     boolean ready=true;for(Slot s:current){fitRecoveryCover(s,s.surface.getWidth(),s.surface.getHeight());ready&=writeLeashFit(s,fit);}
+     if(ready)submitMotionFit(fit);else motionFitFailures++;
+    }catch(Throwable e){motionFitFailures++;Log.w(TAG,"switch_frame_fit_failed generation="+generation,e);}
+   }
+   return true;
+  };
+  stage.getViewTreeObserver().addOnPreDrawListener(motionFitListener);
   animation.addUpdateListener(a->{
    long now=SystemClock.uptimeMillis();if(lastAnimationFrame!=0)maxFrameGap=Math.max(maxFrameGap,now-lastAnimationFrame);lastAnimationFrame=now;animationFrames++;
-   float f=(Float)a.getAnimatedValue();for(int i=0;i<current.size();i++)transformCard(current.get(i),from[i],target[i],f);
+   float f=(Float)a.getAnimatedValue();for(int i=0;i<current.size();i++)poseCard(current.get(i),CardMotion.between(from[i],to[i],f),to[i]);stage.invalidate();
   });
   animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){if(animation!=a)return;
-   animation=null;settlingInput=true;
-   // Keep task input blocked until the final geometry has traversed layout.
-   settleListener=new ViewTreeObserver.OnPreDrawListener(){public boolean onPreDraw(){
-    stage.getViewTreeObserver().removeOnPreDrawListener(this);
-    if(generation!=switchGeneration||closing)return true;
-    settleListener=null;settlingInput=false;
-    for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
-    layoutCaption();logSwitch("settled");handler.post(()->focusPrimary("switch"));return true;
-   }};stage.getViewTreeObserver().addOnPreDrawListener(settleListener);stage.invalidate();
-  }});animation.start();
+   animation=null;settlingInput=true;removeMotionFitListener();
+   settleSwitch(generation,SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS);
+  }});Log.i(TAG,"switch_animation_start generation="+generation+" prepare_token="+switchOriginPrepareToken+" tasks="+taskIds()+" duration_ms="+MotionSpec.SWITCH_MS+" geometry=quad_crop_radius");animation.start();
+ }
+ private void motionOutline(Slot s){
+  // The rounded task leash supplies the animated outline. A final-role View clip
+  // or rectangular backdrop would cut off the old trapezoid at the first frame.
+  s.card.setClipToOutline(false);s.card.setClipChildren(false);
+  if(s.card.getBackground()!=null)s.card.setBackground(null);
+  if(s.surface!=null){
+   s.surface.setClipBounds(null);
+   s.surface.setClipToOutline(false);
+   // SurfaceView also punches a rounded hole in the host Canvas. That radius is
+   // multiplied by the card scale, independently of the SurfaceControl plate.
+   // Keep both the ROM's retained radius and the Canvas hole square while the
+   // task leash supplies the animated outline; applyCardRadius restores them.
+   try{
+    if(cornerRadius!=null&&cornerRadius.getFloat(s.surface)!=0f)cornerRadius.setFloat(s.surface,0f);
+    float hole=((Number)viewApi.getMethod("getCornerRadius").invoke(s.surface)).floatValue();
+    if(hole!=0f)viewApi.getMethod("setCornerRadius",float.class).invoke(s.surface,0f);
+   }catch(Throwable e){Log.w(TAG,"motion_corner_radius_failed slot="+s.id,e);}
+  }
+ }
+ private void poseCard(Slot s,CardMotion.Pose pose,CardMotion.Pose target){
+  s.motionPose=pose;s.card.setPivotX(0);s.card.setPivotY(0);
+  s.card.setTranslationX(pose.box[0]-target.box[0]);s.card.setTranslationY(pose.box[1]-target.box[1]);
+  s.card.setScaleX(pose.box[2]/target.box[2]);s.card.setScaleY(pose.box[3]/target.box[3]);motionOutline(s);
+ }
+ private void submitMotionFit(SurfaceControl.Transaction fit){
+  AttachedSurfaceControl root=stage.getRootSurfaceControl();
+  if(root==null||!root.applyTransactionOnDraw(fit))throw new IllegalStateException("Missing host draw transaction");
+ }
+ private void removeMotionFitListener(){
+  if(motionFitListener!=null){stage.getViewTreeObserver().removeOnPreDrawListener(motionFitListener);motionFitListener=null;}
+ }
+ private String switchSurfaceKey(){
+  String key=entranceSurfaceKey();if(key==null)return null;
+  StringBuilder out=new StringBuilder(key);
+  for(Slot s:slots){
+   if(s.motionPose==null)return null;
+   out.append(':').append(Arrays.toString(cardBox(s))).append(':').append(Arrays.toString(s.motionPose.quad)).append(':').append(Arrays.toString(s.motionPose.crop));
+  }
+  return out.toString();
+ }
+ private void settleSwitch(int generation,long deadline){
+  if(generation!=switchGeneration||!settlingInput||closing||stopped||backgrounded)return;
+  if(SystemClock.uptimeMillis()>=deadline){
+   Log.w(TAG,"switch_settle_timeout generation="+generation+" waiting_for="+entranceWaitReason);
+   logSwitch("failed_settle_timeout");cancelAnimation();layoutCards(false);return;
+  }
+  String key=switchSurfaceKey();
+  if(key==null){handler.postDelayed(()->settleSwitch(generation,deadline),MotionSpec.SURFACE_RETRY_MS);return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted switch slot "+s.id);
+   fit.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(generation!=switchGeneration||!settlingInput)return;
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+     if(generation!=switchGeneration||!settlingInput||closing||stopped||backgrounded)return;
+     if(SystemClock.uptimeMillis()>=deadline){settleSwitch(generation,deadline);return;}
+     if(!key.equals(switchSurfaceKey())){settleSwitch(generation,deadline);return;}
+     settlingInput=false;
+     for(int i=0;i<slots.size();i++){Slot s=slots.get(i);s.motionPose=null;resetCardTransform(s);inputRole(s,i==primary);int[] plate=surfacePlate(s);fitRecoveryCover(s,plate[0],plate[1]);}
+     layoutCaption();logSwitch(motionFitFailures==0?"settled":"failed_motion_fit");scheduleLayoutEvidence("switch");handler.post(()->focusPrimary("switch"));
+    }));stage.invalidate();
+   });submitMotionFit(fit);stage.invalidate();
+   // A missing compositor or host-frame callback is a failure, too.
+   handler.postDelayed(()->{if(generation==switchGeneration&&settlingInput)settleSwitch(generation,deadline);},Math.max(1,deadline-SystemClock.uptimeMillis()));
+  }catch(Throwable e){Log.w(TAG,"switch_final_fit_failed generation="+generation,e);handler.postDelayed(()->settleSwitch(generation,deadline),MotionSpec.SURFACE_RETRY_MS);}
+ }
+ /** Read-only evidence of the actual settled View rectangles, not just planned geometry. */
+ private void scheduleLayoutEvidence(String reason){
+  final int generation=++layoutEvidenceGeneration;
+  final long deadline=SystemClock.uptimeMillis()+1500;
+  Runnable check=new Runnable(){public void run(){
+   if(generation!=layoutEvidenceGeneration||closing||stopped||backgrounded||stage==null)return;
+   boolean ready=!layoutPosted&&!stage.isLayoutRequested()&&!screenArrival&&!handoffPresentation&&animation==null&&addAnimation==null;
+   for(Slot s:slots)ready&=s.card!=null&&s.surface!=null&&!s.card.isLayoutRequested()&&!s.surface.isLayoutRequested()&&s.taskId>=0;
+   if(!ready){if(SystemClock.uptimeMillis()<deadline)stage.postOnAnimation(this);else{
+    StringBuilder detail=new StringBuilder().append("host_layout=").append(stage.isLayoutRequested()).append(" posted=").append(layoutPosted).append(" arrival=").append(screenArrival).append(" handoff=").append(handoffPresentation).append(" animation=").append(animation!=null).append(" add=").append(addAnimation!=null);
+    for(Slot s:slots)detail.append(" slot=").append(s.id).append(" task=").append(s.taskId).append(" card_layout=").append(s.card!=null&&s.card.isLayoutRequested()).append(" surface_layout=").append(s.surface!=null&&s.surface.isLayoutRequested());
+    Log.w(TAG,"layout_evidence_timeout "+detail);
+   }return;}
+   try{
+    org.json.JSONObject data=new org.json.JSONObject();int[] loc=new int[2];stage.getLocationOnScreen(loc);
+    data.put("container",getTaskId()).put("reason",reason).put("width",stage.getWidth()).put("height",stage.getHeight())
+     .put("x",loc[0]).put("y",loc[1]).put("mode",effectiveMode()).put("primary",primary).put("count",slots.size())
+     .put("rotation",getDisplay().getRotation()).put("requested_orientation",getRequestedOrientation());
+    org.json.JSONArray cards=new org.json.JSONArray();
+    for(Slot s:slots){org.json.JSONObject card=new org.json.JSONObject();card.put("slot",s.id).put("task",s.taskId).put("pkg",s.component.getPackageName())
+     .put("axis",s.orientationAxis).put("render",new org.json.JSONArray(new int[]{s.renderBounds.width(),s.renderBounds.height()}))
+     .put("box",new org.json.JSONArray(new int[]{s.card.getLeft(),s.card.getTop(),s.card.getWidth(),s.card.getHeight()}))
+     .put("rotate",rotatePresentation(s)).put("perspective",s.perspectiveApplied);cards.put(card);}
+    data.put("cards",cards);if(addCard.getVisibility()==View.VISIBLE)data.put("add",new org.json.JSONArray(new int[]{addCard.getLeft(),addCard.getTop(),addCard.getWidth(),addCard.getHeight()}));
+    Log.i(TAG,"layout_evidence "+data);
+   }catch(Throwable e){Log.w(TAG,"layout_evidence_failed",e);}
+  }};stage.postOnAnimation(check);
  }
  private void raiseMain(){
   if(primary<0||primary>=slots.size())return;
   Slot s=slots.get(primary);if(s.card!=null)s.card.bringToFront();
   if(status!=null)status.bringToFront();
  }
- private void resetCardTransform(Slot s){s.card.setTranslationX(0);s.card.setTranslationY(0);s.card.setScaleX(1);s.card.setScaleY(1);}
- private void transformCard(Slot s,int[] from,int[] target,float fraction){
+private void resetCardTransform(Slot s){s.card.setTranslationX(0);s.card.setTranslationY(0);s.card.setScaleX(1);s.card.setScaleY(1);s.motionFromRadius=-1f;s.renderRadius=-1;applyCardRadius(s,slots.indexOf(s)==primary);}
+private void transformCard(Slot s,int[] from,int[] target,float fraction){
   s.card.setPivotX(0);s.card.setPivotY(0);float remaining=1-fraction;
   s.card.setTranslationX((from[0]-target[0])*remaining);s.card.setTranslationY((from[1]-target[1])*remaining);
-  s.card.setScaleX(1+(from[2]/(float)Math.max(1,target[2])-1)*remaining);
-  s.card.setScaleY(1+(from[3]/(float)Math.max(1,target[3])-1)*remaining);
- }
+  float scaleX=1+(from[2]/(float)Math.max(1,target[2])-1)*remaining;
+  float scaleY=1+(from[3]/(float)Math.max(1,target[3])-1)*remaining;
+  s.card.setScaleX(scaleX);s.card.setScaleY(scaleY);
+  animateCardRadius(s,fraction,scaleX,scaleY);
+}
+/** Geometry and screen-space rounding share the spring sample. Divide by the View scale
+ *  when writing its outline; otherwise the radius is scaled twice (TODO D2).
+ *  Projective side plates retain their leash outline. */
+private void animateCardRadius(Slot s,float fraction,float scaleX,float scaleY){
+  if(s.card==null)return;
+  boolean isPrimary=slots.indexOf(s)==primary;
+  if(AtomicPresentation.perspective(atomicRotate,!isPrimary))return;
+  float target=cardRadius(isPrimary),from=s.motionFromRadius<0?target:s.motionFromRadius;
+  int radius=Math.round(MotionSpec.viewRadius(from,target,fraction,scaleX,scaleY));
+  if(radius==s.renderRadius)return;
+  s.renderRadius=radius;Ui.round(s.card,radius);
+  if(s.card.getBackground() instanceof android.graphics.drawable.GradientDrawable)
+   ((android.graphics.drawable.GradientDrawable)s.card.getBackground()).setCornerRadius(radius);
+}
  private boolean switching(){return animation!=null||settlingInput;}
- private void logSwitch(String result){Log.i(TAG,"switch_metrics result="+result+" generation="+switchGeneration+" primary="+primary+" elapsed_ms="+(SystemClock.uptimeMillis()-switchStarted)+" frames="+animationFrames+" max_frame_gap_ms="+maxFrameGap+" resize_calls="+resizeCalls+" resize_wall_us="+(resizeNanos/1000));}
+ private void logSwitch(String result){Log.i(TAG,"switch_metrics result="+result+" generation="+switchGeneration+" primary="+primary+" elapsed_ms="+(SystemClock.uptimeMillis()-switchStarted)+" frames="+animationFrames+" max_frame_gap_ms="+maxFrameGap+" resize_calls="+resizeCalls+" resize_wall_us="+(resizeNanos/1000)+" fit_failures="+motionFitFailures);}
  private void cancelAnimation(){
+  cancelAnimation(false);
+ }
+ private void cancelAnimation(boolean preservePose){
+  clearArrivalFace("animation_preempted");
+  cancelHandoffPresentation();
   if(addAnimation!=null){ValueAnimator old=addAnimation;addAnimation=null;old.cancel();releaseEntrance();}
-  if(switching())logSwitch("cancelled");switchGeneration++;
-  if(settleListener!=null){stage.getViewTreeObserver().removeOnPreDrawListener(settleListener);settleListener=null;}
+  if(switching())logSwitch("cancelled");switchGeneration++;removeMotionFitListener();
   settlingInput=false;
   if(animation!=null){ValueAnimator old=animation;animation=null;old.cancel();}
-  if(screenArrival){screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;for(Slot s:slots)if(s.card!=null)resetCardTransform(s);}
+  if(!preservePose)for(Slot s:slots)s.motionPose=null;
+  if(screenArrival){arrivalRun.cancel();stage.stopWatching();Log.i(TAG,"arrive_result result=cancelled token="+arrivalToken);handler.removeCallbacks(arrivalUnlock);entranceInputBlocked=false;closeEntranceCover("arrival_cancelled");screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;if(!preservePose)for(Slot s:slots)if(s.card!=null)resetCardTransform(s);}
  }
- private void promote(int index){if(closing||recovering||dragging!=null||index<0||index>=slots.size()||index==primary)return;if(slots.get(index).taskId<0){Toast.makeText(this,"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}cancelAnimation();CardOrder.promote(slots,primary,index);layoutCards(true);refreshStatus();Log.i(TAG,"switch primary="+primary+" tasks="+taskIds());}
+ private void queueExistingSwitch(Slot selected,long session){
+  cancelSwitchPreparation("superseded");
+  switchPrepareTarget=selected;switchPrepareSession=session;switchPreparePrimary=primary;
+  switchPrepareSlots=new ArrayList<>(slots);switchPrepareTasks=new int[slots.size()];
+  for(int i=0;i<slots.size();i++){Slot slot=slots.get(i);switchPrepareTasks[i]=slot.taskId;}
+  final int token=switchPrepareToken=switchPreparation.begin(SystemClock.uptimeMillis(),MotionSpec.ARRIVAL_UNLOCK_MS);
+  // Do not read a destroyed background Surface or reorder Slots before restoration.
+  for(int i=0;i<slots.size();i++)inputRole(slots.get(i),i==primary);
+  Log.i(TAG,"switch_prepare_wait token="+token+" task="+selected.taskId+" session="+session+" container="+getTaskId()+" tasks="+taskIds());
+  handler.post(()->prepareExistingSwitch(token));
+  handler.postDelayed(()->{if(switchPreparation.current(token))failSwitchPreparation(token,"timeout");},MotionSpec.ARRIVAL_UNLOCK_MS);
+ }
+ private boolean sameSwitchParticipants(){
+  if(switchPrepareSlots==null||switchPrepareSlots.size()!=slots.size()||primary!=switchPreparePrimary)return false;
+  for(int i=0;i<slots.size();i++){
+   Slot s=slots.get(i);if(s!=switchPrepareSlots.get(i)||s.released||switchPrepareTasks[i]<0)return false;
+   // A rebind can temporarily publish -1; readiness will wait. A different real
+   // task never inherits this request, even if its package name is the same.
+   if(s.taskId>=0&&s.taskId!=switchPrepareTasks[i])return false;
+  }
+  return switchPrepareTarget!=null&&slots.contains(switchPrepareTarget);
+ }
+ private void prepareExistingSwitch(int token){
+  if(!switchPreparation.waiting(token))return;
+  if(closing||isFinishing()||!sameSwitchParticipants()){failSwitchPreparation(token,"identity_changed");return;}
+  if(switchPreparation.remaining(SystemClock.uptimeMillis())==0){failSwitchPreparation(token,"timeout");return;}
+  if(stopped||backgrounded||recovering||dragging!=null||screenArrival||handoffPresentation||animation!=null||settlingInput||entranceCover!=null||coverReleasePending){
+   handler.postDelayed(()->prepareExistingSwitch(token),MotionSpec.SURFACE_RETRY_MS);return;
+  }
+  String key=entranceSurfaceKey();
+  if(key==null){handler.postDelayed(()->prepareExistingSwitch(token),MotionSpec.SURFACE_RETRY_MS);return;}
+  final int ticket=switchPreparation.commit(token,SystemClock.uptimeMillis());
+  if(ticket<0){failSwitchPreparation(token,"timeout");return;}
+  try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
+   for(Slot s:slots)if(!writeLeashFit(s,fit))throw new IllegalStateException("Unfitted existing-switch slot "+s.id);
+   fit.addTransactionCommittedListener((Executor)handler::post,()->{
+    if(!switchPreparation.committing(token,ticket))return;
+    stage.getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
+     if(!switchPreparation.committing(token,ticket))return;
+     if(closing||isFinishing()||!sameSwitchParticipants()){failSwitchPreparation(token,"identity_changed");return;}
+     boolean ready=!stopped&&!backgrounded&&!recovering&&dragging==null&&!screenArrival&&!handoffPresentation&&animation==null&&!settlingInput&&entranceCover==null&&!coverReleasePending&&key.equals(entranceSurfaceKey());
+     for(Slot s:slots)ready&=s.taskId>=0&&currentPose(s)!=null;
+     if(!ready){retrySwitchPreparation(token,ticket);return;}
+     Slot selected=switchPrepareTarget;long session=switchPrepareSession;int task=selected.taskId,index=slots.indexOf(selected);
+     if(!switchPreparation.ready(token,ticket,SystemClock.uptimeMillis())){failSwitchPreparation(token,"timeout");return;}
+     clearSwitchPreparation();
+     Log.i(TAG,"switch_prepare_result result=ready token="+token+" task="+task+" session="+session+" container="+getTaskId());
+     // promote samples the restored, committed pose immediately before changing roles.
+     switchOriginPrepareToken=token;
+     try{promote(index);}finally{switchOriginPrepareToken=0;}
+    }));stage.invalidate();
+   });submitMotionFit(fit);stage.invalidate();
+  }catch(Throwable e){Log.w(TAG,"switch_prepare_fit_failed token="+token+" ticket="+ticket,e);retrySwitchPreparation(token,ticket);}
+ }
+ private void retrySwitchPreparation(int token,int ticket){
+  if(switchPreparation.retry(token,ticket,SystemClock.uptimeMillis()))handler.postDelayed(()->prepareExistingSwitch(token),MotionSpec.SURFACE_RETRY_MS);
+  else if(switchPreparation.current(token))failSwitchPreparation(token,"timeout");
+ }
+ private void clearSwitchPreparation(){switchPrepareTarget=null;switchPrepareSlots=null;switchPrepareTasks=null;switchPrepareSession=0;}
+ private void cancelSwitchPreparation(String reason){
+  if(!switchPreparation.pending())return;
+  int task=switchPrepareTarget==null?-1:switchPrepareTarget.taskId;
+  switchPreparation.cancel();clearSwitchPreparation();
+  Log.i(TAG,"switch_prepare_result result=cancelled token="+switchPrepareToken+" task="+task+" reason="+reason);
+  if(!closing)for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);
+ }
+ private void failSwitchPreparation(int token,String reason){
+  if(!switchPreparation.current(token))return;
+  int task=switchPrepareTarget==null?-1:switchPrepareTarget.taskId;
+  if(!switchPreparation.timeout(token,SystemClock.uptimeMillis()))switchPreparation.cancel();
+  clearSwitchPreparation();
+  Log.w(TAG,"switch_prepare_result result=failed token="+token+" task="+task+" reason="+reason+" waiting_for="+entranceWaitReason);
+  closeEntranceCover("switch_prepare_"+reason);
+  if(!closing){for(int i=0;i<slots.size();i++)if(slots.get(i).card!=null)inputRole(slots.get(i),i==primary);Toast.makeText(this,"窗口尚未恢复，请再试一次",Toast.LENGTH_SHORT).show();}
+ }
+ private void promote(int index){if(closing||recovering||dragging!=null||index<0||index>=slots.size()||index==primary)return;cancelSwitchPreparation("direct_switch");for(Slot s:slots)if(s.taskId<0||s.card==null||currentPose(s)==null){Log.w(TAG,"switch_rejected reason=source_not_ready slot="+s.id+" task="+s.taskId);Toast.makeText(this,"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}cancelAnimation(true);CardOrder.promote(slots,primary,index);layoutCards(true);refreshStatus();Log.i(TAG,"switch primary="+primary+" tasks="+taskIds());}
  private String taskIds(){StringBuilder b=new StringBuilder();for(Slot s:slots){if(b.length()>0)b.append(',');b.append(s.taskId);}return b.toString();}
  private void refreshStatus(){runOnUiThread(()->{if(closing||slots.isEmpty())return;boolean ready=true,failed=false;for(Slot s:slots){ready&=s.taskId>=0;failed|=s.failed;}status.setVisibility(ready&&!failed?View.GONE:View.VISIBLE);status.setText(failed?"部分窗口未就绪，可长按卡片替换或移出":ready?slots.size()+" 个实时窗口 · 主应用："+slots.get(primary).label:"正在等待应用窗口…");if(status.getVisibility()==View.VISIBLE)status.bringToFront();});}
  private void fail(Throwable e){while(e.getCause()!=null&&e.getCause()!=e)e=e.getCause();Log.e(TAG,"workbench_error",e);if(status!=null){status.setVisibility(View.VISIBLE);status.setText("无法启动："+e.getClass().getSimpleName()+" · "+e.getMessage());}}
@@ -1142,7 +2389,7 @@ public final class WorkbenchActivity extends Activity {
   int keep=main.taskId;
   ComponentName component=main.component;
   dismissPrimaryMenu();detachCaption();
-  closing=true;publishState(0);clearRecoveryCovers();cancelDrag();cancelAnimation();handler.removeCallbacksAndMessages(null);
+  cancelSwitchPreparation("fullscreen");closing=true;publishState(0);clearRecoveryCovers();cancelDrag();cancelAnimation();closeEntranceCover("exit_fullscreen");handler.removeCallbacksAndMessages(null);
   // Unlink every task. Keep the main task from being moved to back or restored
   // behind this container; that was snapping fullscreen back to the workbench.
   for(Slot s:new ArrayList<>(slots))releaseSlot(s,s==main);
@@ -1156,17 +2403,20 @@ public final class WorkbenchActivity extends Activity {
  }
  private boolean bringTaskFullscreen(int taskId,ComponentName component){
   if(taskId>=0){
-   try{
-    ActivityManager am=(ActivityManager)getSystemService(ACTIVITY_SERVICE);
-    am.getClass().getMethod("moveTaskToFront",int.class,int.class).invoke(am,taskId,0);
-    Log.i(TAG,"fullscreen_move_front task="+taskId);
-    return true;
-   }catch(Throwable e){Log.w(TAG,"fullscreen_move_front_failed",e);}
+   // No ActivityManager.moveTaskToFront here on purpose. uid 10243 holds no REORDER_TASKS, so the
+   // call was refused on every attempt (9/9 in logs/logcat_cap2.txt) and only added a Permission
+   // Denial before falling through to the branch below. Calling an API that is known to fail
+   // cannot make the transition more correct, and it kept the acceptance grep non-zero (TODO B1).
    try{
     Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
     Object result=Class.forName("android.app.IActivityTaskManager").getMethod("startActivityFromRecents",int.class,Bundle.class).invoke(service,taskId,null);
-    Log.i(TAG,"fullscreen_recents task="+taskId+" result="+result);
-    return true;
+    int code=result instanceof Integer?(Integer)result:Integer.MIN_VALUE;
+    boolean accepted=TransitionPolicy.startAccepted(code);
+    Log.i(TAG,"fullscreen_recents task="+taskId+" result="+result+" accepted="+accepted);
+    // Reporting success on the call alone is what made this silent: START_CANCELED (-96) and
+    // START_NOT_ACTIVITY (-95) fell outside the band but were swallowed by a hard-coded
+    // return true (TODO B1-1). Anything rejected now falls through to the intent fallback.
+    if(accepted)return true;
    }catch(Throwable e){Log.w(TAG,"fullscreen_recents_failed",e);}
   }
   if(component==null)return false;
@@ -1176,9 +2426,24 @@ public final class WorkbenchActivity extends Activity {
    return true;
   }catch(Throwable e){Log.w(TAG,"fullscreen_intent_failed",e);return false;}
  }
- private void releaseSlot(Slot s){releaseSlot(s,false);}
+ /** Unhooks this slot's task leash from our plate so the ROM's zoom transition is the only holder
+ *  of the task surface (TODO B2-1). The view's own surface-destroyed guard is already held down
+ *  by {@link #releaseSlot}, which is the 300 ms fallback the hand-off notes call for. */
+private void detachLeashForTransition(Slot s){
+  if(s.surface==null||taskLeash==null)return;
+  try{
+   SurfaceControl leash=(SurfaceControl)taskLeash.get(s.surface);
+   if(leash==null||!leash.isValid())return;
+   try(SurfaceControl.Transaction detach=new SurfaceControl.Transaction()){
+    detach.reparent(leash,null);detach.apply();
+   }
+   Log.i(TAG,"transition_leash_detached slot="+s.id+" task="+s.taskId);
+  }catch(Throwable e){Log.w(TAG,"transition_leash_detach_failed slot="+s.id,e);}
+}
+private void releaseSlot(Slot s){releaseSlot(s,false);}
  private void releaseSlot(Slot s,boolean toFront){
   if(s.released)return;
+  s.drawEvidence.invalidate();
   EmbeddedTaskGuard.forget(s.surface);s.embedded=false;clearProjection(s);
   if(s.transaction!=null){
    LeashTransactions.unregister(s.transaction);
@@ -1197,6 +2462,12 @@ public final class WorkbenchActivity extends Activity {
   View released=s.surface;
   if(released!=null){
    try{
+    // TODO B2-1: during the hand-off the ROM's zoom transition (startZoomWindowFromSplit, the
+    // third layer) and our own plate can both hold this task surface, which is what draws the
+    // same card in two places for four frames (t=2.54–2.62). Detach ours first so only the ROM
+    // is drawing. Behind a switch: it still needs a device pass to prove the task keeps drawing
+    // once the plate is gone.
+    if(detachLeashBeforeTransition&&toFront)detachLeashForTransition(s);
     // Unlink first: moving a still-linked task can background the whole group.
     // The ROM's move-to-back path resets it without the unsafe direct
     // fullscreen transition used by resetFlexibleTask.
@@ -1276,11 +2547,12 @@ public final class WorkbenchActivity extends Activity {
    wct.getMethod("reorder",token,boolean.class).invoke(tx,t,front);
    Class<?> organizer=Class.forName("android.window.WindowOrganizer");organizer.getMethod("applyTransaction",wct).invoke(organizer.getConstructor().newInstance(),tx);return;
   }
+  throw new IllegalStateException("Missing task "+id);
  }
- private void releaseWindows(){clearRecoveryCovers();cancelDrag();cancelAnimation();handler.removeCallbacksAndMessages(null);for(Slot s:new ArrayList<>(slots))releaseSlot(s);}
- private boolean backReady(){return !closing&&!backgrounded&&!stopped&&modalWindows==0&&!recovering&&!switching()&&dragging==null&&!slots.isEmpty();}
+ private void releaseWindows(){cancelSwitchPreparation("release");clearRecoveryCovers();cancelDrag();cancelAnimation();handler.removeCallbacksAndMessages(null);for(Slot s:new ArrayList<>(slots))releaseSlot(s);}
+ private boolean backReady(){return !switchPreparation.pending()&&!closing&&!backgrounded&&!stopped&&modalWindows==0&&!recovering&&!switching()&&!entranceInputBlocked&&!handoffPresentation&&dragging==null&&!slots.isEmpty();}
  private boolean focusPrimary(String reason){
-  if(!backReady()||stage==null||!stage.isShown())return false;
+  if(!backReady()||stage==null||!stage.isShown()||screenArrival)return false;
   Slot main=slots.get(primary);if(main.released||main.taskId<0)return false;
   try{managerApi.getMethod("setFocusAppForEmbeddedTask",int.class).invoke(manager,main.taskId);Log.i(TAG,"back_focus reason="+reason+" task="+main.taskId);return true;}
   catch(Throwable e){Log.w(TAG,"back_focus_failed",e);return false;}
@@ -1321,6 +2593,7 @@ public final class WorkbenchActivity extends Activity {
   s.sourceTaskId=task;s.taskId=-1;s.failed=false;s.windowDrawn=false;
   try{
    Bundle config=new Bundle();config.putInt("scenario",2);config.putParcelable("launchBounds",new Rect(s.renderBounds));
+   config.putBoolean("flexible_embeed_task_config_with_container",false);config.putBoolean("use_default_background_color",false);
    config.putBoolean("need_rotate_task_leash",rotatePresentation(s));config.putBoolean("zorder_on_top",false);config.putInt("taskId",task);
    config.putInt("userId",s.sourceUserId>=0?s.sourceUserId:android.os.Process.myUid()/100000);config.putFloat("cornerRadius",cardRadius(slots.indexOf(s)==primary));config.putInt("reparent_align",slots.indexOf(s)==primary?0:2);
    config.putBoolean("intercept_input_event",false);config.putBoolean("allow_task_detach_from_embedding",true);config.putBoolean("key_intercept_back_key",true);config.putBoolean("flexible_key_remove_task_detach",false);config.putInt("use_view_snapshot",1);
@@ -1343,14 +2616,23 @@ public final class WorkbenchActivity extends Activity {
   if(!backReady()||slots.get(primary)!=s||s.released||s.taskId!=task){Log.i(TAG,"back_root_ignored task="+task);return;}
   Log.i(TAG,"back_root task="+task+" container="+getTaskId());backgroundWorkbench("task_root");
  }
- private boolean backgroundWorkbench(String reason){
+private boolean backgroundWorkbench(String reason){
   if(!backReady())return false;
   backgrounded=true;backGeneration++;forwardingBack=false;cancelDrag();cancelAnimation();
+  if(keepSurfaceOnBackground){
+   // Experimental alternative for TODO A1-3. Moving the container back can still stop its
+   // Activity and destroy its surface; only a device trace can establish whether it helps.
+   try{
+    Class<?> atm=Class.forName("android.app.OplusActivityTaskManager");
+    atm.getMethod("moveTaskToBack",int.class,boolean.class).invoke(atm.getMethod("getInstance").invoke(null),getTaskId(),true);
+    Log.i(TAG,"workbench_background_surface_kept reason="+reason+" container="+getTaskId());return true;
+   }catch(Throwable e){Log.w(TAG,"back_surface_keep_failed",e);}
+  }
   // Home preserves the embedded group. moveTaskToBack on a linked child can
   // detach it through the ROM fullscreen transition, so do not use release here.
   try{startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));Log.i(TAG,"workbench_background reason="+reason+" container="+getTaskId()+" primary="+primary+" layout="+layoutMode+" tasks="+taskIds());return true;}
   catch(Throwable e){backgrounded=false;Log.w(TAG,"back_home_failed",e);return false;}
- }
+}
  private boolean embeddedImeVisible(){
   if(imeBottom>0)return true;
   // Embedded IME insets need not reach the container. Read the display's actual
@@ -1388,9 +2670,9 @@ public final class WorkbenchActivity extends Activity {
    finally{handler.postDelayed(()->{if(generation==backGeneration)forwardingBack=false;},200);}
   },80);
  }
- private void closeWorkbench(){dismissHang();dismissPrimaryMenu();detachCaption();if(closing)return;closing=true;publishState(0);releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
+ private void closeWorkbench(){dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("close_workbench");if(closing)return;closing=true;publishState(0);releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
  @Override public void onBackPressed(){handleHostBack();}
- @Override protected void onDestroy(){dismissHang();dismissPrimaryMenu();detachCaption();if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
+ @Override protected void onDestroy(){clearHeldPose();hangSourceGeneration++;if(hangSourceFrame!=null){hangSourceFrame.recycle();hangSourceFrame=null;}dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("destroy");if(contentThread!=null){contentThread.quitSafely();contentThread=null;contentWorker=null;}if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
  private void publishState(int count){publishState(count,++statePublishGeneration,0);}
  private Bundle liveState(int count){
   Bundle state=new Bundle();state.putInt("containerTaskId",getTaskId());state.putInt("count",count);state.putLong("instanceToken",stateToken);
@@ -1419,5 +2701,5 @@ public final class WorkbenchActivity extends Activity {
   if(attempt<3)handler.postDelayed(()->publishState(count,generation,attempt+1),250L*(attempt+1));
  }
  @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[slots.size()];int[] sourceTaskIds=new int[slots.size()];for(int i=0;i<slots.size();i++){Slot s=slots.get(i);components[i]=s.component.flattenToString();sourceTaskIds[i]=s.sourceTaskId>=0?(s.taskId>=0?s.taskId:s.sourceTaskId):-1;}b.putStringArray("components",components);b.putIntArray("sourceTaskIds",sourceTaskIds);b.putInt("primary",primary);b.putInt("layoutMode",layoutMode);for(Slot s:slots)if(s.pinned)b.putString("pinned",s.component.flattenToString());super.onSaveInstanceState(b);}
- @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds());if(backdrop!=null)backdrop.onConfigurationChanged();if(stage!=null)scheduleLayout();}
+ @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+taskIds()+" defer="+deferPortrait+" pose="+poseHeld);if(poseHeld)logHeldLayer("defer_rotation_config");if(backdrop!=null)backdrop.onConfigurationChanged();if(stage!=null)scheduleLayout();}
 }

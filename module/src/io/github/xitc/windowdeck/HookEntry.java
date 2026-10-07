@@ -5,16 +5,27 @@ import de.robv.android.xposed.*;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class HookEntry implements IXposedHookLoadPackage {
- /** Stamped into every ready line so a stale install is obvious from logcat alone. */
- static final String VERSION="0.4.8-beta.27";
  public void handleLoadPackage(XC_LoadPackage.LoadPackageParam p) {
   if ("com.android.launcher".equals(p.packageName) || "com.oplus.pscanvas".equals(p.packageName))
    android.util.Log.i("WindowDeck","load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
   if("com.android.launcher".equals(p.packageName)){
-   android.util.Log.i("WindowDeck","launcher_load_package version="+VERSION+" process="+p.processName);
-   try{LauncherSwipeHook.install(p.classLoader);android.util.Log.i("WindowDeck","launcher_hook_ready version="+VERSION+" process="+p.processName);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_hook_failed",e);XposedBridge.log(e);}return;
+   android.util.Log.i("WindowDeck","launcher_load_package version="+Version.NAME+" process="+p.processName);
+   boolean state=false,existing=false,swipe=false;
+   try{LiveWorkbenchState.installLauncher();state=true;}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_state_hook_failed",e);XposedBridge.log(e);}
+   try{LauncherExistingAppHook.install();existing=true;}catch(Throwable e){android.util.Log.e("WindowDeck","existing_launch_hook_failed",e);XposedBridge.log(e);}
+   try{swipe=LauncherSwipeHook.install(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_swipe_hook_failed",e);XposedBridge.log(e);}
+   android.util.Log.i("WindowDeck","launcher_hook_ready version="+Version.NAME+" state="+state+" existing="+existing+" swipe="+swipe+" process="+p.processName);
+   return;
   }
   if (!"com.oplus.pscanvas".equals(p.packageName)) return;
+  boolean activity=false,leash=false,ime=false,back=false;
+  try{hookWorkbenchActivity();activity=true;}catch(Throwable e){android.util.Log.e("WindowDeck","custom_activity_hook_failed",e);XposedBridge.log(e);}
+  try{LeashTransactions.install();leash=true;}catch(Throwable e){android.util.Log.e("WindowDeck","leash_atomic_hook_failed",e);}
+  try{ime=CanvasImeBridge.install();}catch(Throwable e){android.util.Log.e("WindowDeck","canvas_ime_bridge_install_failed",e);}
+  try{hookBackKeyPassthrough(p.classLoader);back=true;}catch(Throwable e){android.util.Log.e("WindowDeck","back_key_passthrough_failed",e);XposedBridge.log(e);}
+  android.util.Log.i("WindowDeck","hook_ready version="+Version.NAME+" activity="+activity+" leash="+leash+" ime="+ime+" back="+back+" process="+p.processName);
+ }
+ private static void hookWorkbenchActivity(){
   XposedHelpers.findAndHookMethod(Instrumentation.class,"newActivity",ClassLoader.class,String.class,Intent.class,new XC_MethodHook(){
    protected void beforeHookedMethod(MethodHookParam param) {
     Intent intent=(Intent)param.args[2];
@@ -23,9 +34,6 @@ public final class HookEntry implements IXposedHookLoadPackage {
     android.util.Log.i("WindowDeck","custom_activity_created");
    }
   });
-  try{LeashTransactions.install();}catch(Throwable e){android.util.Log.e("WindowDeck","leash_atomic_hook_failed",e);}
-  try{hookBackKeyPassthrough(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","back_key_passthrough_failed",e);XposedBridge.log(e);}
-  android.util.Log.i("WindowDeck","hook_ready version="+VERSION+" process="+p.processName);
  }
  // Side cards keep mInterceptInputEvent so the container owns their touches.
  // ColorOS copies that field onto the task and then drops KEYCODE_BACK.

@@ -13,7 +13,9 @@ final class TaskFrontBinder {
  private TaskFrontBinder(){}
  /** @throws Exception if the service, the method or the permission check is unavailable. */
  static void moveToFront(int taskId) throws Exception {
-  moveToFront(taskId,"android",null,android.app.ActivityOptions.makeBasic().toBundle());
+  android.app.ActivityOptions options=android.app.ActivityOptions.makeBasic();
+  rotationHint(options);
+  moveToFront(taskId,"android",null,options.toBundle());
  }
  static void moveToFront(android.content.Context context,int taskId) throws Exception {
   Object thread=Class.forName("android.app.ActivityThread").getMethod("currentActivityThread").invoke(null);
@@ -23,10 +25,18 @@ final class TaskFrontBinder {
  }
  static android.os.Bundle handoffOptions(android.content.Context context) throws Exception {
   android.app.ActivityOptions options=android.app.ActivityOptions.makeCustomAnimation(context,0,0);
+  // C17 ActivityRecord consumes this launch hint before the host's onCreate.
+  // Setting only Window.LayoutParams is too late for the initial rotation transition.
+  rotationHint(options);
   // The independent handoff cover already supplies a preview. A starting-window
   // snapshot of the container contains the OLD main and fades over the new layout.
   android.app.ActivityOptions.class.getMethod("setDisableStartingWindow",boolean.class).invoke(options,true);
+  android.util.Log.i("WindowDeck","handoff_options version="+Version.NAME+" rotation_animation=3 starting_window=false caller="+context.getPackageName());
   return options.toBundle();
+ }
+ private static void rotationHint(android.app.ActivityOptions options) throws Exception {
+  android.app.ActivityOptions.class.getMethod("setRotationAnimationHint",int.class).invoke(options,
+   android.view.WindowManager.LayoutParams.ROTATION_ANIMATION_SEAMLESS);
  }
  private static void moveToFront(int taskId,String packageName,Object caller,android.os.Bundle options) throws Exception {
   if(taskId<0)throw new IllegalArgumentException("invalid taskId");

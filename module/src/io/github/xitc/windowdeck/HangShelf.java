@@ -57,8 +57,8 @@ final class HangShelf {
    views.add(view);params.add(lp);starts.add(new Rect(card.start));ends.add(targets[i]);
   }
   anim=ValueAnimator.ofFloat(0f,1f);
-  anim.setDuration(600);
-  anim.setInterpolator(HangShelf::settle);
+  anim.setDuration(MotionSpec.SHELF_MS);
+  anim.setInterpolator(MotionSpec::geometry);
   anim.addUpdateListener(a->{
    if(anim!=a)return;
    float f=(Float)a.getAnimatedValue();
@@ -78,10 +78,19 @@ final class HangShelf {
   if(windowManager!=null)for(ImageView view:views)try{windowManager.removeViewImmediate(view);}catch(Throwable ignored){}
   views.clear();params.clear();starts.clear();ends.clear();
  }
+ /** @deprecated superseded by {@link MotionSpec#geometry(float)} — the COUI spring C17 itself
+  *  uses. The old closed form lives on in {@link SpringCurve#legacyEntrance(float)} for reference;
+  *  it overshot by 4.55 % (peak 1.0455 at f=0.484) and spent the last half of the run crawling
+  *  above 0.9, which read as "顿一下 + 卡着不动" (see {@code docs/启动动画对比与改进.md} §1.2). */
+ @Deprecated
  static float settle(float t){
-  if(t<=0f)return 0f;
-  if(t>=1f)return 1f;
-  return 1f-(float)(Math.exp(-5.5*t)*Math.cos(t*Math.PI*1.5));
+  return MotionSpec.geometry(t);
+ }
+
+ /** The retired entrance curve, preserved so the defect it caused stays reproducible. */
+ @Deprecated
+ static float legacySettle(float t){
+  return SpringCurve.legacyEntrance(t);
  }
  static Rect[] ends(List<Card> cards,Rect screen,boolean topBottom,boolean portrait,int small,int large){
   Rect[] out=new Rect[cards.size()];

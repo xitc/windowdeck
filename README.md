@@ -10,7 +10,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.4.8-beta.28`。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `windowdeck-v0.5.0-dev.142`。横屏首次入场动画仍在验证中，尚未完成视觉验收。
 
 ## 环境与验收范围
 

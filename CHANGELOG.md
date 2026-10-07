@@ -1,5 +1,12 @@
 # 更新记录
 
+## v0.5.0-dev.142
+
+- 同步本地开发树的入场动画、任务 Surface 就绪判定、手势交接、横屏旋转与遮罩生命周期改动，以及对应 Java 回归测试。
+- 构建时从 Manifest 生成版本常量，避免 Hook 日志与源码版本不一致。
+- 发布继续使用 `io.github.xitc.windowdeck` 包名，保留现有每日 Nightly 与 LSPosed 镜像流程。
+- dev.142 的首次横屏入场、触控和挂起后添加仍待真机视觉验收；本次同步不代表这些行为已通过。
+
 ## v0.4.8-beta.28
 
 - 包名、源码命名空间、Xposed 入口、Provider authority 和内部通信改为 `io.github.xitc.windowdeck`，符合 LSPosed 模块仓库的 GitHub 用户命名规则。

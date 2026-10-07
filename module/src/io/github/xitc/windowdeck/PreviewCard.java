@@ -58,9 +58,9 @@ final class PreviewCard extends FrameLayout {
  private void recycleVelocity(){if(velocity!=null){velocity.recycle();velocity=null;}}
  private void settle(boolean commit){
   float start=vertical?getTranslationY():getTranslationX(),end=commit?-extent():0,alpha=getAlpha();
-  settle=ValueAnimator.ofFloat(0,1);settle.setDuration(commit?140:240);ValueAnimator current=settle;
+  settle=ValueAnimator.ofFloat(0,1);settle.setDuration(commit?MotionSpec.DRAG_DISMISS_MS:MotionSpec.DRAG_SETTLE_MS);ValueAnimator current=settle;
   current.setInterpolator(input->input);
-  current.addUpdateListener(a->{float f=GesturePolicy.spring((Float)a.getAnimatedValue());float value=start+(end-start)*f;if(vertical)setTranslationY(value);else setTranslationX(value);setAlpha(alpha+((commit?0:1)-alpha)*f);});
+  current.addUpdateListener(a->{float f=MotionSpec.geometry((Float)a.getAnimatedValue());float value=start+(end-start)*f;if(vertical)setTranslationY(value);else setTranslationX(value);setAlpha(alpha+((commit?0:1)-alpha)*f);});
   current.addListener(new android.animation.AnimatorListenerAdapter(){@Override public void onAnimationEnd(android.animation.Animator a){if(settle!=a)return;settle=null;dragging=false;if(commit)dismiss.run();else{setTranslationX(0);setTranslationY(0);setAlpha(1);cancelDrag.run();}}});current.start();
  }
  void resetGesture(){

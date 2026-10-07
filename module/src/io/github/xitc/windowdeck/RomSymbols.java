@@ -70,10 +70,60 @@ final class RomSymbols {
     /** {@code onLayout} — a View override, so the name survived. */
     static final String PANEL_ON_LAYOUT = "onLayout";
 
+    /**
+     * {@code boolean} — flipped by {@code notifyWindowAnimationStateChange(boolean)} the moment the
+     * swipe is committed and the window starts animating open. (C93: {@code isWindowAnimationStarted})
+     */
+    static final String PANEL_WINDOW_ANIM_STARTED = "t";
+
+    /**
+     * {@code int} — the axis code the panel is currently on: high nibble is the zone, low nibble the
+     * column. Written by {@code i(float)} from {@code TriggerPanelParams.a(progress, offset, ...)},
+     * and the same value {@code MultiTriggerAnimController.e(int)} compares each option against to
+     * decide which one stays lit. (C93: {@code mCurrentSelectedAxisCode})
+     */
+    static final String PANEL_AXIS_CODE = "F";
+
     // ------------------------------------------------------------------ MultiTriggerAnimController
 
     /** {@code TriggerPanelParams} — read as a field on C17; C93 used {@code getMTriggerParams()}. */
     static final String CONTROLLER_PARAMS = "c";
+
+    /**
+     * {@code int} — the axis code the controller last lit.
+     * {@code MultiTriggerPanelView.k()} only calls {@link #CONTROLLER_RETIRE} when this differs
+     * from the panel's current code, so a claim that retires the capsules has to write it back:
+     * leaving it at the column the finger came from would make the launcher skip the restore on
+     * the way out and leave both capsules off screen.
+     * (C93: {@code mCurSelectAxisCode})
+     */
+    static final String CONTROLLER_AXIS_CODE = "g";
+
+    /**
+     * {@code void (int)} — lights the option whose axis code is the argument and retires every
+     * other registered one: alpha to 0, scale to 0.5, translated to the option's zoom-out
+     * rectangle, background paint included.
+     *
+     * <p>Found by shape. It is the only {@code void x(int)} the controller declares, so
+     * {@link #retireMethod} can identify it without trusting the letter R8 gave it.
+     * (C93: {@code createSelectSwitchedAnimator})
+     */
+    static final String CONTROLLER_RETIRE = "e";
+
+    /**
+     * {@code void ()} — cancels the controller's five springs.
+     *
+     * <p>Not optional. The retire writes into the show list and the hide list both, so skipping
+     * the cancel would leave two springs running at once, each writing the same view property on
+     * the same frame.
+     *
+     * <p>This is the one symbol here that has to be taken by name: the controller declares two
+     * no-argument {@code void} methods and nothing in their signatures tells them apart. Evidence
+     * that the letter is {@code d} is the shipped dex -- {@code MultiTriggerAnimController.d()}
+     * reads as five {@code SpringAnimation.cancel()} calls in a row.
+     * (C93: {@code cancelAnimators})
+     */
+    static final String CONTROLLER_CANCEL = "d";
 
     // ------------------------------------------------------------------ params: TriggerPanelParams / panelparams.b
 
@@ -101,10 +151,18 @@ final class RomSymbols {
      * {@code float} — progress at which the panel starts becoming visible, the lower end of the
      * reveal. (C93: {@code getMStartShowP})
      *
-     * {@code MultiTriggerPanelView.i(float)} scrubs the panel's alpha and the option contents with
-     * {@code Utilities.getProgress(progress, mStartShowP, mStartTriggerP)}, and the contents only
-     * scale in over the last 10% of that span ({@code mapRange(f, 0.9f, 1.0f)}). The hook needs the
-     * same two bounds so its card appears the way the launcher's own two options do.
+     * {@code MultiTriggerPanelView.i(float)} folds this pair into one 0..1 value with
+     * {@code Utilities.getProgress(progress, mStartShowP, mStartTriggerP)} and feeds it to
+     * {@code showPanelAnimator.setCurrentFraction}. That animator's only output on the panel is
+     * {@code View.ALPHA}, so an option appears by inheriting the panel's fade, and the hook needs
+     * the same two bounds to appear alongside it.
+     *
+     * <p>The same animator also writes {@code mapRange(fraction, 0.9f, 1.0f)} to each option's
+     * scaleX/scaleY, which reads like a content pop-in over the last tenth of the span. It is not
+     * one — the scale range behind that write is (1.0, 1.0) and {@code resetViewScale()} has already
+     * put the view at 1.0, so the value never leaves 1.0. {@link SwipePanelPolicy} carries the full
+     * note; an earlier revision of this module acted on the other reading and made the card's text
+     * arrive after the box it sits in.
      */
     static final String PARAMS_START_SHOW = "h";
 
@@ -131,6 +189,15 @@ final class RomSymbols {
 
     /** {@code void (boolean,boolean,Resources,int,int)} — recomputes the capsule rectangles. (C93: {@code updateBgRect}) */
     static final String PARAMS_UPDATE_BG_RECT = "k";
+
+    /**
+     * {@code SelectionOptions (int)} — which option an axis code stands for, {@code NONE} for a
+     * column no option occupies. Declared abstract on {@code TriggerPanelParams} and implemented by
+     * each panel variant, so it keeps its name; the two-capsule variant answers {@code NONE} for the
+     * centre column, the three-option one answers {@code CAPSULE}.
+     * (C93: {@code getSelectionOptions})
+     */
+    static final String PARAMS_SELECTION_OF = "d";
 
     // ------------------------------------------------------------------ TriggerPanelParams$b (bg rect info)
 
@@ -174,6 +241,24 @@ final class RomSymbols {
     static final String TASK_ANIM_CONTROLLER = "I";
     /** s9.m(false, callback, false, null, true): callback after the finish request completes. */
     static final String RECENTS_FINISH_CALLBACK = "m";
+    /** s9.v(boolean): {@code setWillFinishToHome}. Queued on the same executor as finish. */
+    static final String RECENTS_WILL_FINISH_TO_HOME = "v";
+    /** Read-only release geometry: va.o -> ma$a.b() -> s1.y(), transformed by la.y.r. */
+    static final String SOURCE_HANDLES = "o";
+    static final String SOURCE_SIMULATOR = "b";
+    static final String SOURCE_CROP = "y";
+    static final String SOURCE_RADIUS = "x";
+    static final String SOURCE_MATRIX = "r";
+    /** Release-time task pixels: ma$a.c() -> v1.e() -> gi.f.c, selected by gi.c.a. */
+    static final String SOURCE_PARAMS = "c";
+    static final String SOURCE_TARGETS = "e";
+    static final String SOURCE_APPS = "c";
+    static final String SOURCE_TASK = "a";
+    static final String SOURCE_LEASH = "d";
+    static final String SOURCE_BOUNDS = "i";
+    static final String LAUNCHER_CLASS = "com.android.launcher3.Launcher";
+    static final String LAUNCHER_TRACKER = "ACTIVITY_TRACKER";
+    static final String TRACKER_ACTIVITY = "getCreatedActivity";
 
     /** {@code int} — running task id, {@code -1} when there is none. (C93: {@code GestureState.getRunningTaskId}) */
     static final String GESTURE_RUNNING_TASK_ID = "n";
@@ -186,6 +271,9 @@ final class RomSymbols {
      * argument shifted by one, and the two booleans have to be recovered from the mask.
      */
     static final int BRIDGE_ARG_COUNT = 8;
+
+    /** Concrete handler end-target animator; F0 and the bridge still perform gesture cleanup. */
+    static final String HANDLER_END_TARGET = "Z";
 
     /** Index of {@code upPos} inside the bridge argument list (C93 instance method used index 3). */
     static final int BRIDGE_ARG_UP_POS = 4;
@@ -250,22 +338,37 @@ final class RomSymbols {
     /**
      * Locates the {@code onGestureEnded} bridge by shape rather than by name.
      *
-     * @return the static bridge method, or {@code null} when this is not a C17-style handler.
+     * <p>Every {@code PointF} and both booleans have to match. Zero hits and more than one hit
+     * both return {@code null}: the first method of the right width is not a safe guess.
      */
     static Method findGestureEndedBridge(Class<?> handler) {
-        for (Method method : handler.getDeclaredMethods()) {
-            if (!Modifier.isStatic(method.getModifiers())) continue;
-            if (method.getReturnType() != void.class) continue;
-            Class<?>[] types = method.getParameterTypes();
-            if (types.length != BRIDGE_ARG_COUNT) continue;
-            if (!types[0].isAssignableFrom(handler)) continue;
-            if (types[1] != float.class) continue;
-            if (types[BRIDGE_ARG_UP_POS] != PointF.class) continue;
-            if (types[BRIDGE_ARG_BOOLEAN] != boolean.class) continue;
-            if (types[BRIDGE_ARG_COUNT - 1] != int.class) continue;
-            return method;
+        Method[] methods = handler.getDeclaredMethods();
+        boolean[] matches = new boolean[methods.length];
+        for (int i = 0; i < methods.length; i++) {
+            Method method = methods[i];
+            matches[i] = Modifier.isStatic(method.getModifiers())
+                    && method.getReturnType() == void.class
+                    && SymbolShape.gestureBridge(method.getParameterTypes(), handler, PointF.class);
         }
-        return null;
+        int index = SymbolShape.only(matches);
+        return index < 0 ? null : methods[index];
+    }
+
+    /**
+     * The init-animation method kept a {@code Function4} parameter after its name was removed.
+     *
+     * @return that method only when the class declares exactly one, otherwise {@code null}.
+     */
+    static Method findInitAnimation(Class<?> panel) {
+        Method[] methods = panel.getDeclaredMethods();
+        boolean[] matches = new boolean[methods.length];
+        for (int i = 0; i < methods.length; i++) {
+            Class<?>[] types = methods[i].getParameterTypes();
+            String name = types.length == 0 ? "" : types[0].getName();
+            matches[i] = SymbolShape.initAnimation(types.length, name);
+        }
+        int index = SymbolShape.only(matches);
+        return index < 0 ? null : methods[index];
     }
 
     /** Finds the params class the controller actually uses, via the declared field type. */
@@ -276,6 +379,62 @@ final class RomSymbols {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /**
+     * The controller's retire method, taken by shape first.
+     *
+     * A single {@code void x(int)} is the whole signature of
+     * {@link #CONTROLLER_RETIRE}, so the letter R8 gave it never has to be trusted. The name is
+     * only consulted when a build declares more than one, and {@code null} means the claim is
+     * skipped rather than that a wrong method gets called.
+     */
+    static Method retireMethod(Class<?> controller) {
+        Method only = null;
+        int count = 0;
+        for (Method m : controller.getDeclaredMethods()) {
+            if (m.getReturnType() != void.class) continue;
+            if (m.getParameterCount() != 1) continue;
+            if (m.getParameterTypes()[0] != int.class) continue;
+            only = m;
+            count++;
+        }
+        if (count == 1) return only;
+        try {
+            return method(controller, CONTROLLER_RETIRE, int.class);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** The controller's spring cancel, by name -- see {@link #CONTROLLER_CANCEL} for why. */
+    static Method cancelMethod(Class<?> controller) {
+        try {
+            return method(controller, CONTROLLER_CANCEL);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Proves the controller still carries what the centre claim needs.
+     *
+     * Deliberately outside {@link #validate}. The claim is the one ROM touchpoint the hook can do
+     * without: when it is unavailable the card simply does not push the capsules out of its
+     * column, which is how the hook behaved before the claim existed. Making it fatal would take
+     * the whole swipe hook down over a cosmetic gap.
+     *
+     * @return {@code null} when the claim can run, otherwise a short description for the log.
+     */
+    static String claimProblem(Class<?> controller) {
+        try {
+            field(controller, CONTROLLER_AXIS_CODE);
+        } catch (Throwable t) {
+            return "controller 轴码字段 " + CONTROLLER_AXIS_CODE + " 不存在";
+        }
+        if (retireMethod(controller) == null) return "controller 找不到 void(int) 退场方法";
+        if (cancelMethod(controller) == null) return "controller 找不到 void() 弹簧取消方法";
+        return null;
     }
 
     /** Walks the hierarchy for a field, the way XposedHelpers does. */
@@ -323,14 +482,23 @@ final class RomSymbols {
             field(panel, PANEL_HANDLER_REF);
             field(panel, PANEL_CONTROLLER);
             field(panel, PANEL_ENTRANCES);
+            field(panel, PANEL_WINDOW_ANIM_STARTED);
+            field(panel, PANEL_AXIS_CODE);
             method(panel, PANEL_UPDATE_PROGRESS, float.class);
             method(panel, PANEL_UPDATE_OFFSET, int.class);
             method(panel, PANEL_ON_LAYOUT, boolean.class, int.class, int.class, int.class, int.class);
-            if (findGestureEndedBridge(handler) == null) return "找不到 onGestureEnded static bridge";
+            if (findInitAnimation(panel) == null) return "initAnimation 不是恰好一个 Function4";
+            if (findGestureEndedBridge(handler) == null) return "onGestureEnded static bridge 不是恰好一个";
 
             field(handler, HANDLER_TRIGGER_PANEL);
             field(handler, HANDLER_GESTURE_STATE);
             field(handler, HANDLER_TASK_ANIM);
+            Class<?> gesture = field(handler, HANDLER_GESTURE_STATE).getType();
+            method(gesture, GESTURE_RUNNING_TASK_ID);
+            Class<?> anim = field(handler, HANDLER_TASK_ANIM).getType();
+            method(anim, TASK_ANIM_FINISH_RECENTS, boolean.class);
+            method(anim, TASK_ANIM_CONTROLLER);
+            method(method(anim, TASK_ANIM_CONTROLLER).getReturnType(), RECENTS_WILL_FINISH_TO_HOME, boolean.class);
 
             Class<?> params = paramsClass(panel);
             if (params == null) return "无法从 controller 解析 params 类";

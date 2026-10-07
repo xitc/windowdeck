@@ -6,9 +6,16 @@ final class GesturePolicy {
   return distance>=Math.max(32*density,extent*.35f)
       ||(distance>=24*density&&velocity>=900*density);
  }
- // Normalized critically damped spring: no overshoot beyond the safe viewport.
+ // Normalized COUI spring. The retired curve was a self-made critically damped spring with
+ // ωn=8, unrelated to any vivo/ROM parameter; it is kept as legacySpring() for reference.
+ /** @deprecated superseded by {@link MotionSpec#geometry(float)} / {@link SpringCurve}. */
+ @Deprecated
  static float spring(float t){
-  if(t<=0)return 0;if(t>=1)return 1;
-  return (float)((1-(1+8*t)*Math.exp(-8*t))/(1-9*Math.exp(-8)));
+  return MotionSpec.geometry(t);
+ }
+ /** The retired ωn=8 critically damped spring, preserved for reference only. */
+ @Deprecated
+ static float legacySpring(float t){
+  return SpringCurve.legacySwitch(t);
  }
 }

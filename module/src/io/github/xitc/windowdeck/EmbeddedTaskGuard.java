@@ -2,9 +2,11 @@ package io.github.xitc.windowdeck;
 
 import android.app.ActivityManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.SurfaceControl;
 import de.robv.android.xposed.*;
-import java.util.WeakHashMap;
+import java.util.HashMap;
 
 /** Observe ownership before the ROM reuses a leash for an external fullscreen task. */
 final class EmbeddedTaskGuard {
@@ -13,7 +15,9 @@ final class EmbeddedTaskGuard {
   final int container;final Owner owner;
   Entry(int container,Owner owner){this.container=container;this.owner=owner;}
  }
- private static final WeakHashMap<Object,Entry> entries=new WeakHashMap<>();
+ // Strong map: the owner lambda holds the view, so a weak key would never clear on its own.
+ private static final HashMap<Object,Entry> entries=new HashMap<>();
+ private static Handler main;
  private static boolean installed;
  static synchronized void watch(Object view,int container,Owner owner){
   if(!installed){
@@ -31,11 +35,23 @@ final class EmbeddedTaskGuard {
  }
  static synchronized void forget(Object view){entries.remove(view);}
  private static void update(Object view,ActivityManager.RunningTaskInfo task,boolean vanished){
-  Entry entry;synchronized(EmbeddedTaskGuard.class){entry=entries.get(view);}if(entry==null)return;
+  Entry entry;synchronized(EmbeddedTaskGuard.class){entry=entries.get(view);}if(entry==null||task==null)return;
+  boolean embedded;
   try{
    Bundle extra=(Bundle)XposedHelpers.getObjectField(task,"mOplusExtraBundle");
-   boolean embedded=!vanished&&extra!=null&&extra.getInt("androidx.activity.LaunchScenario",-1)==2&&extra.getInt("androidx.activity.LaunchContainerTaskId",-1)==entry.container;
-   entry.owner.changed(embedded);
-  }catch(Throwable e){XposedBridge.log(e);entry.owner.changed(false);}
+   embedded=!vanished&&extra!=null&&extra.getInt("androidx.activity.LaunchScenario",-1)==2&&extra.getInt("androidx.activity.LaunchContainerTaskId",-1)==entry.container;
+  }catch(Throwable e){XposedBridge.log(e);embedded=false;}
+  post(view,entry,embedded);
+ }
+ private static void post(final Object view,final Entry entry,final boolean embedded){
+  Handler handler;
+  synchronized(EmbeddedTaskGuard.class){
+   if(main==null)main=new Handler(Looper.getMainLooper());
+   handler=main;
+  }
+  handler.post(new Runnable(){public void run(){
+   synchronized(EmbeddedTaskGuard.class){if(entries.get(view)!=entry)return;}
+   try{entry.owner.changed(embedded);}catch(Throwable e){XposedBridge.log(e);}
+  }});
  }
 }

@@ -3,6 +3,12 @@ package io.github.xitc.windowdeck;
 /** Pure helpers for workbench wallpaper orientation. Display rotation matches Surface.ROTATION_*. */
 final class BackdropPolicy {
  static final int DIM=0x1e000000;
+ static int[] centerCrop(int width,int height,int displayW,int displayH){
+  float scale=Math.max(displayW/(float)width,displayH/(float)height);
+  int w=Math.min(width,Math.max(1,Math.round(displayW/scale))),h=Math.min(height,Math.max(1,Math.round(displayH/scale)));
+  int left=(width-w)/2,top=(height-h)/2;
+  return new int[]{left,top,left+w,top+h};
+ }
  static int rotationDegrees(int displayRotation){
   if(displayRotation==1)return -90;
   if(displayRotation==2)return 180;

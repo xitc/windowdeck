@@ -27,7 +27,13 @@ final class LiveWorkbenchState {
   latest=new Bundle(state);
   Log.i("WindowDeck","live_state_received container="+container+" count="+count);
  }
+ /** Container and count already pushed by the host, or null when no broadcast has arrived. */
+ static int[] published(){
+  Bundle state=latest;if(state==null)return null;
+  return new int[]{state.getInt("containerTaskId",-1),state.getInt("count",0)};
+ }
  static void register(Context context){
+  if(context!=null)CandidateProbe.warm(context);
   if(registered)return;
   Context app=context.getApplicationContext();if(app==null)app=context;
   Handler main=new Handler(Looper.getMainLooper());

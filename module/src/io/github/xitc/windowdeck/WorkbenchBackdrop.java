@@ -27,7 +27,6 @@ final class WorkbenchBackdrop {
  private final Handler main=new Handler(Looper.getMainLooper());
  private final Runnable refreshRunnable=()->refresh("scheduled");
  private Activity activity;
- private Object manager;
  private HandlerThread thread;
  private Handler bg;
  private BroadcastReceiver receiver;
@@ -35,16 +34,30 @@ final class WorkbenchBackdrop {
  private WallpaperManager.OnColorsChangedListener colorsListener;
  private Bitmap owned,nativeBitmap;
  private android.view.SurfaceControl underlay;
- private int generation,appliedRotation=-1,appliedW,appliedH;
+ private final BackdropRequests requests=new BackdropRequests();
+ private int visualGeneration,appliedRotation=-1,appliedW,appliedH;
  private boolean attached;
+ private boolean placeholder;
  boolean ready;
  Runnable onReady;
  private void signalReady(){ready=true;if(onReady!=null)onReady.run();}
 
- void attach(Activity a,Object flexibleManager){
-  activity=a;manager=flexibleManager;
+ /** True once the window has something to draw, wallpaper or not.
+  *
+  *  <p>The underlay is fetched on a {@link HandlerThread}, and gating the first entrance frame on
+  *  it held the whole entrance behind that async task — which is exactly the gap the entrance
+  *  cover exists to hide (TODO A1-4). {@code onCreate} already puts {@link Ui#CHROME} on the
+  *  window, so a frame taken now is never black; the wallpaper replaces it when it lands. */
+ boolean firstFrameUsable(){return ready||placeholder;}
+
+ /** The wallpaper bitmap currently on screen, or null while the underlay is still loading. */
+ Bitmap currentBitmap(){return owned;}
+ int visualGeneration(){return visualGeneration;}
+
+ void attach(Activity a){
+  activity=a;
   if(thread==null){thread=new HandlerThread("WindowDeckBackdrop");thread.start();bg=new Handler(thread.getLooper());}
-  attached=true;
+  attached=true;placeholder=true;
   refresh("attach");
   register();
  }
@@ -58,7 +71,7 @@ final class WorkbenchBackdrop {
  private final Runnable restoreUnderlay=()->{
   if(!attached||activity==null||activity.isFinishing())return;
   if(!usable(owned)){refresh("resume");return;}
-  int[] size=displaySize();applyUnderlay(activity,owned,size[0],size[1]);
+  int[] size=displaySize();if(!applyUnderlay(activity,owned,size[0],size[1]))main.postDelayed(this::restoreSurface,MotionSpec.SURFACE_RETRY_MS);
  };
  void restoreSurface(){
   if(!attached||activity==null)return;
@@ -70,11 +83,11 @@ final class WorkbenchBackdrop {
   });
  }
  void detach(){
-  attached=false;ready=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
+  attached=false;requests.invalidate();ready=false;placeholder=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
   if(thread!=null){thread.quitSafely();thread=null;bg=null;}
   if(underlay!=null){try(android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){t.reparent(underlay,null).apply();}underlay.release();underlay=null;}
   recycle(nativeBitmap);nativeBitmap=null;
-  owned=null;activity=null;manager=null;
+  owned=null;activity=null;
  }
  private void register(){
   if(activity==null||receiver!=null)return;
@@ -99,38 +112,38 @@ final class WorkbenchBackdrop {
  }
  private void refresh(String reason){
   if(!attached||activity==null||bg==null)return;
-  final int gen=++generation;
   final int rotation=displayRotation();
   final int[] size=displaySize();
+  final int gen=requests.begin(rotation,size[0],size[1],"scheduled".equals(reason));
+  if(gen<0){Log.i(TAG,"backdrop_coalesced reason="+reason);return;}
+  final long began=android.os.SystemClock.uptimeMillis();
   Log.i(TAG,"backdrop_refresh reason="+reason+" rotation="+rotation+" size="+size[0]+"x"+size[1]);
-  final Object flexible=manager;
   final Activity host=activity;
   bg.post(()->{
-   Prepared prepared=load(host,flexible,rotation,size[0],size[1]);
-   main.post(()->apply(gen,host,prepared,rotation,size[0],size[1]));
+   if(!requests.current(gen))return;
+   Prepared prepared=load(host,rotation,size[0],size[1]);
+   main.post(()->{Log.i(TAG,"backdrop_load_finished token="+gen+" ms="+(android.os.SystemClock.uptimeMillis()-began));apply(gen,host,prepared,rotation,size[0],size[1]);});
   });
  }
- private Prepared load(Activity host,Object flexible,int rotation,int displayW,int displayH){
+ private Prepared load(Activity host,int rotation,int displayW,int displayH){
   try{
-   Bitmap src=fetchFlexible(flexible);
-   boolean preoriented=true,blurred=true;String source="flexible";
-   if(!usable(src)){src=fetchOplus(host);preoriented=false;source="oplus";}
-   if(!usable(src)){src=fetchDrawable(host);preoriented=false;blurred=false;source="drawable";}
+   Bitmap src=fetchDrawable(host);
    if(!usable(src))return Prepared.fallback("empty");
-   Bitmap prepared=prepare(src,preoriented,blurred,rotation,displayW,displayH);
+   Bitmap prepared=prepare(src,rotation,displayW,displayH);
    if(!usable(prepared))return Prepared.fallback("prepare");
-   return new Prepared(prepared,source,lightWallpaper(prepared));
+   return new Prepared(prepared,"wallpaper",lightWallpaper(host));
   }catch(Throwable e){
    Log.w(TAG,"backdrop_load_failed",e);
    return Prepared.fallback(e.getClass().getSimpleName());
   }
  }
  private void apply(int gen,Activity host,Prepared prepared,int rotation,int displayW,int displayH){
-  if(gen!=generation||!attached||host!=activity||host.isFinishing()||host.isDestroyed()){
+  if(!attached||host!=activity||host.isFinishing()||host.isDestroyed()||!requests.complete(gen)){
    recycle(prepared==null?null:prepared.bitmap);
    return;
   }
   Window window=host.getWindow();
+  visualGeneration++;
   if(prepared==null||prepared.bitmap==null){
    window.setBackgroundDrawable(new ColorDrawable(Ui.CHROME));
    Ui.overlaySystemBars(host,false);
@@ -146,37 +159,28 @@ final class WorkbenchBackdrop {
   window.setBackgroundDrawable(drawable);
   Ui.overlaySystemBars(host,prepared.light);
   Bitmap previous=owned;owned=prepared.bitmap;
-  applyUnderlay(host,owned,displayW,displayH);
+  ready=false;
+  if(!applyUnderlay(host,owned,displayW,displayH))restoreSurface();
   appliedRotation=rotation;appliedW=displayW;appliedH=displayH;
   Log.i(TAG,"backdrop_applied source="+prepared.source+" size="+prepared.bitmap.getWidth()+"x"+prepared.bitmap.getHeight()+" lightBars="+prepared.light);
-  signalReady();
   if(previous!=null&&previous!=owned)main.postDelayed(()->{if(previous!=owned)recycle(previous);},1000);
  }
- private void applyUnderlay(Activity host,Bitmap bitmap,int width,int height){
+ private boolean applyUnderlay(Activity host,Bitmap bitmap,int width,int height){
   try{
    java.lang.reflect.Method rootMethod=android.view.View.class.getDeclaredMethod("getViewRootImpl");rootMethod.setAccessible(true);
    Object root=rootMethod.invoke(host.getWindow().getDecorView());
+   if(root==null)return false;
    android.view.SurfaceControl parent=(android.view.SurfaceControl)root.getClass().getMethod("getSurfaceControl").invoke(root);
+   if(parent==null||!parent.isValid())return false;
    if(underlay==null||!underlay.isValid())underlay=new android.view.SurfaceControl.Builder().setName("WindowDeckWallpaperUnderlay").setParent(parent).setBufferSize(bitmap.getWidth(),bitmap.getHeight()).build();
    Bitmap next=bitmap.copy(Bitmap.Config.HARDWARE,false);
    try(android.hardware.HardwareBuffer buffer=next.getHardwareBuffer();android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){
-    t.reparent(underlay,parent).setBuffer(underlay,buffer).setLayer(underlay,-10000).setScale(underlay,width/(float)bitmap.getWidth(),height/(float)bitmap.getHeight()).setPosition(underlay,0,0).setVisibility(underlay,true).apply();
+    t.reparent(underlay,parent).setBuffer(underlay,buffer).setLayer(underlay,-10000).setScale(underlay,width/(float)bitmap.getWidth(),height/(float)bitmap.getHeight()).setPosition(underlay,0,0).setVisibility(underlay,true);
+    t.addTransactionCommittedListener(main::post,()->{if(attached&&activity==host&&owned==bitmap){signalReady();Log.i(TAG,"wallpaper_underlay_ready committed=true");}});t.apply();
    }
    Bitmap previous=nativeBitmap;nativeBitmap=next;if(previous!=null)main.postDelayed(()->recycle(previous),1000);
-   Log.i(TAG,"wallpaper_underlay_ready");
-  }catch(Throwable e){Log.w(TAG,"wallpaper_underlay_failed",e);}
- }
- private static Bitmap fetchFlexible(Object flexible){
-  if(flexible==null)return null;
-  try{return (Bitmap)flexible.getClass().getMethod("getCurrentBlurWallpaper").invoke(flexible);}
-  catch(Throwable e){Log.w(TAG,"backdrop_flexible_failed",e);return null;}
- }
- private static Bitmap fetchOplus(Activity host){
-  try{
-   Class<?> cls=Class.forName("android.app.OplusWallpaperManager");
-   Object inst=cls.getDeclaredConstructor().newInstance();
-   return (Bitmap)cls.getMethod("getBlurWallpaperBitmap",Context.class,int.class).invoke(inst,host,25);
-  }catch(Throwable e){Log.w(TAG,"backdrop_oplus_failed",e);return null;}
+   return true;
+  }catch(Throwable e){Log.w(TAG,"wallpaper_underlay_failed",e);return false;}
  }
  private static Bitmap fetchDrawable(Activity host){
   try{
@@ -191,17 +195,18 @@ final class WorkbenchBackdrop {
    return bitmap;
   }catch(Throwable e){Log.w(TAG,"backdrop_drawable_failed",e);return null;}
  }
- private static Bitmap prepare(Bitmap src,boolean preoriented,boolean blurred,int rotation,int displayW,int displayH){
+ private static Bitmap prepare(Bitmap src,int rotation,int displayW,int displayH){
   Bitmap working=copySoftware(src);
   if(working==null)return null;
-  if(BackdropPolicy.needsBitmapRotation(preoriented,rotation,working.getWidth(),working.getHeight(),displayW,displayH)){
+  if(BackdropPolicy.needsBitmapRotation(false,rotation,working.getWidth(),working.getHeight(),displayW,displayH)){
    Bitmap rotated=rotate(working,BackdropPolicy.rotationDegrees(rotation));
    if(rotated!=working){recycleOwned(working);working=rotated;}
   }
-  if(!blurred){
-   Bitmap next=downscaleBlur(working);
-   if(next!=working){recycleOwned(working);working=next;}
-  }
+  int width=Math.min(displayW,working.getWidth()),height=Math.max(1,Math.round(width*displayH/(float)displayW));
+  Bitmap fitted=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);
+  int[] crop=BackdropPolicy.centerCrop(working.getWidth(),working.getHeight(),displayW,displayH);
+  new Canvas(fitted).drawBitmap(working,new Rect(crop[0],crop[1],crop[2],crop[3]),new Rect(0,0,width,height),new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG));
+  recycleOwned(working);working=fitted;
   new Canvas(working).drawColor(BackdropPolicy.DIM);
   return working;
  }
@@ -218,26 +223,20 @@ final class WorkbenchBackdrop {
   Matrix matrix=new Matrix();matrix.postRotate(degrees);
   return Bitmap.createBitmap(src,0,0,src.getWidth(),src.getHeight(),matrix,true);
  }
- private static Bitmap downscaleBlur(Bitmap src){
-  if(!usable(src))return src;
-  int w=Math.max(1,src.getWidth()/4),h=Math.max(1,src.getHeight()/4);
-  Bitmap small=Bitmap.createScaledBitmap(src,w,h,true);
-  Bitmap blurred=Bitmap.createScaledBitmap(small,src.getWidth(),src.getHeight(),true);
-  if(small!=src&&small!=blurred)recycleOwned(small);
-  return blurred;
- }
- private static boolean lightWallpaper(Bitmap bitmap){
-  try{return BackdropPolicy.lightBars(WallpaperColors.fromBitmap(bitmap).getColorHints());}
+ private static boolean lightWallpaper(Activity host){
+  // WM already computes wallpaper colors. Rebuilding a palette from the entire prepared
+  // bitmap serialized the ready handshake behind unnecessary CPU work on every cold entry.
+  try{WallpaperColors colors=WallpaperManager.getInstance(host).getWallpaperColors(WallpaperManager.FLAG_SYSTEM);return colors!=null&&BackdropPolicy.lightBars(colors.getColorHints());}
   catch(Throwable e){return false;}
  }
  private int displayRotation(){
-  Display display=activity.getDisplay();
-  if(display==null)display=activity.getWindowManager().getDefaultDisplay();
-  return display==null?0:display.getRotation();
+  // This underlay belongs to the fixed portrait workbench, not the fullscreen app
+  // selected on the launcher. Do not start a landscape load during that transition.
+  return 0;
  }
  private int[] displaySize(){
   Rect bounds=activity.getWindowManager().getMaximumWindowMetrics().getBounds();
-  return new int[]{Math.max(1,bounds.width()),Math.max(1,bounds.height())};
+  return new int[]{Math.max(1,Math.min(bounds.width(),bounds.height())),Math.max(1,Math.max(bounds.width(),bounds.height()))};
  }
  private static boolean usable(Bitmap bitmap){return bitmap!=null&&!bitmap.isRecycled()&&bitmap.getWidth()>0&&bitmap.getHeight()>0;}
  private static void recycle(Bitmap bitmap){recycleOwned(bitmap);}
