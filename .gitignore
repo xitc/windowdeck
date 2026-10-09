@@ -10,3 +10,10 @@ __pycache__/
 
 # Local investigation documents must not be published.
 /docs/
+
+# Tests and auxiliary tooling are local-only.
+/tests/
+/tools/*
+!/tools/build_module.sh
+!/tools/prepare_release.py
+!/tools/sync_lsposed.py

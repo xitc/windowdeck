@@ -34,9 +34,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Release workflow tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
-
       - name: Plan release before SDK setup
         id: plan
         env:
@@ -71,10 +68,6 @@ jobs:
             https://raw.githubusercontent.com/rovo89/XposedBridge/gh-pages/de/robv/android/xposed/api/82/api-82.jar
           echo "f48c635f1c7469fdec0e00ad2ea0b7a6b2f5b55065784a35b7ca3a84615e8e25  $RUNNER_TEMP/xposed/api-82.jar" | sha256sum -c
           echo "XPOSED_API=$RUNNER_TEMP/xposed/api-82.jar" >> "$GITHUB_ENV"
-
-      - name: Layout tests
-        if: steps.plan.outputs.publish == 'true'
-        run: sh tools/test_layout.sh
 
       - name: Restore release keystore
         if: steps.plan.outputs.publish == 'true'

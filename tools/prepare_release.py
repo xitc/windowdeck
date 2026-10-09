@@ -12,7 +12,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
-SOURCE_PATHS = ["module", "tests", "tools", ".github", "CHANGELOG.md"]
+SOURCE_PATHS = ["module", "tools", ".github", "CHANGELOG.md"]
 MARKER = re.compile(r"<!-- windowdeck-build: (\{.*?\}) -->")
 
 
@@ -42,8 +42,15 @@ def fingerprint(ref):
 
 
 def release_source(release):
+    # Published tags survive authorized history cleanup; old asset metadata
+    # can still contain the pre-cleanup source SHA. Prefer the current tag.
+    tag = "refs/tags/" + release["tag_name"]
+    resolved = subprocess.run(["git", "rev-parse", "--verify", f"{tag}^{{commit}}"],
+                              text=True, capture_output=True)
+    if resolved.returncode == 0:
+        return resolved.stdout.strip()
     source = metadata(release).get("source_sha")
-    return git("rev-parse", "--verify", f"{source or 'refs/tags/' + release['tag_name']}^{{commit}}")
+    return git("rev-parse", "--verify", f"{source or tag}^{{commit}}")
 
 
 def release_code(release):
@@ -102,7 +109,7 @@ def plan(releases, mode, day, repository, run_url):
     if mode == "nightly" and previous_release:
         old_fingerprint = metadata(previous_release).get("source_fingerprint") or fingerprint(previous)
         if current_fingerprint == old_fingerprint:
-            return {"publish": False, "reason": "与上次发布相比，源码、测试、构建配置及更新记录没有变化。"}
+            return {"publish": False, "reason": "与上次发布相比，源码、构建配置及更新记录没有变化。"}
     base = original.split("-", 1)[0]
     version = f"{base}-nightly.{day}.{source[:12]}" if mode == "nightly" else original
     legacy_tag = f"v{version}"
@@ -155,7 +162,7 @@ def plan(releases, mode, day, repository, run_url):
 
 ### 自动验证
 
-- 发布流程回归与布局回归测试通过。
+- 自动发布不运行本地回归测试；回归测试与辅助脚本仅在维护者本地保留。
 - APK 编译、签名验证与发布证书校验通过。
 - 本次自动构建未执行手机安装、动画、触控或 ROM 兼容性验收。
 

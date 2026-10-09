@@ -55,10 +55,10 @@
 - 无法获取任务快照时使用中性底色，受保护应用与高负载恢复仍需专项测试。
 - 游戏验证主要覆盖启动画面和基础触控，不代表所有游戏实战场景通过。
 - 上下布局的侧窗梯形收幅约 1.3 dp，视觉上不明显。
-- 本版只适配 C17 的桌面混淆符号。OTA 之后混淆名可能再次变化：升级前可以先用 `python3 tools/rom_contract_audit.py --dex <dex 清单>` 审计，任一项对不上模块会整块跳过安装，而不是崩溃。
+- 本版只适配 C17 的桌面混淆符号。OTA 之后混淆名可能再次变化：升级前需核对符号兼容性，任一项对不上模块会整块跳过安装，而不是崩溃。
 - OTA 后私有接口可能变化；其他 ROM 不在当前支持范围内。
 
-## 构建与测试
+## 构建
 
 依赖 JDK（支持 `javac --release 8`）、Android SDK Platform 35、Build Tools 35.0.0、Xposed API 82 JAR，以及 `zip`。本仓库不分发 Android SDK 或 Xposed 依赖 JAR。
 
@@ -67,19 +67,18 @@ export ANDROID_SDK_ROOT=/path/to/android-sdk
 export JAVA_HOME=/path/to/jdk
 export XPOSED_API=/path/to/api-82.jar
 export PATH="$JAVA_HOME/bin:$PATH"
-sh tools/test_layout.sh
 sh tools/build_module.sh
 ```
 
 输出：`build/windowdeck/windowdeck-v0.4.8-beta.28.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
 
-`tools/rom_contract_audit.py` 用于在安装前核对 C17 桌面的混淆符号表。它需要一份 `apkanalyzer dex packages --defined-only` 的输出文件，用 `--dex` 指定或设置 `LAUNCHER_DEX_DUMP`。
+测试、ROM 审计及其它辅助脚本仅在维护者本地保留，不随源码仓库分发。
 
 本地构建使用 `build/windowdeck-test.keystore`。文件不存在时脚本会生成一把新密钥；密钥和构建产物已从 Git 排除。请保留自己的密钥，否则下一版不能覆盖安装。
 
 GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的每日测试版；推送本身不触发发布。GitHub 定时调度可能延迟，并不保证在 04:17 准时完成。工作流必须在默认分支 `main` 上才会按时触发；公开仓库连续 60 天没有活动时，GitHub 可能停用定时工作流，需要重新启用。
 
-- 对比上次成功发布的源码、测试、构建配置和更新记录；内容不变或仅修改 README 时，在安装 SDK 前跳过。检查及构建失败时不推进成功发布基线，下次继续重试。
+- 对比上次成功发布的源码、构建配置和更新记录；内容不变或仅修改 README 时，在安装 SDK 前跳过。检查及构建失败时不推进成功发布基线，下次继续重试。
 - 每日版的 APK 版本例如 `0.4.8-nightly.20261006.abcdef123456`，包含北京时间日期与源码提交；标为 Pre-release，标题为「WindowDeck 2026-10-06 · 每日测试版」，不设为稳定版 Latest。
 - Release 标签采用 LSPosed 要求的 `versionCode-versionName`，例如 `83-0.4.8-beta.28`；历史 `v` 前缀标签保留。
 - `versionCode` 按已有发布与草稿的最大值递增。版本号只改 Actions 工作区中的 manifest，不向仓库提交版本变更；每日版和手动命名的版本共享递增规则，手动 Beta 也能覆盖已安装的每日版。
@@ -91,7 +90,7 @@ GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的�
 
 LSPosed 模块仓库中的 `Sync releases` 工作流每 30 分钟拉取本仓库已公开的新版 Release，将相同 APK、`SHA256SUMS`、`BUILD_INFO.json` 和发布说明同步到 `Xposed-Modules-Repo/io.github.xitc.windowdeck`。使用模块仓库自身的 `GITHUB_TOKEN`，不需要个人 Token。它只同步 `versionCode-versionName` 格式的发布；旧包名的历史 `v` 标签不迁移。同步失败后下一轮补发，草稿可重试，已有公开版本不覆盖。可在模块仓库 Actions 手动运行，指定 `tag` 重试某个版本；留空检查全部缺失版本。定时调度可能延迟。
 
-`.github/RELEASE_CONTEXT.md` 维护 Release 的共同适配要求、安装步骤与已知限制；适配基线变化时应同步更新。每日自动构建只做发布流程回归、布局回归、APK 编译及验签，真机验收需另行记录。发布流程回归可用 `python3 -m unittest discover -s tests -p 'test_release.py' -v` 在本地运行。
+`.github/RELEASE_CONTEXT.md` 维护 Release 的共同适配要求、安装步骤与已知限制；适配基线变化时应同步更新。每日自动构建进行发布规划、APK 编译及验签；回归测试由维护者在本地运行，真机验收需另行记录。
 
 当前工具链存在 min-api 35 的编译器支持警告，构建和签名检查通过，后续仍需统一工具链。
 
@@ -101,7 +100,7 @@ Hook 仅在 `com.oplus.pscanvas` 中对携带本模块标记的容器启动生�
 
 桌面侧的混淆名只允许出现在 `module/src/io/github/xitc/windowdeck/RomSymbols.java` 一处，主逻辑只引用常量。安装前 `RomSymbols.validate()` 会逐项校验，任何一项对不上就整块跳过安装，不在 `handleLoadPackage` 里抛异常。
 
-源码在 `module/`，纯 Java 回归测试在 `tests/`，构建脚本在 `tools/`。仓库不包含本机截图、设备日志、任务快照或签名私钥。
+源码在 `module/`；`tools/` 仅保留构建、发布规划和 LSPosed 同步工具。仓库不包含本机截图、设备日志、任务快照或签名私钥。
 
 ## 反馈
 
