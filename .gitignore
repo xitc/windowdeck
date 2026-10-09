@@ -17,3 +17,6 @@ __pycache__/
 !/tools/build_module.sh
 !/tools/prepare_release.py
 !/tools/sync_lsposed.py
+
+# Internal maintenance instructions are local-only.
+/AGENTS.md
