@@ -1,22 +1,26 @@
-build/
+# 构建产物与本地签名文件
+/build/
 *.keystore
 *.jks
 *.apk
 *.class
+
+# 本地环境与缓存
 .DS_Store
 .env
 .env.*
 __pycache__/
+*.py[cod]
 
-# Local investigation documents must not be published.
+# 本地文档、测试、设备证据与维护规则
 /docs/
-
-# Tests and auxiliary tooling are local-only.
 /tests/
+/evidence/
+/probe-src/
+/AGENTS.md
+
+# 辅助工具仅本地保留；远端只保留必需工具
 /tools/*
 !/tools/build_module.sh
 !/tools/prepare_release.py
 !/tools/sync_lsposed.py
-
-# Internal maintenance instructions are local-only.
-/AGENTS.md
