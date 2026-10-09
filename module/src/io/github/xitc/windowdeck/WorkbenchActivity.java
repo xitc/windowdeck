@@ -95,6 +95,7 @@ public final class WorkbenchActivity extends Activity {
  private HandlerThread contentThread;
  private Handler contentWorker;
  private final long stateToken=SystemClock.elapsedRealtimeNanos();
+ private final android.os.IBinder videoCompatHost=new android.os.Binder();
  private int statePublishGeneration;
  private static final String ADD_TO_LIVE_WORKBENCH="io.github.xitc.windowdeck.ADD_TO_LIVE_WORKBENCH";
  private static final String REVEAL_ADDED_CARD="io.github.xitc.windowdeck.REVEAL_ADDED_CARD";
@@ -117,6 +118,11 @@ public final class WorkbenchActivity extends Activity {
    String[] packages=getPackageManager().getPackagesForUid(getSentFromUid());
    boolean launcher=false;
    if(packages!=null)for(String pkg:packages)if("com.android.launcher".equals(pkg))launcher=true;
+   if(intent!=null&&VideoWindowCompat.QUERY.equals(intent.getAction())){
+    boolean video=false;if(packages!=null)for(String pkg:packages)if(VideoWindowPolicy.target(pkg))video=true;
+    if(video&&getSentFromUid()/100000==android.os.Process.myUid()/100000&&!closing&&initialized){setResultExtras(liveState(slots.size()));setResultCode(1);}
+    return;
+   }
    if(!launcher||intent==null){Log.w(TAG,"direct_add_sender_denied uid="+getSentFromUid());return;}
    if(LauncherExistingAppHook.SELECT.equals(intent.getAction())){setResultCode(selectExistingFromLauncher(intent)?1:2);return;}
    if(LiveWorkbenchState.QUERY.equals(intent.getAction())){
@@ -219,7 +225,7 @@ public final class WorkbenchActivity extends Activity {
   // Root am broadcast may report an unknown sender UID (-1) in onReceive.
   IntentFilter addFilter=new IntentFilter(ADD_TO_LIVE_WORKBENCH);addFilter.addAction(REVEAL_ADDED_CARD);
   registerReceiver(addReceiver,addFilter,android.Manifest.permission.DUMP,handler,Context.RECEIVER_EXPORTED);addReceiverRegistered=true;
-  IntentFilter launcherFilter=new IntentFilter("io.github.xitc.windowdeck.LAUNCHER_ADD_TO_WORKBENCH");launcherFilter.addAction(LiveWorkbenchState.QUERY);launcherFilter.addAction(LauncherExistingAppHook.SELECT);
+  IntentFilter launcherFilter=new IntentFilter("io.github.xitc.windowdeck.LAUNCHER_ADD_TO_WORKBENCH");launcherFilter.addAction(LiveWorkbenchState.QUERY);launcherFilter.addAction(LauncherExistingAppHook.SELECT);launcherFilter.addAction(VideoWindowCompat.QUERY);
   registerReceiver(launcherReceiver,launcherFilter,android.Manifest.permission.REORDER_TASKS,handler,Context.RECEIVER_EXPORTED);launcherReceiverRegistered=true;
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
@@ -309,15 +315,7 @@ public final class WorkbenchActivity extends Activity {
   ActivityInfo ai=getPackageManager().getActivityInfo(c,0);
   Intent intent=new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(c);
   if(!Boolean.TRUE.equals(managerApi.getMethod("isAppSupportPocketStudio",Intent.class,int.class).invoke(manager,intent,-1)))throw new IllegalArgumentException(ai.loadLabel(getPackageManager())+" 不支持此窗口模式");
-  Slot slot=new Slot(c,ai.loadLabel(getPackageManager()).toString());slot.activeComponent=c;slot.orientationAxis=LandscapeActivities.initialAxis(orientationComponent(c,ai),OrientationPolicy.axis(ai.screenOrientation));Log.i(TAG,"app_orientation component="+c.flattenToShortString()+" requested="+ai.screenOrientation+" axis="+slot.orientationAxis);return slot;
- }
- private String orientationComponent(ComponentName component,ActivityInfo info){
-  return info.targetActivity==null?component.flattenToString():new ComponentName(component.getPackageName(),info.targetActivity).flattenToString();
- }
- private String orientationComponent(ComponentName component){
-  if(component==null)return null;
-  try{return orientationComponent(component,getPackageManager().getActivityInfo(component,0));}
-  catch(PackageManager.NameNotFoundException ignored){return component.flattenToString();}
+  Slot slot=new Slot(c,ai.loadLabel(getPackageManager()).toString());slot.activeComponent=c;slot.orientationAxis=OrientationPolicy.axis(ai.screenOrientation);Log.i(TAG,"app_orientation component="+c.flattenToShortString()+" requested="+ai.screenOrientation+" axis="+slot.orientationAxis);return slot;
  }
  private ActivityManager.RunningTaskInfo runningTask(int id) throws Exception {
   Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
@@ -328,23 +326,88 @@ public final class WorkbenchActivity extends Activity {
  private Slot validateSourceTask(int id,int user) throws Exception {
    ActivityManager.RunningTaskInfo task=runningTask(id);
    int taskUser=task==null?-1:task.getClass().getField("userId").getInt(task);
-   if(task==null||taskUser!=user||taskUser!=android.os.Process.myUid()/100000||task.baseActivity==null||task.topActivity==null||!task.baseActivity.getPackageName().equals(task.topActivity.getPackageName()))throw new IllegalArgumentException("任务身份或用户不匹配");
+   if(task==null||taskUser!=user||taskUser!=android.os.Process.myUid()/100000||task.baseActivity==null)throw new IllegalArgumentException("任务身份或用户不匹配");
+   RotationIdentity identity=readIdentity(task);
+   if("cross_package".equals(identity.unavailable)){Log.i(TAG,"slot=- task="+id+" "+identity.record());throw new IllegalArgumentException("任务身份或用户不匹配");}
    if(((Integer)task.getClass().getMethod("getWindowingMode").invoke(task))!=1)throw new IllegalArgumentException("仅接收全屏任务");
-   String pkg=task.topActivity.getPackageName();
+   String pkg=task.baseActivity.getPackageName();
    Intent launcher=getPackageManager().getLaunchIntentForPackage(pkg);
    if(launcher==null||launcher.getComponent()==null)throw new IllegalArgumentException("任务应用没有桌面入口");
    if(!Boolean.TRUE.equals(managerApi.getMethod("isAppSupportPocketStudio",Intent.class,int.class).invoke(manager,launcher,id)))throw new IllegalArgumentException("任务不支持嵌入");
-   Slot fresh=validate(launcher.getComponent(),null);fresh.sourceTaskId=id;fresh.sourceUserId=user;fresh.activeComponent=task.topActivity;
-   ActivityInfo topInfo=getPackageManager().getActivityInfo(task.topActivity,0);
-   fresh.orientationAxis=LandscapeActivities.initialAxis(orientationComponent(task.topActivity,topInfo),OrientationPolicy.axis(topInfo.screenOrientation));
+   Slot fresh=validate(launcher.getComponent(),null);fresh.sourceTaskId=id;fresh.sourceUserId=user;
+   ResolvedRotation resolved=resolveRotation(identity);
+   if(resolved.identity.rotationClass==null){fresh.activeComponent=null;fresh.orientationAxis=0;}
+   else{
+    ComponentName chosen=ComponentName.unflattenFromString(resolved.identity.rotationClass);
+    if(chosen!=null)fresh.activeComponent=chosen;
+    fresh.orientationAxis=resolved.manifestAxis;
+   }
+   if(resolved.identity.unavailable!=null)Log.i(TAG,"slot="+fresh.id+" task="+id+" "+resolved.identity.record());
    return fresh;
  }
  private void onTaskOrientationRequested(int task,int requested){
   if(closing)return;
-  for(Slot s:slots)if(!s.released&&s.taskId==task&&s.taskOrientation.request(task,requested)){
-   Log.i(TAG,"task_orientation_requested slot="+s.id+" task="+task+" requested="+requested+" axis="+s.taskOrientation.axis());
-   queueTaskDirections();break;
+  for(Slot s:slots)if(!s.released&&s.taskId==task){
+   applyRotationIdentity(s,task,null,true);
+   if(s.taskOrientation.request(task,requested)){
+    Log.i(TAG,"task_orientation_requested slot="+s.id+" task="+task+" requested="+requested+" axis="+s.taskOrientation.axis()+" "+s.taskOrientation.record());
+    queueTaskDirections();
+   }
+   break;
   }
+ }
+ /** Manifest axis of the chosen class. ActivityInfo.targetActivity is not followed. */
+ private ResolvedRotation resolveRotation(RotationIdentity identity){
+  if(identity.rotationClass==null)return new ResolvedRotation(identity,0);
+  ComponentName component=ComponentName.unflattenFromString(identity.rotationClass);
+  if(component==null)return new ResolvedRotation(identity.nameNotFound(),0);
+  try{return new ResolvedRotation(identity,OrientationPolicy.axis(getPackageManager().getActivityInfo(component,0).screenOrientation));}
+  catch(PackageManager.NameNotFoundException ignored){return new ResolvedRotation(identity.nameNotFound(),0);}
+ }
+ private void applyRotationIdentity(Slot slot,int taskId,ActivityManager.RunningTaskInfo snapshot,boolean reread){
+  if(slot==null||taskId<0||(slot.taskId>=0&&slot.taskId!=taskId))return;
+  RotationIdentity identity=reread?readTaskIdentity(taskId,snapshot):snapshot==null?null:readIdentity(snapshot);
+  if(identity!=null)commitRotation(slot,taskId,identity);
+ }
+ private void commitRotation(Slot slot,int taskId,RotationIdentity identity){
+  int manifestAxis=0;
+  if(identity.rotationClass!=null){ResolvedRotation resolved=resolveRotation(identity);identity=resolved.identity;manifestAxis=resolved.manifestAxis;}
+  if(!slot.taskOrientation.needsRebind(taskId,identity))return;
+  slot.taskOrientation.bind(taskId,identity,manifestAxis);
+  slot.immersiveOrientation.bind(taskId,identity.rotationClass,"youtube_dynamic_compat".equals(slot.taskOrientation.eligibility()));
+  slot.activeComponent=identity.rotationClass==null?null:ComponentName.unflattenFromString(identity.rotationClass);
+  Log.i(TAG,"slot="+slot.id+" task="+taskId+" "+identity.record());
+ }
+ private RotationIdentity readTaskIdentity(int taskId,ActivityManager.RunningTaskInfo fallback){
+  try{ActivityManager.RunningTaskInfo fresh=runningTask(taskId);if(fresh!=null)return readIdentity(fresh);}
+  catch(Throwable e){Log.w(TAG,"rotation_activity_read_failed task="+taskId,e);}
+  if(fallback!=null&&fallback.taskId==taskId)return readIdentity(fallback);
+  return null;
+ }
+ private RotationIdentity readIdentity(ActivityManager.RunningTaskInfo task){
+  if(task==null)return RotationIdentity.choose(null,null,null,null,null);
+  String base=task.baseActivity==null?null:task.baseActivity.getPackageName();
+  return RotationIdentity.choose(flatten(task.topActivity),flatten(task.origActivity),flatten(componentField(task,"realActivity")),activityInfoComponent(task),base);
+ }
+ private static String flatten(ComponentName component){return component==null?null:component.flattenToString();}
+ private static ComponentName componentField(Object task,String name){
+  try{Object value=task.getClass().getField(name).get(task);return value instanceof ComponentName?(ComponentName)value:null;}
+  catch(Throwable ignored){return null;}
+ }
+ private static String activityInfoComponent(Object task){
+  try{
+   Object info=task.getClass().getField("topActivityInfo").get(task);
+   if(info==null)return null;
+   String pkg=(String)info.getClass().getField("packageName").get(info);
+   String name=(String)info.getClass().getField("name").get(info);
+   if(pkg==null||pkg.isEmpty()||name==null||name.isEmpty())return null;
+   if(name.startsWith("."))name=pkg+name;
+   return pkg+"/"+name;
+  }catch(Throwable ignored){return null;}
+ }
+ private static final class ResolvedRotation {
+  final RotationIdentity identity; final int manifestAxis;
+  ResolvedRotation(RotationIdentity identity,int manifestAxis){this.identity=identity;this.manifestAxis=manifestAxis;}
  }
  private void updateDirectionEnvironment(Slot slot){
   SystemRotationObserver observer=systemRotationObserver;
@@ -361,8 +424,9 @@ public final class WorkbenchActivity extends Activity {
    java.util.List<?> tasks=(java.util.List<?>)Class.forName("android.app.IActivityTaskManager").getMethod("getTasks",int.class,boolean.class,boolean.class,int.class).invoke(service,100,false,false,0);
    for(Object value:tasks){ActivityManager.RunningTaskInfo info=(ActivityManager.RunningTaskInfo)value;
     for(Slot slot:slots)if(!slot.released&&slot.taskId==info.taskId&&"youtube_dynamic_compat".equals(slot.taskOrientation.eligibility())){
-     String identity=info.topActivity==null?null:info.topActivity.flattenToString();
-     if(slot.activeComponent==null||!slot.activeComponent.equals(info.topActivity)){
+     applyRotationIdentity(slot,info.taskId,info,false);
+     String identity=slot.taskOrientation.rotationClass();
+     if(!"youtube_dynamic_compat".equals(slot.taskOrientation.eligibility())||identity==null){
       if(slot.immersiveOrientation.clear()){slot.taskOrientation.immersive(false);queueTaskDirections();}
       continue;
      }
@@ -1502,24 +1566,32 @@ private android.graphics.Paint cardFill(){
     if(m.getDeclaringClass()==Object.class){if(m.getName().equals("toString"))return "WorkbenchListener";if(m.getName().equals("hashCode"))return System.identityHashCode(p);if(m.getName().equals("equals"))return p==args[0];}
     if(closing||slot.released)return null;
     if(m.getName().equals("onTaskCreated")||m.getName().equals("onTaskChanged")){
-     ComponentName top=(ComponentName)args[1];if(top!=null)slot.activeComponent=top;int fallbackAxis=0;
-     if(slot.activeComponent!=null)try{fallbackAxis=OrientationPolicy.axis(getPackageManager().getActivityInfo(slot.activeComponent,0).screenOrientation);}catch(PackageManager.NameNotFoundException ignored){}
+     ComponentName top=(ComponentName)args[1];
      int id=(Integer)args[0];if(slot.sourceTaskId>=0&&slot.taskId<0&&id!=slot.sourceTaskId){slot.failed=true;Log.e(TAG,"add_existing_identity_mismatch expected="+slot.sourceTaskId+" actual="+id);handler.post(()->removeSlot(slot,true));return null;}
-     boolean firstTask=slot.taskId<0;if(slot.taskId!=id)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;
-     slot.taskOrientation.bind(id,slot.activeComponent==null?null:slot.activeComponent.flattenToString(),fallbackAxis,orientationComponent(slot.activeComponent));
-     slot.immersiveOrientation.bind(id,slot.activeComponent==null?null:slot.activeComponent.flattenToString(),"youtube_dynamic_compat".equals(slot.taskOrientation.eligibility()));
+     boolean firstTask=slot.taskId<0,taskChanged=slot.taskId!=id;if(taskChanged)Log.i(TAG,"task_ready slot="+slot.id+" task="+id);slot.taskId=id;
+     if(taskChanged)publishState(slots.size());
+     applyRotationIdentity(slot,id,null,true);
+     if(!slot.taskOrientation.bound(id)){
+      Log.i(TAG,"rotation_activity_callback_fallback slot="+slot.id+" task="+id+" component="+flatten(top));
+      commitRotation(slot,id,RotationIdentity.choose(flatten(top),null,null,null,slot.component.getPackageName()));
+     }
      handler.removeCallbacks(immersivePoll);handler.post(immersivePoll);
-     updateDirectionEnvironment(slot);int nextAxis=slot.taskOrientation.axis();if(firstTask&&slot.orientationAxis!=nextAxis){slot.orientationAxis=nextAxis;handler.post(this::scheduleLayout);}else queueTaskDirections();
+     updateDirectionEnvironment(slot);int nextAxis=slot.taskOrientation.axis();if(slot.taskOrientation.bound()&&firstTask&&slot.orientationAxis!=nextAxis){slot.orientationAxis=nextAxis;handler.post(this::scheduleLayout);}else queueTaskDirections();
      slot.failed=false;refreshStatus();handler.post(()->{syncSurface(slot);focusPrimary("task_ready");maybeAnimateAddedCard();if(deferPortrait&&id==slot.sourceTaskId)requestCoverPose(slot);if(id==pendingHangFront){pendingHangFront=-1;raiseHangContainer();}});
     }else if(m.getName().equals("onTaskRectOrientationChanged")){
      ActivityManager.RunningTaskInfo info=(ActivityManager.RunningTaskInfo)args[0];Rect requested=args[1] instanceof Rect?new Rect((Rect)args[1]):null;
-     if(info!=null&&requested!=null){
+     if(info!=null&&requested!=null&&info.taskId==slot.taskId){
+      RotationIdentity callbackIdentity=readIdentity(info);
+      applyRotationIdentity(slot,info.taskId,info,true);
       int rotation=taskRotation(info);
-      if(slot.taskOrientation.update(info.taskId,info.topActivity==null?null:info.topActivity.flattenToString(),requested.left,requested.top,requested.right,requested.bottom,rotation)){
+      if(slot.taskOrientation.update(info.taskId,callbackIdentity.rotationClass,requested.left,requested.top,requested.right,requested.bottom,rotation)){
        int axis=slot.taskOrientation.axis();
-       Log.i(TAG,"task_orientation slot="+slot.id+" task="+info.taskId+" component="+info.topActivity+" axis="+axis+" bounds="+requested+" rotation="+slot.taskOrientation.rotation()+" previous_rotation="+slot.taskOrientation.previousRotation()+" source=rom_rect");
-       queueTaskDirections();
+       Log.i(TAG,"task_orientation slot="+slot.id+" task="+info.taskId+" component="+slot.taskOrientation.rotationClass()+" axis="+axis+" bounds="+requested+" rotation="+slot.taskOrientation.rotation()+" previous_rotation="+slot.taskOrientation.previousRotation()+" source="+slot.taskOrientation.source()+" "+slot.taskOrientation.record());
+      }else if(!java.util.Objects.equals(callbackIdentity.rotationClass,slot.taskOrientation.rotationClass())){
+       Log.i(TAG,"task_orientation stale_activity slot="+slot.id+" task="+info.taskId+" callback="+callbackIdentity.rotationClass+" current="+slot.taskOrientation.rotationClass());
       }
+      // Rebinding can change the direction even when the rect is stale or invalid.
+      queueTaskDirections();
      }
     }else if(m.getName().equals("onInitialized")&&Boolean.FALSE.equals(args[0])){slot.failed=true;Log.e(TAG,"task_start_failed slot="+slot.id);handler.post(()->abandonEntrance(slot));refreshStatus();}
     else if(m.getName().equals("onTaskWindowDraw")&&((Integer)args[0])==slot.taskId){boolean drawn=Boolean.TRUE.equals(args[1]);Log.i(TAG,"task_draw slot="+slot.id+" drawn="+drawn);if(!drawn){slot.windowDrawn=false;slot.drawEvidence.invalidate();}else if(gestureHandoff&&slot.orientationAxis==2&&!slot.drawEvidence.hasContent())handler.post(()->{syncSurface(slot);maybeAnimateAddedCard();});else{slot.windowDrawn=true;handler.post(()->{syncSurface(slot);maybeAnimateAddedCard();});}}
@@ -1567,6 +1639,10 @@ private android.graphics.Paint cardFill(){
    handler.postDelayed(()->{if(!closing&&!slot.released&&slot.taskId<0){slot.failed=true;abandonEntrance(slot);refreshStatus();Log.w(TAG,"startup_timeout slot="+slot.id);}},10000);
   }catch(Throwable e){slot.failed=true;fail(e);}
  }
+ @Override public void dump(String prefix,java.io.FileDescriptor fd,java.io.PrintWriter writer,String[] args){
+  super.dump(prefix,fd,writer,args);
+  writer.println(prefix+"WindowDeck IME: "+CanvasImeBridge.diagnostic());
+ }
  private void dismissPrimaryMenu(){if(primaryPopup!=null&&primaryPopup.isShowing())primaryPopup.dismiss();primaryPopup=null;}
  private void primaryMenu(){
   if(closing||recovering||dragging!=null||slots.isEmpty()||more==null||more.getVisibility()!=View.VISIBLE)return;
@@ -1574,14 +1650,14 @@ private android.graphics.Paint cardFill(){
   Slot main=slots.get(primary);
   LinearLayout panel=new LinearLayout(this);panel.setOrientation(1);panel.setBackground(Ui.bg(0xffffffff,Ui.dp(this,12)));panel.setElevation(Ui.dp(this,12));
   panel.setPadding(0,Ui.dp(this,4),0,Ui.dp(this,4));
-  String[] items={"切换全屏","切换布局","替换应用","关闭应用"};
+  String[] items={"切换全屏","切换布局","替换应用","关闭应用", "悬浮键盘实验："+(CanvasImeBridge.floating()?"开":"关")};
   for(int i=0;i<items.length;i++){
    final int which=i;
    TextView row=Ui.text(this,items[i],16,0xff1c1c1c);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(Ui.dp(this,20),0,Ui.dp(this,20),0);
    row.setMinHeight(Ui.dp(this,48));row.setClickable(true);row.setBackground(Ui.bg(0xffffffff,0));
    row.setOnClickListener(v->{dismissPrimaryMenu();
     if(closing||recovering||dragging!=null||slots.isEmpty()||slots.get(primary)!=main)return;
-    if(which==0)exitToFullscreen();else if(which==1)toggleLayout();else if(which==2)hangForReplace();else removeSlot(main);
+    if(which==0)exitToFullscreen();else if(which==1)toggleLayout();else if(which==2)hangForReplace();else if(which==3)removeSlot(main);else CanvasImeBridge.toggleFloating(this);
    });
    panel.addView(row,new LinearLayout.LayoutParams(Ui.dp(this,168),Ui.dp(this,48)));
   }
@@ -1603,6 +1679,7 @@ private android.graphics.Paint cardFill(){
   Log.i(TAG,"layout_mode="+layoutMode+" tasks="+taskIds());
  }
  private int effectiveMode(){return layoutMode;}
+ boolean rotatePrimaryIme(){return !closing&&!stopped&&!backgrounded&&!slots.isEmpty()&&primary>=0&&primary<slots.size()&&!slots.get(primary).released&&rotatePresentation(slots.get(primary));}
  private boolean rotatePresentation(Slot s){
   android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
   return s.orientationAxis==2&&OrientationPolicy.rotatePresentation(s.renderBounds.width(),s.renderBounds.height(),dm.widthPixels,dm.heightPixels);
@@ -1699,6 +1776,7 @@ private android.graphics.Paint cardFill(){
   int longEdge=Math.max(1,Math.max(dm.widthPixels,dm.heightPixels));
   naturalBounds.set(0,0,shortEdge,longEdge);
   for(Slot s:slots)updateRenderBounds(s);
+  CanvasImeBridge.refresh(this);
  }
  private void updateRenderBounds(Slot s){
   android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
@@ -1737,8 +1815,8 @@ private android.graphics.Paint cardFill(){
  // A transient pause while the task takes focus must not cancel the live rotation pose.
  // A real background transition still fails and clears the handoff in onStop().
  @Override protected void onPause(){immersiveForeground=false;handler.removeCallbacks(immersivePoll);if(systemRotationObserver!=null)systemRotationObserver.close();dismissPrimaryMenu();cancelDrag();if(!screenArrival&&!deferPortrait)cancelAnimation();if(initialized&&!closing&&!screenArrival&&!deferPortrait)layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();immersiveForeground=true;if(systemRotationObserver==null)systemRotationObserver=new SystemRotationObserver(this,handler,this::queueTaskDirections);systemRotationObserver.start();if(orientationObserver==null){orientationObserver=new TaskOrientationObserver(handler,this::onTaskOrientationRequested);orientationObserver.start();}foreground=true;stopped=false;backgrounded=false;if(initialized&&!closing)publishState(slots.size());if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.post(this::maybeAnimateAddedCard);handler.post(this::queueTaskDirections);handler.post(immersivePoll);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
- @Override protected void onStop(){clearArrivalFace("host_stopped");foreground=false;stopped=true;if(screenArrival||handoffPresentation)cancelAnimation();if(gestureHandoff&&pendingEntrance!=null)failHandoff(pendingEntrance,"host_stopped");for(Slot s:slots){s.drawEvidence.invalidate();clearProjection(s);}backGeneration++;forwardingBack=false;super.onStop();}
+ @Override protected void onResume(){super.onResume();CanvasImeBridge.start(this);immersiveForeground=true;if(systemRotationObserver==null)systemRotationObserver=new SystemRotationObserver(this,handler,this::queueTaskDirections);systemRotationObserver.start();if(orientationObserver==null){orientationObserver=new TaskOrientationObserver(handler,this::onTaskOrientationRequested);orientationObserver.start();}foreground=true;stopped=false;backgrounded=false;if(initialized&&!closing)publishState(slots.size());if(createdFromGesture&&pendingEntrance!=null)entranceFrontReady=true;if(backdrop!=null)backdrop.onResume();handler.post(this::restorePendingTasks);handler.post(this::consumeHangAdd);handler.post(this::beginHangEntrance);handler.post(this::maybeAnimateAddedCard);handler.post(this::queueTaskDirections);handler.post(immersivePoll);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(Slot s:slots)syncSurface(s);focusPrimary("resume");maybeAnimateAddedCard();},350);}
+ @Override protected void onStop(){CanvasImeBridge.stop(this);clearArrivalFace("host_stopped");foreground=false;stopped=true;if(screenArrival||handoffPresentation)cancelAnimation();if(gestureHandoff&&pendingEntrance!=null)failHandoff(pendingEntrance,"host_stopped");for(Slot s:slots){s.drawEvidence.invalidate();clearProjection(s);}backGeneration++;forwardingBack=false;super.onStop();}
  // Do not refocus on every host touch: doing so cancels a preview's click or
  // long-press stream. Resume, settled promotion and dialog dismissal own focus.
  @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);backgrounded=false;stopped=false;if(intent.hasExtra("windowdeck_add_task_id"))handler.post(()->addExistingTask(intent));Log.i(TAG,"workbench_resume container="+getTaskId()+" primary="+primary+" layout="+layoutMode+" tasks="+taskIds());handler.post(()->{for(Slot s:slots)syncSurface(s);focusPrimary("entry");});}
@@ -2343,6 +2421,8 @@ private android.graphics.Paint cardFill(){
     for(Slot s:slots){org.json.JSONObject card=new org.json.JSONObject();card.put("slot",s.id).put("task",s.taskId).put("pkg",s.component.getPackageName())
      .put("axis",s.orientationAxis).put("task_rotation",s.taskOrientation.rotation()).put("previous_task_rotation",s.taskOrientation.previousRotation())
      .put("requested_visible_types",s.lastRequestedVisibleTypes).put("direction_eligibility",s.taskOrientation.eligibility()).put("effective_direction_rotation",s.taskOrientation.effectiveRotation())
+     .put("rotation_class",s.taskOrientation.rotationClass()).put("rotation_unavailable",s.taskOrientation.unavailable()==null?"":s.taskOrientation.unavailable())
+     .put("top_activity",s.taskOrientation.topActivity()).put("orig_activity",s.taskOrientation.origActivity()).put("real_activity",s.taskOrientation.realActivity()).put("top_activity_info",s.taskOrientation.topActivityInfo())
      .put("requested_task_orientation",s.taskOrientation.requested()).put("orientation_source",s.taskOrientation.source()).put("orientation_bounds",new org.json.JSONArray(s.taskOrientation.bounds()))
      .put("render",new org.json.JSONArray(new int[]{s.renderBounds.width(),s.renderBounds.height()}))
      .put("box",new org.json.JSONArray(new int[]{s.card.getLeft(),s.card.getTop(),s.card.getWidth(),s.card.getHeight()}))
@@ -2480,7 +2560,7 @@ private void animateCardRadius(Slot s,float fraction,float scaleX,float scaleY){
   int keep=main.taskId;
   ComponentName component=main.component;
   dismissPrimaryMenu();detachCaption();
-  cancelSwitchPreparation("fullscreen");closing=true;publishState(0);clearRecoveryCovers();cancelDrag();cancelAnimation();closeEntranceCover("exit_fullscreen");handler.removeCallbacksAndMessages(null);
+  cancelSwitchPreparation("fullscreen");CanvasImeBridge.stop(this);closing=true;publishState(0);clearRecoveryCovers();cancelDrag();cancelAnimation();closeEntranceCover("exit_fullscreen");handler.removeCallbacksAndMessages(null);
   // Unlink every task. Keep the main task from being moved to back or restored
   // behind this container; that was snapping fullscreen back to the workbench.
   for(Slot s:new ArrayList<>(slots))releaseSlot(s,s==main);
@@ -2645,6 +2725,7 @@ private void releaseSlot(Slot s){releaseSlot(s,false);}
  private boolean focusPrimary(String reason){
   if(!backReady()||stage==null||!stage.isShown()||screenArrival)return false;
   Slot main=slots.get(primary);if(main.released||main.taskId<0)return false;
+  CanvasImeBridge.refresh(this);
   try{managerApi.getMethod("setFocusAppForEmbeddedTask",int.class).invoke(manager,main.taskId);Log.i(TAG,"back_focus reason="+reason+" task="+main.taskId);return true;}
   catch(Throwable e){Log.w(TAG,"back_focus_failed",e);return false;}
  }
@@ -2761,12 +2842,13 @@ private boolean backgroundWorkbench(String reason){
    finally{handler.postDelayed(()->{if(generation==backGeneration)forwardingBack=false;},200);}
   },80);
  }
- private void closeWorkbench(){dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("close_workbench");if(closing)return;closing=true;publishState(0);releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
+ private void closeWorkbench(){dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("close_workbench");if(closing)return;CanvasImeBridge.stop(this);closing=true;publishState(0);releaseWindows();Log.i(TAG,"workbench_exit");finishAndRemoveTask();}
  @Override public void onBackPressed(){handleHostBack();}
- @Override protected void onDestroy(){handler.removeCallbacks(immersivePoll);if(systemRotationObserver!=null){systemRotationObserver.close();systemRotationObserver=null;}handler.removeCallbacks(applyDirections);directionPosted=false;if(orientationObserver!=null){orientationObserver.close();orientationObserver=null;}clearHeldPose();hangSourceGeneration++;if(hangSourceFrame!=null){hangSourceFrame.recycle();hangSourceFrame=null;}dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("destroy");if(contentThread!=null){contentThread.quitSafely();contentThread=null;contentWorker=null;}if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
+ @Override protected void onDestroy(){CanvasImeBridge.stop(this);handler.removeCallbacks(immersivePoll);if(systemRotationObserver!=null){systemRotationObserver.close();systemRotationObserver=null;}handler.removeCallbacks(applyDirections);directionPosted=false;if(orientationObserver!=null){orientationObserver.close();orientationObserver=null;}clearHeldPose();hangSourceGeneration++;if(hangSourceFrame!=null){hangSourceFrame.recycle();hangSourceFrame=null;}dismissHang();dismissPrimaryMenu();detachCaption();closeEntranceCover("destroy");if(contentThread!=null){contentThread.quitSafely();contentThread=null;contentWorker=null;}if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publishState(0);closing=true;releaseWindows();}super.onDestroy();}
  private void publishState(int count){publishState(count,++statePublishGeneration,0);}
  private Bundle liveState(int count){
   Bundle state=new Bundle();state.putInt("containerTaskId",getTaskId());state.putInt("count",count);state.putLong("instanceToken",stateToken);
+  state.putBinder(VideoWindowCompat.HOST_BINDER,videoCompatHost);
   state.putBoolean("hanging",hanging&&count>0);state.putLong("selectionSession",hangStarted);state.putInt("userId",android.os.Process.myUid()/100000);
   String[] packages=new String[slots.size()];int[] tasks=new int[slots.size()];
   for(int i=0;i<slots.size();i++){packages[i]=slots.get(i).component.getPackageName();tasks[i]=slots.get(i).taskId;}

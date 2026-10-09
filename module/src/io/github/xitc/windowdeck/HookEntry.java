@@ -6,6 +6,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class HookEntry implements IXposedHookLoadPackage {
  public void handleLoadPackage(XC_LoadPackage.LoadPackageParam p) {
+  // App-process compatibility is disabled in the host-only build.
   if ("com.android.launcher".equals(p.packageName) || "com.oplus.pscanvas".equals(p.packageName))
    android.util.Log.i("WindowDeck","load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
   if("com.android.launcher".equals(p.packageName)){

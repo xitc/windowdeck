@@ -4,6 +4,8 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcel;
+import android.graphics.Rect;
+import android.app.Activity;
 import android.util.Log;
 import android.view.SurfaceControl;
 
@@ -77,7 +79,7 @@ final class CanvasImeBridge {
 
     private static volatile boolean installed;
     private static volatile boolean methodsHooked;
-    private static boolean visibilityHooked, insetsHooked, loggedHookFailure;
+    private static boolean visibilityHooked, insetsHooked, frameHooked, loggedHookFailure;
     /** Classes that are not the canvas stub. A later, different stub can still be hooked. */
     private static final Set<Class<?>> skipped = Collections.newSetFromMap(new IdentityHashMap<Class<?>, Boolean>());
     private static Class<?> pendingClass;
@@ -92,6 +94,113 @@ final class CanvasImeBridge {
     /** Last state the app asked for, so it can be re-applied if the leash arrives afterwards. */
     private static volatile Boolean wantVisible;
     private static Method setVisibility;
+    private static Method setMatrix;
+    private static final Handler main = new Handler(Looper.getMainLooper());
+    private static Activity host;
+    private static boolean floating, transformed;
+    private static final Rect frame = new Rect(), display = new Rect();
+    private static volatile int session;
+    private static String lastResult = "idle";
+    private static int frameUpdates, controlUpdates;
+    private static String failure = "none";
+
+    static void start(Activity activity) {
+        if (host != activity) { stop(); host = activity; }
+    }
+
+    static boolean floating() { return floating; }
+
+    static void refresh(Activity activity) { if (host == activity) updateSurface(); }
+
+    private static boolean rotateWithPrimary() {
+        return host instanceof WorkbenchActivity && ((WorkbenchActivity) host).rotatePrimaryIme();
+    }
+
+    static void stop(Activity activity) {
+        if (host == activity) stop();
+    }
+
+    static void toggleFloating(Activity activity) {
+        start(activity);
+        floating = !floating;
+        updateSurface();
+        String message = "canvas_ime_float_enabled=" + floating + " " + diagnostic();
+        Log.i(TAG, message);
+        de.robv.android.xposed.XposedBridge.log("WindowDeck " + message);
+        android.widget.Toast.makeText(activity, floating ? "悬浮键盘实验已开：" + statusLabel() : "悬浮键盘实验已关", android.widget.Toast.LENGTH_LONG).show();
+    }
+
+    static String diagnostic() {
+        return "version=" + Version.NAME + " enabled=" + floating + " foreground=" + WorkbenchActivity.foreground
+                + " host=" + (host != null) + " rotatePrimary=" + rotateWithPrimary() + " requested=" + wantVisible + " transformed=" + transformed
+                + " leashValid=" + (imeLeash != null && imeLeash.isValid()) + " position=" + leashX + "," + leashY
+                + " frame=" + frame + " display=" + display + " frameUpdates=" + frameUpdates
+                + " controlUpdates=" + controlUpdates + " result=" + lastResult + " failure=" + failure;
+    }
+
+    private static String statusLabel() {
+        if (transformed) return "已提交缩放";
+        if (imeLeash == null || !imeLeash.isValid()) return "等待键盘控制权";
+        if (!Boolean.TRUE.equals(wantVisible)) return "等待键盘显示";
+        if (frame.isEmpty() || display.isEmpty()) return "等待键盘尺寸";
+        return "尚未缩放，请保留现场";
+    }
+
+    /** Restore only our matrix/position, without changing the next app's IME visibility. */
+    static void stop() {
+        session++;
+        restoreTransform();
+        imeLeash = null; wantVisible = null; host = null;
+        frame.setEmpty(); display.setEmpty(); floating = false;
+        lastResult = "stopped";
+    }
+
+    private static void restoreTransform() {
+        SurfaceControl leash = imeLeash;
+        if (!transformed) return;
+        try {
+            if (leash != null && leash.isValid()) {
+                try (SurfaceControl.Transaction t = new SurfaceControl.Transaction()) {
+                    matrix(t, leash, 1f); t.setPosition(leash, leashX, leashY); t.apply();
+                }
+                Log.i(TAG, "canvas_ime_float_restored");
+            }
+        } catch (Throwable e) { Log.w(TAG, "canvas_ime_float_restore_failed", e); }
+        transformed = false;
+    }
+
+    private static void matrix(SurfaceControl.Transaction t, SurfaceControl leash, float scale) throws Exception {
+        matrix(t,leash,scale,0f,0f,scale);
+    }
+
+    private static void matrix(SurfaceControl.Transaction t, SurfaceControl leash, float a,float b,float c,float d) throws Exception {
+        if (setMatrix == null) setMatrix = SurfaceControl.Transaction.class.getMethod(
+                "setMatrix", SurfaceControl.class, float.class, float.class, float.class, float.class);
+        // SurfaceControl orders its off-diagonal terms as dtdx, dsdy.
+        setMatrix.invoke(t, leash, a, c, b, d);
+    }
+
+    private static void updateSurface() {
+        if (!WorkbenchActivity.foreground || host == null || wantVisible == null) return;
+        applySurface(wantVisible.booleanValue());
+    }
+
+    /** Copy Binder-owned state before the ROM can reuse it; never call WMS here. */
+    private static void captureFrame(Object state) {
+        if (state == null) return;
+        try {
+            Class<?> sourceClass = Class.forName("android.view.InsetsSource");
+            int id = sourceClass.getField("ID_IME").getInt(null);
+            Object source = state.getClass().getMethod("peekSource", int.class).invoke(state, id);
+            final Rect nextFrame = source == null ? new Rect() : new Rect((Rect) sourceClass.getMethod("getFrame").invoke(source));
+            final Rect nextDisplay = new Rect((Rect) state.getClass().getMethod("getDisplayFrame").invoke(state));
+            final int expected = session;
+            main.post(() -> {
+                if (expected != session || !WorkbenchActivity.foreground || host == null) return;
+                frame.set(nextFrame); display.set(nextDisplay); frameUpdates++; updateSurface();
+            });
+        } catch (Throwable e) { failure = "frame:" + e.getClass().getSimpleName(); Log.w(TAG, "canvas_ime_frame_failed", e); }
+    }
 
     private CanvasImeBridge() {}
 
@@ -134,6 +243,7 @@ final class CanvasImeBridge {
                 try {
                     stubImpl.getMethod("setImeInputTargetRequestedVisibility", boolean.class, token);
                     stubImpl.getMethod("insetsControlChanged", insetsState, controlArray);
+                    stubImpl.getMethod("insetsChanged", insetsState);
                 } catch (NoSuchMethodException missing) {
                     skipped.add(stubImpl);
                     Log.i(TAG, "canvas_ime_stub_skipped " + stubImpl.getName());
@@ -155,12 +265,21 @@ final class CanvasImeBridge {
                             insetsState, controlArray, new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam param) {
                             if (!WorkbenchActivity.foreground) return;
+                            captureFrame(param.args[0]);
                             captureLeash((Object[]) param.args[1]);
                         }
                     });
                     insetsHooked = true;
                 }
-                methodsHooked = visibilityHooked && insetsHooked;
+                if (!frameHooked) {
+                    XposedHelpers.findAndHookMethod(stubImpl, "insetsChanged", insetsState, new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam param) {
+                            if (WorkbenchActivity.foreground) captureFrame(param.args[0]);
+                        }
+                    });
+                    frameHooked = true;
+                }
+                methodsHooked = visibilityHooked && insetsHooked && frameHooked;
                 Log.i(TAG, "canvas_ime_stub_hooked " + stubImpl.getName());
             } catch (Throwable e) {
                 // Leave methodsHooked false so a later transaction can finish a partial hook.
@@ -171,7 +290,9 @@ final class CanvasImeBridge {
 
     /** Code 3 carries the IME's {@code InsetsSourceControl}, which owns the animation leash. */
     private static void captureLeash(Object[] controls) {
-        if (controls == null) return;
+        final int expected = session;
+        SurfaceControl found = null;
+        int x = 0, y = 0;
         try {
             Class<?> control = Class.forName("android.view.InsetsSourceControl");
             Method getType = control.getMethod("getType");
@@ -179,31 +300,45 @@ final class CanvasImeBridge {
             Method getSurfacePosition = control.getMethod("getSurfacePosition");
             Class<?> point = Class.forName("android.graphics.Point");
             Field px = point.getField("x"), py = point.getField("y");
-            for (Object c : controls) {
+            for (Object c : controls == null ? new Object[0] : controls) {
                 if (c == null) continue;
                 if (((Integer) getType.invoke(c)).intValue() != IME) continue;
                 SurfaceControl leash = (SurfaceControl) getLeash.invoke(c);
                 Object position = getSurfacePosition.invoke(c);
                 if (leash == null || position == null) continue;
                 // Publish the leash last so a reader cannot observe it with the previous coordinates.
-                leashX = ((Integer) px.get(position)).intValue();
-                leashY = ((Integer) py.get(position)).intValue();
-                imeLeash = leash;
-                Log.i(TAG, "canvas_ime_leash " + leash + " at " + leashX + "," + leashY);
-                Boolean wanted = wantVisible;
-                if (wanted != null) post(wanted.booleanValue());   // request may predate the control
-                return;
+                x = px.getInt(position); y = py.getInt(position); found = leash;
+                break;
             }
+            final SurfaceControl next = found;
+            final int nextX = x, nextY = y;
+            main.post(() -> {
+                if (expected != session || !WorkbenchActivity.foreground || host == null) return;
+                // The same native leash may arrive in a new Java wrapper. Avoid a
+                // separate identity transaction before re-applying its floating pose.
+                boolean same = false;
+                if (next != null && imeLeash != null) try {
+                    same = (Boolean) XposedHelpers.callMethod(imeLeash, "isSameSurface", next);
+                } catch (Throwable ignored) {}
+                if (!same) restoreTransform();
+                leashX = nextX; leashY = nextY; imeLeash = next;
+                controlUpdates++;
+                Log.i(TAG, "canvas_ime_leash " + next + " at " + nextX + "," + nextY);
+                updateSurface();
+            });
         } catch (Throwable e) {
             Log.w(TAG, "canvas_ime_leash_failed", e);
         }
     }
 
     private static void post(final boolean visible) {
-        wantVisible = Boolean.valueOf(visible);
+        final int expected = session;
         try {
-            new Handler(Looper.getMainLooper()).post(new Runnable() {
-                @Override public void run() { apply(visible); }
+            main.post(new Runnable() {
+                @Override public void run() {
+                    if (expected != session || !WorkbenchActivity.foreground || host == null) return;
+                    wantVisible = Boolean.valueOf(visible); apply(visible);
+                }
             });
         } catch (Throwable e) {
             Log.w(TAG, "canvas_ime_post_failed", e);
@@ -221,23 +356,38 @@ final class CanvasImeBridge {
         } catch (Throwable e) {
             Log.w(TAG, "canvas_ime_push_failed", e);
         }
+        applySurface(visible);
+    }
+
+    private static void applySurface(boolean visible) {
         SurfaceControl leash = imeLeash;
         if (leash == null) {
+            lastResult = "pending_control";
             Log.i(TAG, "canvas_ime_push visible=" + visible + " leash=pending");
             return;
         }
         try {
-            if (!leash.isValid()) { imeLeash = null; return; }
-            SurfaceControl.Transaction t = new SurfaceControl.Transaction();
-            t.setPosition(leash, leashX, leashY);
+            if (!leash.isValid()) { lastResult = "invalid_leash"; imeLeash = null; return; }
+            ImeFloatGeometry pose = visible && floating && host != null ? ImeFloatGeometry.fit(
+                    frame.left, frame.top, frame.right, frame.bottom,
+                    display.left, display.top, display.right, display.bottom,
+                    leashX, leashY, Ui.dp(host, 24), rotateWithPrimary()) : null;
+            try (SurfaceControl.Transaction t = new SurfaceControl.Transaction()) {
+            if (pose != null) matrix(t, leash, pose.a, pose.b, pose.c, pose.d);
+            else if (transformed) matrix(t, leash, 1f);
+            t.setPosition(leash, pose == null ? leashX : pose.x, pose == null ? leashY : pose.y);
             t.setAlpha(leash, visible ? 1.0f : 0.0f);
             // show()/hide() exist at runtime but were dropped from the public SDK stubs; the
             // supported spelling is setVisibility(sc, visible), which is exactly show() or hide().
             visibility().invoke(t, leash, Boolean.valueOf(visible));
             t.apply();
-            t.close();
+            transformed = pose != null;
+            lastResult = pose != null ? "float_submitted" : floating && visible ? "geometry_rejected" : "normal";
+            if (pose != null) Log.i(TAG, "canvas_ime_float_applied scale=" + pose.scale + " rotated=" + pose.rotated + " position=" + pose.x + "," + pose.y + " frame=" + frame + " display=" + display);
+            }
             Log.i(TAG, "canvas_ime_push visible=" + visible + " leash=applied");
         } catch (Throwable e) {
+            failure = "surface:" + e.getClass().getSimpleName(); lastResult = "surface_failed";
             Log.w(TAG, "canvas_ime_leash_apply_failed", e);
         }
     }

@@ -7,3 +7,6 @@ build/
 .env
 .env.*
 __pycache__/
+
+# Local investigation documents must not be published.
+/docs/

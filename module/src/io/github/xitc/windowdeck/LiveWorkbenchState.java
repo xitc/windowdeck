@@ -61,5 +61,7 @@ final class LiveWorkbenchState {
  static void publish(Context context,Bundle state){
   BroadcastOptions options=BroadcastOptions.makeBasic();options.setShareIdentityEnabled(true);
   context.sendBroadcast(new Intent(UPDATE).setPackage("com.android.launcher").addFlags(Intent.FLAG_RECEIVER_FOREGROUND).putExtras(state),null,options.toBundle());
+  for(String pkg:new String[]{"tv.acfundanmaku.video","com.google.android.youtube"})
+   context.sendBroadcast(new Intent(UPDATE).setPackage(pkg).addFlags(Intent.FLAG_RECEIVER_FOREGROUND).putExtras(state),null,options.toBundle());
  }
 }

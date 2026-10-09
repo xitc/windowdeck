@@ -23,12 +23,13 @@ public final class MainActivity extends Activity {
   body.addView(Ui.text(this,"多窗工作台 · Beta",28,Ui.TEXT));
   TextView intro=Ui.text(this,"最多五个实时应用窗口，支持运行中添加、替换和移出。",16,Ui.MUTED);intro.setPadding(0,pad,0,pad);body.addView(intro);
   body.addView(Ui.text(this,"首次使用：在 LSPosed 勾选“多窗口”（com.oplus.pscanvas）与“系统桌面”（com.android.launcher），再重新启动这两个进程。启动及上滑加入已有任务需要 Root；新建会替换当前多窗口容器。",14,Ui.MUTED));
+  Button video=Ui.button(this,"视频全屏兼容 · 应用名单");styleEntry(video);body.addView(video);video.setOnClickListener(v->NativeVideoSettings.show(this));
   for(int i=0;i<SLOTS;i++){final int slot=i;picks[i]=Ui.button(this,prefix(i)+labels[i]);styleEntry(picks[i]);body.addView(picks[i]);picks[i].setOnClickListener(v->pick(slot));}
   Button resume=Ui.button(this,"打开 / 恢复当前工作台");styleEntry(resume);body.addView(resume);resume.setOnClickListener(v->launch(true));
   start=Ui.button(this,"用所选应用新建工作台");styleEntry(start);body.addView(start);start.setOnClickListener(v->launch(false));
   rotate=Ui.button(this,rotateLabel());styleEntry(rotate);body.addView(rotate);rotate.setOnClickListener(v->toggleRotate());
   TextView rotateHint=Ui.text(this,"打开后，左右与上下布局的侧窗都收成梯形：朝主窗的那条边缩短，外侧保持满高；主窗永远是矩形。",13,Ui.MUTED);rotateHint.setPadding(0,Ui.dp(this,6),0,0);body.addView(rotateHint);
-  status=Ui.text(this,"适配 PJZ110 · ColorOS 16.0.10.501\n实验版：退出时解除窗口嵌入，不清除应用数据。",13,Ui.MUTED);status.setPadding(0,pad,0,0);body.addView(status);
+  status=Ui.text(this,"适配 PJZ110 · ColorOS 17\n实验版：退出时解除窗口嵌入，不清除应用数据。",13,Ui.MUTED);status.setPadding(0,pad,0,0);body.addView(status);
  }
  private void styleEntry(Button b){b.setTextColor(Ui.TEXT);b.setBackground(Ui.bg(Ui.CARD,Ui.dp(this,12)));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,Ui.dp(this,48));lp.topMargin=Ui.dp(this,8);b.setLayoutParams(lp);}
  private String prefix(int i){return i==0?"主应用：":"侧窗 "+i+"：";}
