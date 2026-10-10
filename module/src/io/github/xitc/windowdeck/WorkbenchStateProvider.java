@@ -23,6 +23,12 @@ public final class WorkbenchStateProvider extends ContentProvider {
    prefs.edit().putInt("container",container).putInt("count",count).putLong("token",token).apply();
    Log.i("WindowDeck","state_published container="+container+" count="+count);return Bundle.EMPTY;
   }
+  if(HangPlace.PREF.equals(method)){
+   if(!host||getContext()==null)return null;
+   Bundle answer=new Bundle();
+   answer.putBoolean(HangPlace.PREF,getContext().getSharedPreferences(HangPlace.PREF_FILE,0).getBoolean(HangPlace.PREF,HangPlace.DEFAULT));
+   return answer;
+  }
   if(!launcher)return null;
   if("add_task".equals(method)){
    if(extras==null)return null;

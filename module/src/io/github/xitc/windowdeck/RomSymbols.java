@@ -527,4 +527,21 @@ final class RomSymbols {
             return false;
         }
     }
+
+    // ------------------------------------------------------------------ pscanvas menu blur
+    //
+    // These names belong to OplusFlexibleWindowUI, not the launcher. validate() above must not
+    // require them: the launcher class loader does not define them, and a miss there skips the
+    // whole swipe hook.
+    //
+    // Device dex (OplusFlexibleWindowUI.apk, classes.dex, pulled from the phone): AnimLevel's
+    // enum constants are fields c/f/g/h. <clinit> builds field f with the name string "MID_END".
+    // X0.i.<clinit> does sget AnimLevel.f; sput X0.i.a. There is no field named MID_END, so
+    // Class.getField("MID_END") fails on the class that was actually loaded.
+
+    /** pscanvas class whose public static field holds {@code AnimLevel.MID_END}. */
+    static final String MENU_BLUR_LEVEL_CLASS = "X0.i";
+
+    /** {@code public static final AnimLevel} — the MID_END constant, field name {@code a} on this build. */
+    static final String MENU_BLUR_LEVEL_FIELD = "a";
 }

@@ -1,6 +1,6 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="156" android:versionName="0.5.0-dev.156">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="168" android:versionName="0.5.0-dev.168">
  <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35"/>
- <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent><package android:name="com.android.launcher"/><package android:name="com.oplus.pscanvas"/></queries>
+ <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent><package android:name="com.android.launcher"/><package android:name="com.oplus.pscanvas"/><package android:name="tv.acfundanmaku.video"/><package android:name="com.google.android.youtube"/></queries>
  <application android:label="多窗工作台" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true">
   <meta-data android:name="xposedmodule" android:value="true"/>
   <meta-data android:name="xposeddescription" android:value="ColorOS 17 三应用工作台实验，作用于多窗口和桌面上滑面板。"/>

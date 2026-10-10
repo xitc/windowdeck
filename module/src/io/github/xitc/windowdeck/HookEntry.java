@@ -11,11 +11,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
    android.util.Log.i("WindowDeck","load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
   if("com.android.launcher".equals(p.packageName)){
    android.util.Log.i("WindowDeck","launcher_load_package version="+Version.NAME+" process="+p.processName);
-   boolean state=false,existing=false,swipe=false;
+   boolean state=false,existing=false,swipe=false,rotation=false;
    try{LiveWorkbenchState.installLauncher();state=true;}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_state_hook_failed",e);XposedBridge.log(e);}
+   try{RotationTransactions.installLauncher();rotation=true;}catch(Throwable e){android.util.Log.e("WindowDeck","rotation_submitter_hook_failed",e);XposedBridge.log(e);}
    try{LauncherExistingAppHook.install();existing=true;}catch(Throwable e){android.util.Log.e("WindowDeck","existing_launch_hook_failed",e);XposedBridge.log(e);}
    try{swipe=LauncherSwipeHook.install(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_swipe_hook_failed",e);XposedBridge.log(e);}
-   android.util.Log.i("WindowDeck","launcher_hook_ready version="+Version.NAME+" state="+state+" existing="+existing+" swipe="+swipe+" process="+p.processName);
+   android.util.Log.i("WindowDeck","launcher_hook_ready version="+Version.NAME+" state="+state+" existing="+existing+" swipe="+swipe+" rotation="+rotation+" process="+p.processName);
    return;
   }
   if (!"com.oplus.pscanvas".equals(p.packageName)) return;

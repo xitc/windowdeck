@@ -12,6 +12,16 @@ final class OrientationPolicy {
   switch(requested){case 0:case 6:case 8:case 11:return 2;
    case 1:case 7:case 9:case 12:return 1;default:return 0;}
  }
+ /** Starting pose already on screen. An explicit portrait or landscape axis is kept.
+  *  Axis 0 stays an unknown request; the committed render size only names the pose. */
+ static int committedAxis(int requestedAxis,int renderW,int renderH,int displayW,int displayH){
+  if(requestedAxis==1||requestedAxis==2)return requestedAxis;
+  if(requestedAxis!=0||renderW<2||renderH<2||displayW<2||displayH<2)return 0;
+  if(rotatePresentation(renderW,renderH,displayW,displayH))return 2;
+  if(renderH>renderW)return 1;
+  if(renderW>renderH)return 2;
+  return 0;
+ }
  static int[] bounds(int baseW,int baseH,int displayW,int displayH,int axis){
   int shortEdge=Math.max(1,Math.min(displayW,displayH)),longEdge=Math.max(1,Math.max(displayW,displayH));
   if(axis==2)return new int[]{longEdge,shortEdge};

@@ -12,11 +12,12 @@ public final class MainActivity extends Activity {
  private static final String[] DEFAULT_LABELS={"计算器","设置","未添加","未添加","未添加"};
  private final String[] components=new String[SLOTS];
  private final String[] labels=new String[SLOTS];
- private final Button[] picks=new Button[SLOTS]; private TextView status; private Button start, rotate;
- private boolean atomicRotate=AtomicPresentation.DEFAULT;
+ private final Button[] picks=new Button[SLOTS]; private TextView status; private Button start, rotate, plusMode;
+ private boolean atomicRotate=AtomicPresentation.DEFAULT,originalPlus=HangPlace.DEFAULT;
  protected void onCreate(Bundle state){super.onCreate(state);
   for(int i=0;i<SLOTS;i++){components[i]=getPreferences(0).getString("component"+i,DEFAULT_COMPONENTS[i]);labels[i]=getPreferences(0).getString("label"+i,DEFAULT_LABELS[i]);}
   atomicRotate=getPreferences(0).getBoolean("atomic_rotate",AtomicPresentation.DEFAULT);
+  originalPlus=getPreferences(0).getBoolean(HangPlace.PREF,HangPlace.DEFAULT);
   LinearLayout root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(Ui.CHROME);Ui.insets(root);setContentView(root);Ui.darkSystemBars(this);
   ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,-1));
   LinearLayout body=new LinearLayout(this);body.setOrientation(1);int pad=Ui.dp(this,24);body.setPadding(pad,pad,pad,pad);scroll.addView(body);
@@ -29,15 +30,23 @@ public final class MainActivity extends Activity {
   start=Ui.button(this,"用所选应用新建工作台");styleEntry(start);body.addView(start);start.setOnClickListener(v->launch(false));
   rotate=Ui.button(this,rotateLabel());styleEntry(rotate);body.addView(rotate);rotate.setOnClickListener(v->toggleRotate());
   TextView rotateHint=Ui.text(this,"打开后，左右与上下布局的侧窗都收成梯形：朝主窗的那条边缩短，外侧保持满高；主窗永远是矩形。",13,Ui.MUTED);rotateHint.setPadding(0,Ui.dp(this,6),0,0);body.addView(rotateHint);
+  plusMode=Ui.button(this,plusLabel());styleEntry(plusMode);body.addView(plusMode);plusMode.setOnClickListener(v->togglePlus());
+  TextView plusHint=Ui.text(this,"打开后，点侧栏「＋」再从桌面打开的应用进入侧窗，当前主窗保持。关闭时，新应用成为主窗，原来的主窗移到侧栏最后。",13,Ui.MUTED);plusHint.setPadding(0,Ui.dp(this,6),0,0);body.addView(plusHint);
   status=Ui.text(this,"适配 PJZ110 · ColorOS 17\n实验版：退出时解除窗口嵌入，不清除应用数据。",13,Ui.MUTED);status.setPadding(0,pad,0,0);body.addView(status);
  }
  private void styleEntry(Button b){b.setTextColor(Ui.TEXT);b.setBackground(Ui.bg(Ui.CARD,Ui.dp(this,12)));LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,Ui.dp(this,48));lp.topMargin=Ui.dp(this,8);b.setLayoutParams(lp);}
  private String prefix(int i){return i==0?"主应用：":"侧窗 "+i+"：";}
  private String rotateLabel(){return "侧窗梯形："+(atomicRotate?"开":"关");}
+ private String plusLabel(){return "原版添加："+(originalPlus?"开":"关");}
  private void toggleRotate(){
   atomicRotate=!atomicRotate;
   getPreferences(0).edit().putBoolean("atomic_rotate",atomicRotate).apply();
   rotate.setText(rotateLabel());
+ }
+ private void togglePlus(){
+  originalPlus=!originalPlus;
+  getPreferences(0).edit().putBoolean(HangPlace.PREF,originalPlus).apply();
+  plusMode.setText(plusLabel());
  }
  /** Slots past the two required ones can be cleared again, so 2..4 all offer the choice. */
  private void pick(int slot){

@@ -56,14 +56,5 @@ final class Ui {
   RoundOutline(int radius){this.radius=radius;}
   public void getOutline(View view,Outline outline){outline.setRoundRect(0,0,Math.max(0,view.getWidth()),Math.max(0,view.getHeight()),radius);}
  }
- static Button more(Context c){
-  Button b=button(c,"•••");
-  b.setTextSize(22);b.setTextColor(0xe61c1c1c);b.setGravity(Gravity.CENTER);
-  b.setBackgroundColor(0);
-  b.setShadowLayer(4,0,1,0x99ffffff);
-  b.setContentDescription("主应用菜单");
-  b.setClickable(true);b.setFocusable(true);
-  b.setIncludeFontPadding(false);
-  return b;
- }
+ static ControlDots more(Context c){return new ControlDots(c);}
 }
