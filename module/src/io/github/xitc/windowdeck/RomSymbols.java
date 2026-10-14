@@ -544,4 +544,20 @@ final class RomSymbols {
 
     /** {@code public static final AnimLevel} — the MID_END constant, field name {@code a} on this build. */
     static final String MENU_BLUR_LEVEL_FIELD = "a";
+
+    /** Package-private RoundFrameLayout blur request method. */
+    static final String MENU_OPEN_BLUR_METHOD = "w";
+
+    // Complete C17 popup. Signatures verified in OplusFlexibleWindowUI.apk's raw dex.
+    static final String MENU_POPUP_CLASS = "com.coui.appcompat.poplist.q";
+    static final String MENU_ITEM_BUILDER_CLASS = "com.coui.appcompat.poplist.L$a";
+    static final String MENU_ITEM_TITLE_METHOD = "J";
+    static final String MENU_ITEM_ICON_METHOD = "C";
+    static final String MENU_ITEM_BUILD_METHOD = "y";
+    static final String MENU_ITEMS_METHOD = "Y0";
+    static final String MENU_ITEM_CLICK_METHOD = "e1";
+    static final String MENU_SPACING_METHOD = "d1";
+    static final String MENU_BLUR_METHOD = "i1";
+    static final String MENU_SHOW_METHOD = "l1";
+    static final String MENU_DISMISS_IMMEDIATE_METHOD = "k0";
 }

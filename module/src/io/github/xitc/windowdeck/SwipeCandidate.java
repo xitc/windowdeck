@@ -16,6 +16,24 @@ final class SwipeCandidate {
  }
  private SwipeCandidate(){}
  /**
+  * Display is independent of whether the asynchronous task/state snapshot is ready for ingress.
+  * A missing source, unknown state, or a retired container may settle during this gesture. Keep
+  * the entry available, but never use this result to authorize adding a task (see {@link #match}).
+  */
+ static boolean showEntry(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount){
+  if(source<0)return false;
+  if(tasks==null)return true;
+  for(Task info:tasks){
+   if(info==null)continue;
+   if(info.id==source){
+    if(info.userId!=0||info.baseCanvas()||info.topCanvas()
+      ||"com.android.launcher".equals(info.topPackage)||"io.github.xitc.windowdeck".equals(info.topPackage))return false;
+   }
+   if(info.workbench&&info.topCanvas()&&stateKnown&&info.id==stateContainer&&stateCount>=Caps.MAX_TASKS)return false;
+  }
+  return true;
+ }
+ /**
   * @param stateKnown whether a published container and count are already in memory.
   *        A live container with no published state is refused instead of queried here.
   */

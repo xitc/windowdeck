@@ -1,7 +1,14 @@
 package io.github.xitc.windowdeck;
 
-/** C17 entrance pacing, with a bounded Hermite branch for a fresh measured start speed. */
+/** C17 entrance curves, with a bounded Hermite branch for a fresh measured start speed. */
 final class EntranceMotion {
+ /** The non-rotating portrait capture path, independent of ordinary add/rotation pacing. */
+ static boolean portraitHandoff(int turns,int width,int height){return turns==0&&width<height;}
+ /** ZoomState opening uses CubicEaseOutInterpolator, independently of the trigger panel. */
+ static float c17ZoomFraction(float time){
+  float t=Math.max(0,Math.min(1,time)),left=1-t;
+  return 1-left*left*left;
+ }
  static float fraction(float time,float speed){
   float t=Math.max(0,Math.min(1,time)),v=Math.max(0,Math.min(2,Float.isFinite(speed)?speed:0));
   return v==0?c17Fraction(t):t*t*(3-2*t)+v*t*(1-t)*(1-t);
@@ -18,7 +25,7 @@ final class EntranceMotion {
   return (float)(u*u*(3-2*u));
  }
  static String curve(float speed){return speed>0?"entrance_velocity_hermite":"c17_rapid_path";}
- /** Wallpaper uses elapsed time, so the rapid card travel does not abruptly clear its blur. */
+ /** Wallpaper uses elapsed time, so card travel does not abruptly clear its blur. */
  static float backdropFraction(float time){
   float t=Math.max(0,Math.min(1,time));return t*t*(3-2*t);
  }

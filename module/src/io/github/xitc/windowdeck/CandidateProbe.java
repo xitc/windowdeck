@@ -16,6 +16,7 @@ final class CandidateProbe {
  private static volatile Context app;
  private static volatile Snapshot snapshot;
  private static volatile boolean started,loggedFailure,loggedReady;
+ private static boolean refreshRequested;
  private static final class Snapshot {
   final SwipeCandidate.Task[] tasks;
   final boolean providerKnown;
@@ -38,9 +39,18 @@ final class CandidateProbe {
    thread.start();
   }
  }
- /** Wakes the refresher without waiting. Used after a gesture, not during one. */
- static void kick(){synchronized(LOCK){LOCK.notifyAll();}}
+ /** Wakes the refresher without waiting. Gesture boundaries never make binder calls themselves. */
+ static void kick(){synchronized(LOCK){refreshRequested=true;LOCK.notifyAll();}}
  static boolean ready(){return snapshot!=null;}
+ static boolean showEntry(Object handler){
+  if(handler==null)return false;
+  Snapshot shot=snapshot;
+  int[] published=LiveWorkbenchState.published();
+  boolean known=published!=null||(shot!=null&&shot.providerKnown);
+  int container=published!=null?published[0]:shot!=null?shot.providerContainer:-1;
+  int count=published!=null?published[1]:shot!=null?shot.providerCount:0;
+  return SwipeCandidate.showEntry(runningTask(handler),shot==null?null:shot.tasks,known,container,count);
+ }
  static SwipeCandidate.Match match(Object handler){
   Snapshot shot=snapshot;
   if(shot==null||handler==null)return null;
@@ -54,6 +64,7 @@ final class CandidateProbe {
  }
  private static void loop(){
   while(true){
+   synchronized(LOCK){refreshRequested=false;}
    Context current=app;
    if(current!=null)try{
     snapshot=load(current);
@@ -61,7 +72,9 @@ final class CandidateProbe {
    }catch(Throwable e){
     if(!loggedFailure){loggedFailure=true;Log.w(TAG,"candidate_cache_failed",e);}
    }
-   synchronized(LOCK){try{LOCK.wait(REFRESH_MS);}catch(InterruptedException e){return;}}
+   // A gesture may request another snapshot while load() is in flight. Preserve that request
+   // instead of losing its notify and sleeping for a full refresh interval after a stale load.
+   synchronized(LOCK){try{if(!refreshRequested)LOCK.wait(REFRESH_MS);}catch(InterruptedException e){return;}}
   }
  }
  static int runningTask(Object handler){

@@ -9,11 +9,21 @@ final class MotionSpec {
  static final long ENTRANCE_MS = 420;
  static final long REPLACE_MS = 300;
  static final long MULTI_WINDOW_MS = 600;
- enum Scene { ADD, REPLACE, MULTI_WINDOW }
+ enum Scene { ADD, SIDE_ADD, REPLACE, MULTI_WINDOW }
+ /** vivo side-list type 1: X uses 350 ms; Y retains ObjectAnimator's default 300 ms. */
+ static final long SIDE_ADD_DELAY_MS = 150;
+ static final long SIDE_ADD_MS = 350;
+ static final long SIDE_ADD_TOP_BOTTOM_MS = 300;
+ /** Restoring the hung group completes at 500 ms, including the side-card delay. */
+ static final long SIDE_ADD_TOTAL_MS = 500;
  /** A visible task joining the workbench. */
  static final long ADD_CARD_MS = 420;
+ /** C17 ZoomState opening: portrait release card → workbench main card. */
+ static final long PORTRAIT_HANDOFF_MS = 300;
  /** Re-arranging the cards that are already there (promote / pin / layout flip). */
  static final long SWITCH_MS = 360;
+ /** C17 floating-window fullscreen button, ZoomIdleState TRANSIT_FULL (202). */
+ static final long FULLSCREEN_MS = 400;
  /** The hang shelf sliding the live windows to the edge fold. */
  static final long SHELF_MS = 500;
  /** Snapshot → real card hand-off. Short on purpose: the two are already pixel-identical. */
@@ -65,7 +75,7 @@ final class MotionSpec {
   return ENTRANCE_MS;
  }
  static long duration(Scene scene){
-  return scene==Scene.REPLACE?REPLACE_MS:scene==Scene.MULTI_WINDOW?MULTI_WINDOW_MS:ENTRANCE_MS;
+  return scene==Scene.SIDE_ADD?SIDE_ADD_TOTAL_MS:scene==Scene.REPLACE?REPLACE_MS:scene==Scene.MULTI_WINDOW?MULTI_WINDOW_MS:ENTRANCE_MS;
  }
  static float entranceFraction(float fraction,Scene scene,int position){
   return scene==Scene.MULTI_WINDOW?staggered(fraction,position,MULTI_WINDOW_MS):fraction;

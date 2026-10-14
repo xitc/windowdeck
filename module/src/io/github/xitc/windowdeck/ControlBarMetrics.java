@@ -6,14 +6,14 @@ final class ControlBarMetrics {
  static final float[] DOT_X_DP={41.5f,50.5f,59.5f};
  static final int DOT_ON_LIGHT=0x99000000,DOT_ON_DARK=0xE6FFFFFF;
  static final float MENU_ANCHOR_DP=12f,MENU_GAP_DP=8f,MENU_WIDTH_DP=196f,MENU_MIN_DP=168f,MENU_MAX_DP=256f;
- /** RoundFrameLayout corner resource, not the 12 dp content radius. */
- static final float MENU_FRAME_CORNER_DP=28f;
+ /** Ordinary theme-background radius; native smooth corners come from the COUI layout. */
+ static final float MENU_CORNER_DP=12f;
  static final int MENU_BLUR_RADIUS=160;
  static final int MENU_TEXT=0xE6000000,MENU_TEXT_NIGHT=0xE6FFFFFF;
- static final int MENU_FALLBACK=0xFFFFFFFF,MENU_FALLBACK_NIGHT=0xFF242424;
+ static final int MENU_FALLBACK=0xFFFFFFFF,MENU_FALLBACK_NIGHT=0xFF1E1E1E;
  static final int MENU_PRESS=0x08000000,MENU_PRESS_NIGHT=0x0DFFFFFF;
  static final int BLEND_LIGHT=0xBFEEEEEE,MIX_LIGHT=0x99CDCDCD,BLEND_DARK=0x99262626,MIX_DARK=0x99262626;
- static final int BLUR_TYPE=2,BLEND_MODE_LIGHT=3,BLEND_MODE_DARK=2;
+ static final int BLUR_TYPE=2,MENU_BLEND_MODE=4;
 
  static float scale(int cardW,int cardH,int displayW,int displayH){
   if(cardW<=0||cardH<=0||displayW<=0||displayH<=0)return 1f;

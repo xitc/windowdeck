@@ -10,6 +10,7 @@ import java.util.HashMap;
 
 /** Observe ownership before the ROM reuses a leash for an external fullscreen task. */
 final class EmbeddedTaskGuard {
+ private static final String RETIRED="windowdeck.retiredTaskView";
  interface Owner { void changed(boolean embedded); }
  private static final class Entry {
   final int container;final Owner owner;
@@ -29,11 +30,29 @@ final class EmbeddedTaskGuard {
    XposedHelpers.findAndHookMethod(type,"onTaskVanished",ActivityManager.RunningTaskInfo.class,new XC_MethodHook(){
     @Override protected void beforeHookedMethod(MethodHookParam p){update(p.thisObject,(ActivityManager.RunningTaskInfo)p.args[0],true);}
    });
+   XposedHelpers.findAndHookMethod(type,"updateTaskVisibilityWhenSurfaceDestroyed",new XC_MethodHook(){
+    @Override protected void beforeHookedMethod(MethodHookParam p){
+     boolean retired,owned;
+     synchronized(EmbeddedTaskGuard.class){
+      retired=Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(p.thisObject,RETIRED));
+      owned=retired||entries.containsKey(p.thisObject);
+     }
+     if(!owned)return;
+     // C17 calls release() again from onDetachedFromWindow(). It resets mSuperLocked,
+     // so that field cannot protect a queued callback after the task token is cleared.
+     if(retired||XposedHelpers.getObjectField(p.thisObject,"mTaskToken")==null){
+      p.setResult(null);
+      XposedBridge.log("WindowDeck surface_visibility_skipped reason="+(retired?"released":"no_task_token"));
+     }
+    }
+   });
    installed=true;
   }
   entries.put(view,new Entry(container,owner));
  }
- static synchronized void forget(Object view){entries.remove(view);}
+ static synchronized void forget(Object view){
+  if(entries.remove(view)!=null)XposedHelpers.setAdditionalInstanceField(view,RETIRED,Boolean.TRUE);
+ }
  private static void update(Object view,ActivityManager.RunningTaskInfo task,boolean vanished){
   Entry entry;synchronized(EmbeddedTaskGuard.class){entry=entries.get(view);}if(entry==null||task==null)return;
   boolean embedded;

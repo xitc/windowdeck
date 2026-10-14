@@ -8,6 +8,7 @@ final class EntranceRun {
  private Phase phase=Phase.IDLE;
  int begin(long now,long waitMs){generation++;phase=Phase.WAITING;deadline=now+waitMs;return generation;}
  boolean waiting(int token){return token==generation&&phase==Phase.WAITING;}
+ long waitingDeadline(int token){return waiting(token)?deadline:0;}
  boolean running(int token){return token==generation&&phase==Phase.RUNNING;}
  boolean start(int token,long now,long runMs){
   if(!waiting(token)||now>=deadline)return false;

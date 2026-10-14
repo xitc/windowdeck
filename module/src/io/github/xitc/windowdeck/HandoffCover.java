@@ -55,13 +55,19 @@ final class HandoffCover {
  private FrameLayout view;
  private SnapshotMotionView scene;
  private Bitmap bitmap;
+ private boolean bitmapHasContent;
  private Bitmap sourceFrame;
  private Bitmap poseSnapshot;
  private IBinder sourceToken;
  private boolean sourcePixelsPending;
+ private int portraitWidth,portraitHeight;
+ private float[] portraitCrop,portraitBox;
+ private PortraitContentGeometry portraitContent;
+ private PortraitHandoffDeadline portraitDeadline;
  private boolean closed,dispatched;
  private String closedReason;
  private ValueAnimator motion,backgroundMotion;
+ private HandoffFrameTrace frameTrace;
  private Runnable pendingSourceMotion;
  private float geometryProgress,backgroundProgress;
  private boolean backgroundStarted;
@@ -102,12 +108,12 @@ final class HandoffCover {
   // A valid recents display capture can already contain its source card blended
   // with an earlier frame. Keep that capture as background; move the opaque task
   // snapshot independently, and pass those same pixels to the destination host.
-  if(!cover.closed&&(preferTaskFrame||!coverFrame(cover.bitmap))&&taskFrame(taskFrame)){
+  if(!cover.closed&&(preferTaskFrame||!cover.bitmapHasContent)&&taskFrame(taskFrame)){
    cover.sourceFrame=taskFrame;cover.scene.sourceFrame(taskFrame);
    Log.i(TAG,"handoff_source_frame task_snapshot=true live=false size="+taskFrame.getWidth()+"x"+taskFrame.getHeight());
   }else{
    recycle(taskFrame);
-   if(!cover.closed&&!coverFrame(cover.bitmap))cover.close("source_pixels_unavailable");
+   if(!cover.closed&&!cover.bitmapHasContent)cover.close("source_pixels_unavailable");
   }
   return cover;
  }
@@ -122,13 +128,40 @@ final class HandoffCover {
   return create(source,"swipe",null,true,warmFrame,null,token);
  }
 
- /** Only this release's layer capture can arm the source-token cover. */
+ /** Pin task-space geometry before the asynchronous release capture can reply. */
+ boolean preparePortraitSource(int task,int w,int h,float[] crop,RectF box,float[] matrix,long sampledAt){
+  float[] screen=box==null?null:new float[]{box.left,box.top,box.right,box.bottom};
+  if(closed||sourceToken!=null||!EntranceMotion.portraitHandoff(0,captureWidth,captureHeight)
+    ||!PortraitContentGeometry.sourceValid(w,h,crop,screen,matrix))return false;
+  portraitWidth=w;portraitHeight=h;portraitCrop=crop.clone();portraitBox=screen;
+  sourcePixelsPending=true;
+  Log.i(TAG,"handoff_content_source task="+task+" buffer="+w+"x"+h+" task_crop="+java.util.Arrays.toString(portraitCrop)
+    +" screen_crop="+box+" matrix="+java.util.Arrays.toString(matrix)+" sampled_uptime_ms="+sampledAt+" capture_rotation="+captureRotation);
+  return true;
+ }
+ /** Only this release's layer capture can arm the source-token or portrait cover. */
  void acceptSourcePixels(Bitmap frame){
   if(closed||visualDetached||!sourcePixelsPending||poseSnapshot!=null){recycle(frame);return;}
   if(!taskFrame(frame)){recycle(frame);close("release_pixels_unavailable");return;}
+  if(portraitCrop!=null&&(frame.getWidth()!=portraitWidth||frame.getHeight()!=portraitHeight)){
+   recycle(frame);close("portrait_pixels_size_changed");return;
+  }
   sourceFrame=frame;scene.sourceFrame(frame);sourcePixelsPending=false;
   Log.i(TAG,"handoff_source_frame source=release_layers task_snapshot=false live=false size="+frame.getWidth()+"x"+frame.getHeight());
-  tryStartPlan();
+  if(portraitCrop!=null)armDispatch();else tryStartPlan();
+ }
+ /** Host readiness never substitutes for agreement on the bitmap-to-live content mapping. */
+ boolean alignPortraitTarget(int rotation,int[] size,float[] crop,float[] quad,RectF target){
+  if(portraitCrop==null)return true;
+  if(closed||sourcePixelsPending||sourceFrame==null||DisplayGeometry.turns(captureRotation,rotation)!=0)return false;
+  if(portraitContent!=null)return portraitContent.matches(size,crop,quad);
+  float[] box=target==null?null:new float[]{target.left,target.top,target.right,target.bottom};
+  portraitContent=PortraitContentGeometry.create(portraitWidth,portraitHeight,portraitCrop,portraitBox,size,crop,quad,box);
+  if(portraitContent==null){Log.w(TAG,"handoff_content_rejected reason=target_mapping");return false;}
+  scene.portraitContent(portraitContent);
+  Log.i(TAG,"handoff_content_target buffer="+java.util.Arrays.toString(size)+" crop="+java.util.Arrays.toString(crop)
+    +" quad="+java.util.Arrays.toString(quad)+" bitmap=release_layers visual=UNVERIFIED");
+  return true;
  }
 
  /** Same buffer, but able to fall back to a workbench snapshot when the display cannot be
@@ -164,32 +197,36 @@ final class HandoffCover {
    if(captureRotation!=captureRotation(context)){
     Log.w(TAG,"handoff_capture_rotation_changed");recycle(captured);captured=null;
    }
-   if(usable(captured)&&!coverFrame(captured)&&taskFrame(taskFrame)
+   // This owned release bitmap is immutable. Validate it once; hardware-to-CPU
+   // readback for the nine-pixel probe must not repeat along the release path.
+   boolean capturedHasContent=coverFrame(captured);
+   if(usable(captured)&&!capturedHasContent&&taskFrame(taskFrame)
      &&DisplayGeometry.sameAspect(taskFrame.getWidth(),taskFrame.getHeight(),captured.getWidth(),captured.getHeight())){
     Bitmap copy=taskFrame.copy(Bitmap.Config.ARGB_8888,false);
     if(copy!=null){
      Bitmap sized=Bitmap.createScaledBitmap(copy,captured.getWidth(),captured.getHeight(),true);
      if(sized!=copy)recycle(copy);
-     recycle(captured);captured=sized;source="task_snapshot";
+     recycle(captured);captured=sized;capturedHasContent=coverFrame(captured);source="task_snapshot";
      Log.i(TAG,"handoff_cover_bitmap source=task_snapshot live=false size="+captured.getWidth()+"x"+captured.getHeight());
     }
    }
    Bitmap passed=warmFrame,stored=borrowWarm();
    if(stored==passed)stored=null;
-   if(coverFrame(captured)){recycle(passed);recycle(stored);}
+   if(capturedHasContent){recycle(passed);recycle(stored);}
    else if(!holdBleed&&coverFrame(passed)){
-    recycle(captured);recycle(stored);captured=passed;source="warm";
+    recycle(captured);recycle(stored);captured=passed;capturedHasContent=true;source="warm";
     Log.i(TAG,"handoff_cover_bitmap source=warm");
    }else if(!holdBleed&&coverFrame(stored)){
-    recycle(captured);recycle(passed);captured=stored;source="warm";
+    recycle(captured);recycle(passed);captured=stored;capturedHasContent=true;source="warm";
     Log.i(TAG,"handoff_cover_bitmap source=warm");
    }else{
     recycle(passed);recycle(stored);
-    if(!usable(captured)){source="snapshot";captured=fallback==null?null:fallback.capture();}
+    if(!usable(captured)){source="snapshot";captured=fallback==null?null:fallback.capture();capturedHasContent=coverFrame(captured);}
     else Log.w(TAG,"handoff_cover_bitmap source=display usable=false");
    }
    if(!usable(captured))throw new IllegalStateException("No cover bitmap");
    cover.bitmap=captured;
+   cover.bitmapHasContent=capturedHasContent;
    // Launcher stays portrait while the source display can be landscape. Its
    // maximum WindowMetrics therefore cannot describe a display capture. Keep
    // the full returned buffer and its own coordinate size; never crop to the
@@ -429,11 +466,25 @@ final class HandoffCover {
  }
  private void armDispatch(){
   if(closed||view==null||dispatched||destination==null)return;
+  // Finish Recents only after its complete task pixels are retained. A draw callback
+  // for the background screenshot alone cannot discharge this capture barrier.
+  if(portraitCrop!=null&&sourcePixelsPending)return;
   view.getViewTreeObserver().registerFrameCommitCallback(()->main.post(()->dispatch("frame_committed")));
   view.invalidate();main.removeCallbacks(commitTimeout);main.postDelayed(commitTimeout,MotionSpec.FRAME_TIMEOUT_MS);
  }
+ /** The bootstrap parcel and valid READY advance this release's phase; duplicates do not. */
+ void portraitDeadline(PortraitHandoffDeadline deadline){
+  if(closed||portraitCrop==null)return;
+  portraitDeadline=deadline;main.removeCallbacks(releaseTimeout);
+  main.postDelayed(releaseTimeout,Math.max(0L,deadline.deadline()-SystemClock.uptimeMillis()));
+ }
  private void onCoverTimeout(){
   if(closed||visualDetached)return;
+  if(portraitDeadline!=null){
+   long now=SystemClock.uptimeMillis();
+   if(!portraitDeadline.expired(now)){main.postDelayed(releaseTimeout,portraitDeadline.deadline()-now);return;}
+   close("portrait_"+portraitDeadline.phase()+"_timeout");return;
+  }
   long age=SystemClock.uptimeMillis()-started;
   if(sweepOwned&&!reveal.hasLive()&&age<MotionSpec.LANDSCAPE_REVEAL_MS){
    if(!snapshotHeld){snapshotHeld=true;Log.i(TAG,"handoff_snapshot_held ms="+age+" cap_ms="+MotionSpec.LANDSCAPE_REVEAL_MS);}
@@ -442,6 +493,15 @@ final class HandoffCover {
   }
   if(reveal.isRevealing()&&age<MotionSpec.LANDSCAPE_REVEAL_MS){main.postDelayed(releaseTimeout,MotionSpec.CROSS_FADE_MS+32);return;}
   close("watchdog");
+ }
+ /** Once host restoration has dispatched, a static click-add cover belongs to
+  * the current arrival's existing absolute preparation deadline. */
+ boolean holdForArrival(long deadline){
+  if(closed||destination!=null||motion!=null||planned||sourceToken!=null||portraitDeadline!=null
+    ||!reason.startsWith("hang")||deadline<=SystemClock.uptimeMillis())return false;
+  main.removeCallbacks(releaseTimeout);main.postAtTime(releaseTimeout,deadline);
+  Log.i(TAG,"handoff_cover_deadline owner=arrival deadline_uptime_ms="+deadline);
+  return true;
  }
  boolean isClosed(){return closed;}
  /** Bootstrap may arrive before the launcher travel ends. Never freeze it mid-flight. */
@@ -479,6 +539,7 @@ final class HandoffCover {
   if(closed||view==null)return false;
   try{windows.removeViewImmediate(view);}catch(Throwable e){Log.w(TAG,"handoff_cover_motion_release_failed",e);return false;}
   visualDetached=true;
+  if(frameTrace!=null){frameTrace.stop("detached");frameTrace=null;}
   pendingSourceMotion=null;
   main.removeCallbacks(releaseTimeout);
   if(motion!=null){ValueAnimator old=motion;motion=null;old.cancel();}
@@ -580,6 +641,7 @@ final class HandoffCover {
     ||target.width()<1||target.height()<1){
    Log.w(TAG,"handoff_geometry_rejected source="+source+" capture="+captureWidth+"x"+captureHeight+" source_rotation="+captureRotation+" target="+target+" window="+width+"x"+height+" target_rotation="+targetRotation+" turns="+turns);return false;
   }
+  if(portraitCrop!=null&&(portraitContent==null||sourcePixelsPending||edgeDelta(source,new RectF(portraitBox[0],portraitBox[1],portraitBox[2],portraitBox[3]))>.01f))return false;
   if(motion!=null||sweepOwned)return adopt(target,targetRadius,targetBackdrop,turns,liveReady,result);
   if(turns!=0&&planned){
    if(edgeDelta(plannedTarget,target)>1f)Log.i(TAG,"handoff_target_retarget from="+plannedTarget+" to="+target);
@@ -627,6 +689,8 @@ final class HandoffCover {
  }
  private void beginMotion(RectF source,float sourceRadius,RectF target,float targetRadius,Bitmap targetBackdrop,int turns,float[] velocity,long sampledAt,boolean liveReady){
   if(closed||view==null||scene==null)return;
+  final boolean portraitEntrance=EntranceMotion.portraitHandoff(turns,captureWidth,captureHeight);
+  final long duration=portraitEntrance?MotionSpec.PORTRAIT_HANDOFF_MS:MotionSpec.ADD_CARD_MS;
   float[] rebased=DisplayGeometry.rect(new float[]{source.left,source.top,source.right,source.bottom},captureWidth,captureHeight,turns);
   RectF portrait=new RectF(rebased[0],rebased[1],rebased[2],rebased[3]);
   Drawable wallpaper=usable(targetBackdrop)?new android.graphics.drawable.BitmapDrawable(view.getResources(),targetBackdrop):null;
@@ -640,7 +704,7 @@ final class HandoffCover {
    else scene.configure(portrait,sourceRadius,target,targetRadius,wallpaper);
   }
   if(liveReady)reveal.liveReady();
-  if(wallpaper!=null||liveReady)startBackground(wallpaper,MotionSpec.ADD_CARD_MS);
+  if(wallpaper!=null||liveReady)startBackground(wallpaper,duration);
   view.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
    if(closed||visualDetached)return;
    int w=r-l,h=b-t;
@@ -652,10 +716,11 @@ final class HandoffCover {
   // Age is the real sample age. Do not clamp it under 120 ms to force a nonzero start speed.
   final float[] speed={0};
   final long[] last={0},gap={0};final int[] frames={0};
-  run.setDuration(MotionSpec.ADD_CARD_MS);run.setInterpolator(null);
-  run.addUpdateListener(a->{if(!closed&&motion==a){long now=SystemClock.uptimeMillis();if(last[0]>0)gap[0]=Math.max(gap[0],now-last[0]);last[0]=now;frames[0]++;float time=(Float)a.getAnimatedValue();geometryProgress=EntranceMotion.fraction(time,speed[0]);moving.progress(geometryProgress,backgroundProgress);}});
+  run.setDuration(duration);run.setInterpolator(null);
+  run.addUpdateListener(a->{if(!closed&&motion==a){long now=SystemClock.uptimeMillis();if(last[0]>0)gap[0]=Math.max(gap[0],now-last[0]);last[0]=now;frames[0]++;float time=(Float)a.getAnimatedValue();geometryProgress=portraitEntrance?EntranceMotion.c17ZoomFraction(time):EntranceMotion.fraction(time,speed[0]);moving.progress(geometryProgress,backgroundProgress);}});
   run.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
    if(closed||motion!=a)return;motion=null;
+   if(frameTrace!=null){frameTrace.stop("motion_end");frameTrace=null;}
    Log.i(TAG,"handoff_motion_frames callbacks="+frames[0]+" max_gap_ms="+gap[0]+" owner=ui_animator");
    final boolean[] committed={false};
    moving.getViewTreeObserver().registerFrameCommitCallback(()->main.post(()->{
@@ -666,9 +731,10 @@ final class HandoffCover {
   }});
   Runnable start=()->{
    long age=SystemClock.uptimeMillis()-sampledAt;
-   speed[0]=EntranceMotion.startSpeed(new float[]{portrait.left,portrait.top,portrait.right,portrait.bottom},new float[]{target.left,target.top,target.right,target.bottom},DisplayGeometry.velocity(velocity,turns),age,MotionSpec.ADD_CARD_MS);
+   if(!portraitEntrance)speed[0]=EntranceMotion.startSpeed(new float[]{portrait.left,portrait.top,portrait.right,portrait.bottom},new float[]{target.left,target.top,target.right,target.bottom},DisplayGeometry.velocity(velocity,turns),age,duration);
+   if(portraitEntrance){frameTrace=new HandoffFrameTrace();frameTrace.start();}
    run.start();
-   Log.i(TAG,"handoff_snapshot_motion source="+portrait+" target="+target+" rotation_turns="+turns+" duration_ms="+MotionSpec.ADD_CARD_MS+" waiting_ms="+(SystemClock.uptimeMillis()-started)+" age_ms="+age+" curve="+EntranceMotion.curve(speed[0])+" start_speed="+speed[0]+" sweep="+(turns!=0)+" playhead_ms=0");
+   Log.i(TAG,"handoff_snapshot_motion source="+portrait+" target="+target+" rotation_turns="+turns+" duration_ms="+duration+" waiting_ms="+(SystemClock.uptimeMillis()-started)+" age_ms="+age+" curve="+(portraitEntrance?"c17_zoom_cubic_out":EntranceMotion.curve(speed[0]))+" start_speed="+(portraitEntrance?3f:speed[0])+" sweep="+(turns!=0)+" playhead_ms=0");
   };
   // Paint the matching release pose while Recents is still above Launcher.
   // Travel starts after the source-token window is shown and that task is veiled.
@@ -720,6 +786,7 @@ final class HandoffCover {
   Runnable action=destination;destination=null;action.run();
  }
  void close(String why){
+  if(frameTrace!=null){frameTrace.stop("closed_"+why);frameTrace=null;}
   if(closed)return;closed=true;closedReason=why;reveal.cancel();pendingSourceMotion=null;
   main.removeCallbacks(commitTimeout);main.removeCallbacks(releaseTimeout);
   if(backgroundMotion!=null){backgroundMotion.cancel();backgroundMotion=null;}

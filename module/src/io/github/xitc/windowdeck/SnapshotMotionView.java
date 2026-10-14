@@ -9,11 +9,12 @@ import android.view.View;
 final class SnapshotMotionView extends View {
  private final Bitmap release;
  private Bitmap sourceFrame;
+ private PortraitContentGeometry portraitContent;
  private final RectF source=new RectF(),target=new RectF(),current=new RectF();
  private final Matrix displayMap=new Matrix(),motionMap=new Matrix();
  private float fromRadius,toRadius;
  private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
- private final Path outline=new Path();
+ private final Path outline=new Path(),sourceOutline=new Path();
  private Drawable wallpaper;
  private final int width,height;
  private int turns;
@@ -33,6 +34,7 @@ final class SnapshotMotionView extends View {
  }
  int sweepTurns(){return turns;}
  void sourceFrame(Bitmap frame){sourceFrame=frame;invalidate();}
+ void portraitContent(PortraitContentGeometry geometry){portraitContent=geometry;invalidate();}
  void holdBleed(){holdBleed=true;invalidate();}
  /** Fires once the release bitmap is in this frame, not when only chrome was painted. */
  void whenReleasePainted(Runnable listener){releaseListener=listener;if(releasePainted&&listener!=null)post(listener);}
@@ -49,6 +51,7 @@ final class SnapshotMotionView extends View {
  void configure(RectF source,float fromRadius,RectF target,float toRadius,Drawable wallpaper){
   this.source.set(source);this.target.set(target);
   this.fromRadius=fromRadius;this.toRadius=toRadius;this.wallpaper=wallpaper;
+  sourceOutline.reset();sourceOutline.addRoundRect(source,fromRadius,fromRadius,Path.Direction.CW);
   progress=0;backgroundProgress=0;moving=true;invalidate();
  }
  void configureSweep(RectF capture,float fromRadius,RectF target,float toRadius,Drawable wallpaper){
@@ -116,15 +119,25 @@ final class SnapshotMotionView extends View {
   else canvas.drawColor(Ui.CHROME);
   if(wallpaper!=null){wallpaper.setBounds(0,0,getWidth(),getHeight());wallpaper.draw(canvas);}
   // Never leave a frozen copy of the source task in the fading desktop background.
-  int saved=canvas.save();canvas.clipOutRect(source);paint.setAlpha(Math.round(255*(1-backgroundProgress)));
+  // Keep the captured backdrop in the source's rounded corners. A rectangular
+  // hole exposes destination wallpaper there before the rounded card has moved.
+  int saved=canvas.save();canvas.clipOutPath(sourceOutline);paint.setAlpha(Math.round(255*(1-backgroundProgress)));
   canvas.drawBitmap(release,displayMap,paint);canvas.restoreToCount(saved);
   current.set(MotionSpec.lerp(source.left,target.left,progress),MotionSpec.lerp(source.top,target.top,progress),
    MotionSpec.lerp(source.right,target.right,progress),MotionSpec.lerp(source.bottom,target.bottom,progress));
   float radius=MotionSpec.lerp(fromRadius,toRadius,progress);
   outline.reset();outline.addRoundRect(current,radius,radius,Path.Direction.CW);
   saved=canvas.save();canvas.clipPath(outline);paint.setAlpha(255);
-  motionMap.setRectToRect(source,current,Matrix.ScaleToFit.FILL);motionMap.preConcat(displayMap);
-  canvas.drawBitmap(release,motionMap,paint);canvas.restoreToCount(saved);noteRelease();
+  if(portraitContent!=null&&sourceFrame!=null){
+   PortraitContentGeometry.Frame frame=portraitContent.frame(progress);float[] crop=frame.crop;
+   float[] contentPixels={crop[0],crop[1],crop[2],crop[1],crop[2],crop[3],crop[0],crop[3]};
+   motionMap.setPolyToPoly(contentPixels,0,frame.quad,0,4);
+   canvas.drawBitmap(sourceFrame,motionMap,paint);
+  }else{
+   motionMap.setRectToRect(source,current,Matrix.ScaleToFit.FILL);motionMap.preConcat(displayMap);
+   canvas.drawBitmap(release,motionMap,paint);
+  }
+  canvas.restoreToCount(saved);noteRelease();
   }finally{canvas.restoreToCount(stageSave);}
  }
  private void drawSweep(Canvas canvas,float amount){

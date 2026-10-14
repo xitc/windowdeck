@@ -7,7 +7,7 @@ package io.github.xitc.windowdeck;
 final class TaskSurfaceEvidence {
  static final int LIVE_CONTENT = 3; // Module fallback, not a C17 hasDrawnWindow value.
  private int task=-1,leash=-1,plate=-1,width,height,renderWidth,renderHeight,generation;
- private boolean content,pending;
+ private boolean content,pending,applicationWindow;
  boolean bind(int task,int leash,int plate,int width,int height){
   return bind(task,leash,plate,width,height,width,height);
  }
@@ -26,12 +26,29 @@ final class TaskSurfaceEvidence {
   if(state==1||state==2)return state;
   return content?LIVE_CONTENT:-1;
  }
+ /** Picker arrivals must distinguish WM's non-Splash draw signal from opaque
+  * starting-window pixels. Keep the signal only within this exact native binding. */
+ int resolveArrival(int cached,int bundle,boolean hasBundleState,boolean cold){
+  int state=cached>=0&&cached<=2?cached:(hasBundleState?bundle:-1);
+  if(state==0){
+   if(applicationWindow||content||pending)clearArrivalContent();
+   applicationWindow=false;return 0;
+  }
+  if((state==1||state==2)&&!applicationWindow){
+   // Discard a sample begun before the first application window was drawn.
+   clearArrivalContent();applicationWindow=true;
+  }
+  if(cold&&!applicationWindow)return -1;
+  return content?LIVE_CONTENT:-1;
+ }
+ boolean canProbeArrival(boolean cold){return !cold||applicationWindow;}
+ private void clearArrivalContent(){generation++;content=false;pending=false;}
  int beginProbe(){if(pending||content||task<0)return -1;pending=true;return generation;}
  boolean completeProbe(int token,boolean hasContent){
   if(token!=generation||!pending)return false;
   pending=false;content=hasContent;return true;
  }
- void invalidate(){generation++;content=false;pending=false;task=-1;leash=-1;plate=-1;width=height=renderWidth=renderHeight=0;}
+ void invalidate(){generation++;content=false;pending=false;applicationWindow=false;task=-1;leash=-1;plate=-1;width=height=renderWidth=renderHeight=0;}
  static boolean ready(int state){return state==1||state==2||state==LIVE_CONTENT;}
  boolean hasContent(){return content;}
  /** Transport validation for a fresh, task-bound WM snapshot. Black loading
