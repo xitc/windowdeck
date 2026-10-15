@@ -2,6 +2,12 @@ package io.github.xitc.windowdeck;
 
 /** Source/bootstrap, host readiness and presentation are separate bounded phases. */
 final class PortraitHandoffDeadline {
+ /** Host-side guard for the source's fixed limit, before sending HOST_STARTED. */
+ static boolean validHostStart(boolean deferPortrait,int axis,boolean hasReply,long limit,long now,long budget){
+  // 0 is unspecified, 1 is explicit portrait. Neither needs the landscape bridge.
+  return !deferPortrait&&(axis==0||axis==1)&&hasReply&&now>=0&&budget>0&&budget<=Long.MAX_VALUE/2
+    &&limit>now&&limit-now<=2*budget;
+ }
  private final int task;
  private final long started,budget,limit;
  private long readyDeadline,reportedDeadline;

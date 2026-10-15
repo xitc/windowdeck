@@ -99,6 +99,7 @@ final class CanvasImeBridge {
     private static Activity host;
     private static boolean floating, transformed;
     private static final Rect frame = new Rect(), display = new Rect();
+    private static boolean frameKnown, frameVisible;
     private static volatile int session;
     private static String lastResult = "idle";
     private static int frameUpdates, controlUpdates;
@@ -111,6 +112,18 @@ final class CanvasImeBridge {
     static boolean floating() { return floating; }
 
     static void refresh(Activity activity) { if (host == activity) updateSurface(); }
+
+    static int bottomInset(Activity activity, int hostTop, int hostBottom) {
+        if (host != activity || !frameKnown) return -1;
+        return ImeAvoidance.bottom(frameVisible && !Boolean.FALSE.equals(wantVisible),
+                frame.left, frame.top, frame.right, frame.bottom,
+                display.left, display.top, display.right, display.bottom, hostTop, hostBottom);
+    }
+
+    private static void updateHostInsets() {
+        if (host instanceof WorkbenchActivity && WorkbenchActivity.foreground)
+            ((WorkbenchActivity) host).applyImeInsets();
+    }
 
     private static boolean rotateWithPrimary() {
         return host instanceof WorkbenchActivity && ((WorkbenchActivity) host).rotatePrimaryIme();
@@ -134,7 +147,7 @@ final class CanvasImeBridge {
         return "version=" + Version.NAME + " enabled=" + floating + " foreground=" + WorkbenchActivity.foreground
                 + " host=" + (host != null) + " rotatePrimary=" + rotateWithPrimary() + " requested=" + wantVisible + " transformed=" + transformed
                 + " leashValid=" + (imeLeash != null && imeLeash.isValid()) + " position=" + leashX + "," + leashY
-                + " frame=" + frame + " display=" + display + " frameUpdates=" + frameUpdates
+                + " frame=" + frame + " display=" + display + " frameKnown=" + frameKnown + " frameVisible=" + frameVisible + " frameUpdates=" + frameUpdates
                 + " controlUpdates=" + controlUpdates + " result=" + lastResult + " failure=" + failure;
     }
 
@@ -152,6 +165,7 @@ final class CanvasImeBridge {
         restoreTransform();
         imeLeash = null; wantVisible = null; host = null;
         frame.setEmpty(); display.setEmpty(); floating = false;
+        frameKnown = false; frameVisible = false;
         lastResult = "stopped";
     }
 
@@ -181,6 +195,7 @@ final class CanvasImeBridge {
     }
 
     private static void updateSurface() {
+        updateHostInsets();
         if (!WorkbenchActivity.foreground || host == null || wantVisible == null) return;
         applySurface(wantVisible.booleanValue());
     }
@@ -194,10 +209,12 @@ final class CanvasImeBridge {
             Object source = state.getClass().getMethod("peekSource", int.class).invoke(state, id);
             final Rect nextFrame = source == null ? new Rect() : new Rect((Rect) sourceClass.getMethod("getFrame").invoke(source));
             final Rect nextDisplay = new Rect((Rect) state.getClass().getMethod("getDisplayFrame").invoke(state));
+            final boolean nextVisible = source != null && (Boolean) sourceClass.getMethod("isVisible").invoke(source);
             final int expected = session;
             main.post(() -> {
                 if (expected != session || !WorkbenchActivity.foreground || host == null) return;
-                frame.set(nextFrame); display.set(nextDisplay); frameUpdates++; updateSurface();
+                frame.set(nextFrame); display.set(nextDisplay); frameKnown = true; frameVisible = nextVisible;
+                frameUpdates++; updateSurface();
             });
         } catch (Throwable e) { failure = "frame:" + e.getClass().getSimpleName(); Log.w(TAG, "canvas_ime_frame_failed", e); }
     }
@@ -347,6 +364,7 @@ final class CanvasImeBridge {
 
     /** What {@code y0.D()} plus y0's leash pass would have done, minus the slide animation. */
     private static void apply(boolean visible) {
+        updateHostInsets();
         try {
             if (pushVisibleTypes == null) bindWindowManager();
             if (pushVisibleTypes != null) {

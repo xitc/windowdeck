@@ -29,6 +29,16 @@ public final class WorkbenchStateProvider extends ContentProvider {
    answer.putBoolean(HangPlace.PREF,getContext().getSharedPreferences(HangPlace.PREF_FILE,0).getBoolean(HangPlace.PREF,HangPlace.DEFAULT));
    return answer;
   }
+  if(MainWindowSettings.WRITE.equals(method)){
+   if(!host||extras==null||!extras.containsKey(MainWindowSettings.PREF))return null;
+   int value=CardLayout.mainPercent(extras.getInt(MainWindowSettings.PREF));
+   if(!getContext().getSharedPreferences(MainWindowSettings.PREF_FILE,0).edit().putInt(MainWindowSettings.PREF,value).commit())return null;
+   Bundle answer=new Bundle();answer.putInt(MainWindowSettings.PREF,value);return answer;
+  }
+  if(MainWindowSettings.PREF.equals(method)){
+   if(!host&&!launcher)return null;
+   Bundle answer=new Bundle();answer.putInt(MainWindowSettings.PREF,MainWindowSettings.local(getContext()));return answer;
+  }
   if(!launcher)return null;
   if("add_task".equals(method)){
    if(extras==null)return null;

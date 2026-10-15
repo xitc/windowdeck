@@ -20,6 +20,8 @@ public final class HookEntry implements IXposedHookLoadPackage {
    return;
   }
   if (!"com.oplus.pscanvas".equals(p.packageName)) return;
+  try{CanvasContract.load(p.classLoader);android.util.Log.i("WindowDeck","canvas_contract_ready version="+Version.NAME);}
+  catch(Throwable e){android.util.Log.e("WindowDeck","canvas_contract_failed version="+Version.NAME+" custom_hooks=skipped",e);XposedBridge.log(e);return;}
   boolean activity=false,leash=false,ime=false,back=false;
   try{hookWorkbenchActivity();activity=true;}catch(Throwable e){android.util.Log.e("WindowDeck","custom_activity_hook_failed",e);XposedBridge.log(e);}
   try{LeashTransactions.install();leash=true;}catch(Throwable e){android.util.Log.e("WindowDeck","leash_atomic_hook_failed",e);}
@@ -40,7 +42,7 @@ public final class HookEntry implements IXposedHookLoadPackage {
  // Side cards keep mInterceptInputEvent so the container owns their touches.
  // ColorOS copies that field onto the task and then drops KEYCODE_BACK.
  private static void hookBackKeyPassthrough(ClassLoader loader){
-  XposedHelpers.findAndHookMethod("com.oplus.flexiblewindow.FlexibleTaskView",loader,"prepareActivityOptions",new XC_MethodHook(){
+  XposedHelpers.findAndHookMethod(CanvasContract.TASK_VIEW,loader,"prepareActivityOptions",new XC_MethodHook(){
    protected void afterHookedMethod(MethodHookParam param){
     try{
      if(!workbenchView(param.thisObject))return;

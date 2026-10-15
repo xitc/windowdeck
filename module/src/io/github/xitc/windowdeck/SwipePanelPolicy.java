@@ -15,6 +15,11 @@ final class SwipePanelPolicy {
  static boolean selected(float progress,float trigger,float offset,float halfGap){
   return selectable(progress,trigger)&&Math.abs(offset)<=halfGap;
  }
+ /** Selection is the ROM's logical centre zone, independent of the animated chip rectangle. */
+ static boolean releaseSelected(float progress,float trigger,float offset,float halfGap,int axisCode){
+  return Float.isFinite(progress)&&Float.isFinite(trigger)&&Float.isFinite(offset)&&Float.isFinite(halfGap)
+    &&trigger>0&&halfGap>0&&claimsCentre(axisCode)&&selected(progress,trigger,offset,halfGap);
+ }
  /**
   * The zone bits of the launcher's axis code that mean "this option can be picked right now".
   * Below it the code carries 32 (on screen, not pickable) or 16 (off screen).

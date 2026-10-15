@@ -18,7 +18,7 @@ final class ControlDots extends View {
   setForceDarkAllowed(false);
   setBackgroundColor(0);
   setClickable(true);setFocusable(true);
-  setContentDescription("主应用菜单");
+  setContentDescription("主应用菜单，长按调整主窗口大小");
  }
  void setLightContent(boolean lightContent){
   if(this.lightContent==lightContent)return;

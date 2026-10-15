@@ -48,8 +48,6 @@ final class HandoffCover {
 
  private static final String TAG="WindowDeck";
  private static HandoffCover active;
- /** Last non-black, non-white frame taken at gesture start. Released by the next cover or gesture end. */
- private static Bitmap warm;
  private final Handler main=new Handler(Looper.getMainLooper());
  private WindowManager windows;
  private FrameLayout view;
@@ -92,19 +90,13 @@ final class HandoffCover {
  private HandoffCover(String reason){this.reason=reason;}
 
  static HandoffCover create(Context context){
-  return create(context,"swipe",null,false,null);
+  return create(context,"swipe",null,false,null,null);
  }
 
- /** Landscape swipe. {@code holdBleed} keeps the first buffer chrome until the release crop is armed.
-  *  {@code warm} replaces a black or white capture and is recycled when unused. */
- static HandoffCover create(Context context,boolean holdBleed,Bitmap warm){
-  return create(context,"swipe",null,holdBleed,warm);
- }
- static HandoffCover create(Context context,boolean holdBleed,Bitmap warm,Bitmap taskFrame){
-  return create(context,holdBleed,warm,taskFrame,false);
- }
- static HandoffCover create(Context context,boolean holdBleed,Bitmap warm,Bitmap taskFrame,boolean preferTaskFrame){
-  HandoffCover cover=create(context,"swipe",null,holdBleed,warm);
+ /** Landscape swipe. Keep the first buffer hidden until the release crop is armed.
+  * Capture at release; an earlier gesture frame must not replace the current pose. */
+ static HandoffCover create(Context context,boolean holdBleed,Bitmap taskFrame,boolean preferTaskFrame){
+  HandoffCover cover=create(context,"swipe",null,holdBleed,null,null);
   // A valid recents display capture can already contain its source card blended
   // with an earlier frame. Keep that capture as background; move the opaque task
   // snapshot independently, and pass those same pixels to the destination host.
@@ -121,11 +113,11 @@ final class HandoffCover {
  /** A first landscape entry stays in the source application's native transition.
   * No system-overlay token is created, so AsyncRotationController cannot rotate
   * an old overlay buffer independently of the destination application window. */
- static HandoffCover createSource(android.app.Activity source,Bitmap warmFrame){
+ static HandoffCover createSource(android.app.Activity source){
   WindowManager.LayoutParams attached=(WindowManager.LayoutParams)source.getWindow().getDecorView().getLayoutParams();
   IBinder token=attached==null?null:attached.token;
   if(token==null)throw new IllegalStateException("Missing source application token");
-  return create(source,"swipe",null,true,warmFrame,null,token);
+  return create(source,"swipe",null,true,null,token);
  }
 
  /** Pin task-space geometry before the asynchronous release capture can reply. */
@@ -167,21 +159,15 @@ final class HandoffCover {
  /** Same buffer, but able to fall back to a workbench snapshot when the display cannot be
   *  captured — for the workbench process the privileged capture API is not guaranteed. */
  static HandoffCover create(Context context,String reason,Snapshot fallback){
-  return create(context,reason,fallback,false,null);
+  return create(context,reason,fallback,false,null,null);
  }
  /** The caller retains its task snapshot for the host arrival. Copy it only if
   * captureDisplay returned black and the task fills that same source viewport. */
  static HandoffCover create(Context context,String reason,Snapshot fallback,Bitmap taskFrame){
-  return create(context,reason,fallback,false,null,taskFrame);
+  return create(context,reason,fallback,false,taskFrame,null);
  }
 
- private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap warmFrame){
-  return create(context,reason,fallback,holdBleed,warmFrame,null);
- }
- private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap warmFrame,Bitmap taskFrame){
-  return create(context,reason,fallback,holdBleed,warmFrame,taskFrame,null);
- }
- private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap warmFrame,Bitmap taskFrame,IBinder sourceToken){
+ private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap taskFrame,IBinder sourceToken){
   if(active!=null)active.close("superseded");
   HandoffCover cover=new HandoffCover(reason);
   cover.sourceToken=sourceToken;cover.sourcePixelsPending=sourceToken!=null;
@@ -210,17 +196,7 @@ final class HandoffCover {
      Log.i(TAG,"handoff_cover_bitmap source=task_snapshot live=false size="+captured.getWidth()+"x"+captured.getHeight());
     }
    }
-   Bitmap passed=warmFrame,stored=borrowWarm();
-   if(stored==passed)stored=null;
-   if(capturedHasContent){recycle(passed);recycle(stored);}
-   else if(!holdBleed&&coverFrame(passed)){
-    recycle(captured);recycle(stored);captured=passed;capturedHasContent=true;source="warm";
-    Log.i(TAG,"handoff_cover_bitmap source=warm");
-   }else if(!holdBleed&&coverFrame(stored)){
-    recycle(captured);recycle(passed);captured=stored;capturedHasContent=true;source="warm";
-    Log.i(TAG,"handoff_cover_bitmap source=warm");
-   }else{
-    recycle(passed);recycle(stored);
+   if(!capturedHasContent){
     if(!usable(captured)){source="snapshot";captured=fallback==null?null:fallback.capture();capturedHasContent=coverFrame(captured);}
     else Log.w(TAG,"handoff_cover_bitmap source=display usable=false");
    }
@@ -271,7 +247,6 @@ final class HandoffCover {
    cover.main.postDelayed(cover.releaseTimeout,MotionSpec.COVER_TIMEOUT_MS);
   }catch(Throwable e){
    Log.w(TAG,"handoff_cover_unavailable reason="+reason,e);
-   if(cover.bitmap!=warmFrame)recycle(warmFrame);
    cover.close("unavailable");
   }
   return cover;
@@ -387,16 +362,6 @@ final class HandoffCover {
   }catch(Throwable e){Log.w(TAG,"handoff_cover_sample_failed",e);return null;}
   finally{recycle(copy);}
  }
-
- static void remember(Bitmap bitmap){
-  if(bitmap!=null&&bitmap.isRecycled())bitmap=null;
-  Bitmap old=warm;warm=bitmap;
-  if(old!=null&&old!=warm)recycle(old);
- }
-
- static void forgetWarm(){recycle(borrowWarm());}
-
- private static Bitmap borrowWarm(){Bitmap frame=warm;warm=null;return frame;}
 
  /** Runs once, before the cover fades, so the launcher recents leash is already hidden. */
  void concealUnderlay(Runnable action){if(!closed&&action!=null)underlay=action;}

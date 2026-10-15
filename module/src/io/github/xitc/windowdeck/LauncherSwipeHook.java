@@ -95,7 +95,7 @@ private static volatile String CLAIM_PROBLEM;
 private static volatile boolean CLAIM_PROBED,TRACED_CLAIM_ANSWERED;
 /** One-shot per gesture, so "the gate is off" is visible without logging every frame. */
 private static volatile boolean TRACED_MID;
-private static final class State { final SourceMotion sourceMotion=new SourceMotion(); int sourceGeneration,sourceTask=-1,gestureTask=-1; Bitmap sourceFrame; LinearLayout zone; View icon; TextView label; WorkbenchMark mark; PanelBg background; SwipeCandidate.Match candidate; float progress,trigger,startShow; boolean tracedProgress,tracedZone,selected,fadedForWindowAnim,claimedCentre,tracedClaimStop; float expansion; ValueAnimator expansionAnimator; Runnable hover; float alpha=1; boolean alphaOn=true,tracedRetire,tracedRestore; ValueAnimator alphaAnimator; }
+private static final class State { final SourceMotion sourceMotion=new SourceMotion(); int sourceGeneration,sourceTask=-1,gestureTask=-1; Bitmap sourceFrame; LinearLayout zone; View icon; TextView label; WorkbenchMark mark; PanelBg background; SwipeCandidate.Match candidate; float progress,trigger,startShow; boolean tracedProgress,tracedZone,selected,fadedForWindowAnim,claimedCentre,tracedClaimStop; float expansion; ValueAnimator expansionAnimator; float alpha=1; boolean alphaOn=true,tracedRetire,tracedRestore; ValueAnimator alphaAnimator; }
 private static final GestureHandoffOwners HANDOFF_OWNERS=new GestureHandoffOwners();
  /** @return whether the swipe hooks were installed. A ROM mismatch returns false and installs nothing. */
  static boolean install(ClassLoader loader){
@@ -227,7 +227,8 @@ private static void onGestureStart(View panel) throws Exception {
      +" offered="+offered+" source="+CandidateProbe.runningTask(swipe)
      +" cache="+(CandidateProbe.ready()?"warm":"cold")+" total="+(SystemClock.uptimeMillis()-began)+"ms");
  CandidateProbe.kick();
- int shield=GestureShield.begin();
+ // HOME/RECENTS/cancel still belong to Launcher. Never cover the finger-driven
+ // task with a display snapshot before release selects a workbench handoff.
  final int sourceGeneration=++state.sourceGeneration;
  HandoffCover.recycle(state.sourceFrame);state.sourceFrame=null;state.sourceTask=-1;
  if(MID_ACTIVE&&candidate!=null&&candidate.container>=0&&SwipePanelPolicy.landscapeStack(rotation(panel))){
@@ -248,20 +249,8 @@ private static void onGestureStart(View panel) throws Exception {
    });
   },"windowdeck-source").start();
  }
- if(MID_ACTIVE&&SwipePanelPolicy.landscapeStack(rotation(panel))){
-  Context shieldContext=panel.getContext();
-  int displayId=0;
-  try{android.view.Display display=shieldContext.getDisplay();if(display!=null)displayId=display.getDisplayId();}catch(Throwable ignored){}
-  final int shieldDisplay=displayId;
-  new Thread(()->{
-   Bitmap shot=HandoffCover.captureNow(shieldDisplay);
-   panel.post(()->GestureShield.show(shieldContext,shot,shield));
-  },"windowdeck-shield").start();
- }
 }
  private static void onGestureEnd(View panel){
-  GestureShield.dismiss(false);
-  HandoffCover.forgetWarm();
   State state=STATES.get(panel);if(state!=null){state.sourceMotion.reset();state.sourceGeneration++;HandoffCover.recycle(state.sourceFrame);state.sourceFrame=null;state.sourceTask=-1;}
   Object params=params(panel);
   if(params!=null)ELIGIBLE_PARAMS.remove(params);
@@ -495,7 +484,6 @@ private static void anchor(RectF rect,boolean left,float inner,float width){
    Object gate=params(panel);
    if(gate!=null)s.startShow=XposedHelpers.getFloatField(gate,RomSymbols.PARAMS_START_SHOW);
   }catch(Throwable ignored){}
-  if(s.startShow>0f&&value>=s.startShow+0.12f)GestureShield.dismiss(true);
   if(value>0&&!s.tracedProgress){s.tracedProgress=true;XposedBridge.log("WindowDeck swipe_progress status="+panelStatus(panel)+" visible="+(panel.getVisibility()==View.VISIBLE)+" value="+value);}
   if(!(panel instanceof FrameLayout))return;
   if(s.zone==null){
@@ -555,7 +543,7 @@ private static void anchor(RectF rect,boolean left,float inner,float width){
   // it the capsule's icon lands on the card's icon and both titles are legible at once, in the same
   // box. See SwipePanelPolicy.stillCurrent for the rule and where it comes from.
   int axis=axisCode(panel);
-  if(!SwipePanelPolicy.stillCurrent(axis)){cardCurrent(panel,s,false,axis);retireCapsules(panel,s,axis);return;}
+  if(!SwipePanelPolicy.stillCurrent(axis)){cardCurrent(panel,s,false,axis);updateSelection(panel);retireCapsules(panel,s,axis);return;}
   cardCurrent(panel,s,true,axis);
   // Nothing is animated here on purpose. The launcher resets each option view to scale 1.0 and
   // alpha 1.0 for the whole gesture (initAnimation -> resetViewScale/resetViewAlpha), and its show
@@ -703,20 +691,15 @@ private static float[] landscapeSpan(Object params){
   return new float[]{upper.left,upper.right,upper.bottom,lower.top};
  }
  private static void resetExpansion(View panel,State s){
-  if(s.hover!=null){panel.removeCallbacks(s.hover);s.hover=null;}
   if(s.expansionAnimator!=null){s.expansionAnimator.cancel();s.expansionAnimator=null;}
   s.selected=false;s.expansion=0;
  }
  private static void updateSelection(View panel){
   State s=STATES.get(panel);if(s==null||s.zone==null)return;
   Object params=params(panel);if(params==null)return;
-  boolean selected=s.zone.getVisibility()==View.VISIBLE&&SwipePanelPolicy.selected(s.progress,s.trigger,centerOffset(panel),dp(panel.getContext(),64));
-  if(!selected&&s.hover!=null){panel.removeCallbacks(s.hover);s.hover=null;}
-  if(selected==s.selected)return;
-  if(selected){
-   if(s.hover!=null)return;
-   s.hover=()->{s.hover=null;if(s.zone.isShown()&&SwipePanelPolicy.selected(s.progress,s.trigger,centerOffset(panel),dp(panel.getContext(),64)))animateExpansion(panel,s,true);};panel.postDelayed(s.hover,100);
-  }else animateExpansion(panel,s,false);
+  boolean selected=s.zone.getVisibility()==View.VISIBLE&&SwipePanelPolicy.releaseSelected(s.progress,s.trigger,centerOffset(panel),dp(panel.getContext(),64),axisCode(panel));
+  // Match the native pickable zone immediately; visual expansion never gates selection.
+  if(selected!=s.selected)animateExpansion(panel,s,selected);
  }
 private static void animateExpansion(View panel,State s,boolean selected){
  s.selected=selected;if(s.expansionAnimator!=null)s.expansionAnimator.cancel();
@@ -760,11 +743,11 @@ private static void animateExpansion(View panel,State s,boolean selected){
   if(s.zone.getVisibility()!=View.VISIBLE){log("release bail=zone_hidden");return;}
   if(!SwipePanelPolicy.selectable(s.progress,s.trigger)){log("release bail=below_trigger");return;}
   if(Boolean.TRUE.equals(p.args[RomSymbols.BRIDGE_ARG_BOOLEAN])||Boolean.TRUE.equals(p.args[RomSymbols.BRIDGE_ARG_BOOLEAN+1])){log("release bail=cancelled");return;}
-  PointF up=(PointF)p.args[RomSymbols.BRIDGE_ARG_UP_POS];if(up==null){log("release bail=no_up");return;}
-  int rotation=rotation(panel);
-  int[] pos=new int[2];s.zone.getLocationOnScreen(pos);
-  boolean onChip=s.selected&&(SwipePanelPolicy.landscapeStack(rotation)||(Math.abs(up.x-panel.getWidth()/2f)<=dp(panel.getContext(),64)&&up.y>=pos[1]&&up.y<=pos[1]+s.zone.getHeight()));
-  if(!onChip){log("release bail=off_chip up="+up.x+","+up.y+" selected="+s.selected+" zone="+pos[0]+","+pos[1]+" "+s.zone.getWidth()+"x"+s.zone.getHeight()+" panelW="+panel.getWidth());return;}
+  PointF up=(PointF)p.args[RomSymbols.BRIDGE_ARG_UP_POS];if(up==null||!Float.isFinite(up.x)||!Float.isFinite(up.y)){log("release bail=invalid_up");return;}
+  int rotation=rotation(panel),axis=axisCode(panel),offset=centerOffset(panel);
+  if(!MID_ACTIVE||!SwipePanelPolicy.releaseSelected(s.progress,s.trigger,offset,dp(panel.getContext(),64),axis)){
+   log("release bail=outside_entry axis="+axis+" offset="+offset+" progress="+s.progress+" trigger="+s.trigger);return;
+  }
   SwipeCandidate.Match candidate=CandidateProbe.match(handler);
   if(candidate==null||candidate.task!=s.gestureTask||(s.candidate!=null&&(candidate.task!=s.candidate.task||candidate.container!=s.candidate.container))){
    log("release bail=candidate fresh="+(candidate==null?"null":candidate.task+"/"+candidate.container)+" cached="+(s.candidate==null?"null":s.candidate.task+"/"+s.candidate.container));return;
@@ -821,16 +804,15 @@ private static void animateExpansion(View panel,State s,boolean selected){
   // Run in parallel with captureDisplay. The reply cannot run on the main
   // thread until this release hook has attached and armed its source cover.
   if(capture!=null)captureSourcePixels(capture,manager,gestureController,main,sourceCover);
-  final Bitmap warm=GestureShield.detach();
   final Bitmap taskFrame=s.sourceTask==candidate.task?s.sourceFrame:null;
   if(taskFrame!=null)s.sourceFrame=null;
   final HandoffCover cover;
   try{
-   if(deferPortrait){HandoffCover.recycle(taskFrame);cover=HandoffCover.createSource(sourceActivity,warm);}
-   else cover=HandoffCover.create(panel.getContext(),landscape,warm,taskFrame,false);
+   if(deferPortrait){HandoffCover.recycle(taskFrame);cover=HandoffCover.createSource(sourceActivity);}
+   else cover=HandoffCover.create(panel.getContext(),landscape,taskFrame,false);
    if(portraitPixels&&!cover.preparePortraitSource(candidate.task,capture.width,capture.height,releaseCrop,releaseRect,releaseMatrix,released))
     cover.close("portrait_source_geometry_unavailable");
-  }catch(Throwable e){if(capture!=null)capture.closeVisibility();HandoffCover.recycle(warm);Log.w(TAG,"swipe_add_degraded reason=source_window_unavailable native_release=true",e);return;}
+  }catch(Throwable e){if(capture!=null)capture.closeVisibility();Log.w(TAG,"swipe_add_degraded reason=source_window_unavailable native_release=true",e);return;}
   sourceCover[0]=cover;
   if(portraitWait!=null)cover.portraitDeadline(portraitWait);
   if(!HANDOFF_OWNERS.claim(handler,!cover.isClosed())){
@@ -1263,7 +1245,8 @@ private static void animateExpansion(View panel,State s,boolean selected){
    int shortEdge=Math.min(bounds.width(),bounds.height()),longEdge=Math.max(bounds.width(),bounds.height());
    int unit=Math.max(1,Ui.dp(panel.getContext(),1));
    int top=portraitTopInset(panel,unit);
-   int[] card=LandscapeEntrance.card(shortEdge,longEdge-top,0,top,unit,longEdge,shortEdge);
+   int mainPercent=MainWindowSettings.read(panel.getContext(),CardLayout.MAIN_DEFAULT_PERCENT);
+   int[] card=LandscapeEntrance.card(shortEdge,longEdge-top,0,top,unit,longEdge,shortEdge,mainPercent);
    if(card==null)return;
    RectF predicted=new RectF(card[0],card[1],card[2],card[3]);
    Log.i(TAG,"swipe_landscape_plan stage="+shortEdge+"x"+(longEdge-top)+" origin=0,"+top+" card="+predicted);

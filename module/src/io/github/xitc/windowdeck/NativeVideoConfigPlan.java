@@ -16,7 +16,7 @@ final class NativeVideoConfigPlan {
  private NativeVideoConfigPlan(String xml,long version,Set<String> managed,boolean changed){this.xml=xml;this.version=version;this.managed=managed;this.changed=changed;}
  static boolean validPackage(String pkg){
   return pkg!=null&&pkg.matches("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
-   &&!Arrays.asList("android","io.github.xitc.windowdeck","io.github.xitc.windowdeck","com.oplus.pscanvas","com.android.launcher","com.android.systemui").contains(pkg);
+   &&!Arrays.asList("android","dev.windowdeck.app","io.github.xitc.windowdeck","com.oplus.pscanvas","com.android.launcher","com.android.systemui").contains(pkg);
  }
  private static String uncomment(String xml){return xml.replaceAll("(?s)<!--.*?-->","");}
  private static String maskComments(String xml){

@@ -25,6 +25,7 @@ public final class MainActivity extends Activity {
   TextView intro=Ui.text(this,"最多五个实时应用窗口，支持运行中添加、替换和移出。",16,Ui.MUTED);intro.setPadding(0,pad,0,pad);body.addView(intro);
   body.addView(Ui.text(this,"首次使用：在 LSPosed 勾选“多窗口”（com.oplus.pscanvas）与“系统桌面”（com.android.launcher），再重新启动这两个进程。启动及上滑加入已有任务需要 Root；新建会替换当前多窗口容器。",14,Ui.MUTED));
   Button video=Ui.button(this,"视频全屏兼容 · 应用名单");styleEntry(video);body.addView(video);video.setOnClickListener(v->NativeVideoSettings.show(this));
+  Button mainSize=Ui.button(this,MainWindowSettings.label(MainWindowSettings.local(this)));styleEntry(mainSize);body.addView(mainSize);mainSize.setOnClickListener(v->MainWindowSettings.show(this,mainSize));
   for(int i=0;i<SLOTS;i++){final int slot=i;picks[i]=Ui.button(this,prefix(i)+labels[i]);styleEntry(picks[i]);body.addView(picks[i]);picks[i].setOnClickListener(v->pick(slot));}
   Button resume=Ui.button(this,"打开 / 恢复当前工作台");styleEntry(resume);body.addView(resume);resume.setOnClickListener(v->launch(true));
   start=Ui.button(this,"用所选应用新建工作台");styleEntry(start);body.addView(start);start.setOnClickListener(v->launch(false));

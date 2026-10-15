@@ -2,6 +2,10 @@ package io.github.xitc.windowdeck;
 
 /** Identity and capacity rules for launcher starts during a host-owned picker. */
 final class PickerLaunchPolicy {
+ static final String EMBED_BEFORE_LAUNCH="embedPickerLaunch";
+ /** Ordinary ADD keeps its visible fullscreen launch before the group contracts.
+  * Only add-to-side and replacement use the container as the launch destination. */
+ static boolean embedBeforeLaunch(boolean replace,boolean originalPlus){return replace||originalPlus;}
  enum Decision { REJECT, ACCEPT, ALREADY_ACCEPTED }
  static Decision session(int container,long instance,long active,long accepted,boolean hanging,int ownerUser,
    int requestedContainer,long requestedInstance,long requestedSession,int requestedUser){

@@ -61,6 +61,9 @@ final class LiveWorkbenchState {
  static Bundle launch(String pkg,int user){
   Bundle state=latest;if(state==null||!PickerLaunchPolicy.newApp(state.getBoolean("hanging"),state.getInt("userId",-1),user,
     state.getInt("count",0),state.getBoolean("replacing"),pkg,state.getStringArray("packages")))return null;
+  if(!state.getBoolean(PickerLaunchPolicy.EMBED_BEFORE_LAUNCH,false)){
+   Log.i("WindowDeck","picker_launch_fullscreen package="+pkg+" session="+state.getLong("selectionSession"));return null;
+  }
   Bundle result=new Bundle(state);result.putString("selectedPackage",pkg);return result;
  }
  static void publish(Context context,Bundle state){

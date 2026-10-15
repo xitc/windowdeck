@@ -14,6 +14,7 @@ final class EmbeddedTaskGuard {
  interface Owner { void changed(boolean embedded); }
  private static final class Entry {
   final int container;final Owner owner;
+  EmbeddedLeashBinding binding;
   Entry(int container,Owner owner){this.container=container;this.owner=owner;}
  }
  // Strong map: the owner lambda holds the view, so a weak key would never clear on its own.
@@ -25,10 +26,10 @@ final class EmbeddedTaskGuard {
    Class<?> type=view.getClass();
    for(String name:new String[]{"onTaskAppeared","onTaskInfoChanged"})
     XposedHelpers.findAndHookMethod(type,name,ActivityManager.RunningTaskInfo.class,SurfaceControl.class,new XC_MethodHook(){
-     @Override protected void beforeHookedMethod(MethodHookParam p){update(p.thisObject,(ActivityManager.RunningTaskInfo)p.args[0],false);}
+     @Override protected void beforeHookedMethod(MethodHookParam p){update(p.thisObject,(ActivityManager.RunningTaskInfo)p.args[0],(SurfaceControl)p.args[1],false);}
     });
    XposedHelpers.findAndHookMethod(type,"onTaskVanished",ActivityManager.RunningTaskInfo.class,new XC_MethodHook(){
-    @Override protected void beforeHookedMethod(MethodHookParam p){update(p.thisObject,(ActivityManager.RunningTaskInfo)p.args[0],true);}
+    @Override protected void beforeHookedMethod(MethodHookParam p){update(p.thisObject,(ActivityManager.RunningTaskInfo)p.args[0],null,true);}
    });
    XposedHelpers.findAndHookMethod(type,"updateTaskVisibilityWhenSurfaceDestroyed",new XC_MethodHook(){
     @Override protected void beforeHookedMethod(MethodHookParam p){
@@ -53,24 +54,32 @@ final class EmbeddedTaskGuard {
  static synchronized void forget(Object view){
   if(entries.remove(view)!=null)XposedHelpers.setAdditionalInstanceField(view,RETIRED,Boolean.TRUE);
  }
- private static void update(Object view,ActivityManager.RunningTaskInfo task,boolean vanished){
+ static synchronized boolean mayReparent(Object view,int task,SurfaceControl leash){
+  Entry entry=entries.get(view);
+  return entry!=null&&entry.binding!=null&&entry.binding.matches(task,LiveTaskContent.layerId(leash));
+ }
+ private static void update(Object view,ActivityManager.RunningTaskInfo task,SurfaceControl leash,boolean vanished){
   Entry entry;synchronized(EmbeddedTaskGuard.class){entry=entries.get(view);}if(entry==null||task==null)return;
-  boolean embedded;
+  EmbeddedLeashBinding binding;
   try{
    Bundle extra=(Bundle)XposedHelpers.getObjectField(task,"mOplusExtraBundle");
-   embedded=!vanished&&extra!=null&&extra.getInt("androidx.activity.LaunchScenario",-1)==2&&extra.getInt("androidx.activity.LaunchContainerTaskId",-1)==entry.container;
-  }catch(Throwable e){XposedBridge.log(e);embedded=false;}
-  post(view,entry,embedded);
+   binding=new EmbeddedLeashBinding(entry.container,task.taskId,LiveTaskContent.layerId(leash),
+     extra==null?-1:extra.getInt("androidx.activity.LaunchScenario",-1),
+     extra==null?-1:extra.getInt("androidx.activity.LaunchContainerTaskId",-1),vanished,
+     extra!=null&&extra.getBoolean("skipReparentFourFingerPinch",false));
+  }catch(Throwable e){XposedBridge.log(e);binding=new EmbeddedLeashBinding(entry.container,task.taskId,-1,-1,-1,true,true);}
+  synchronized(EmbeddedTaskGuard.class){if(entries.get(view)!=entry)return;entry.binding=binding;}
+  post(view,entry,binding);
  }
- private static void post(final Object view,final Entry entry,final boolean embedded){
+ private static void post(final Object view,final Entry entry,final EmbeddedLeashBinding binding){
   Handler handler;
   synchronized(EmbeddedTaskGuard.class){
    if(main==null)main=new Handler(Looper.getMainLooper());
    handler=main;
   }
   handler.post(new Runnable(){public void run(){
-   synchronized(EmbeddedTaskGuard.class){if(entries.get(view)!=entry)return;}
-   try{entry.owner.changed(embedded);}catch(Throwable e){XposedBridge.log(e);}
+   synchronized(EmbeddedTaskGuard.class){if(entries.get(view)!=entry||entry.binding!=binding)return;}
+   try{entry.owner.changed(binding.embedded);}catch(Throwable e){XposedBridge.log(e);}
   }});
  }
 }

@@ -28,7 +28,7 @@ final class NativeVideoSettings {
   status=Ui.text(activity,"正在读取系统兼容状态…",13,Ui.MUTED);status.setPadding(0,pad,0,pad);body.addView(status);
   rows=new LinearLayout(activity);rows.setOrientation(1);ScrollView scroll=new ScrollView(activity);scroll.addView(rows);body.addView(scroll,new LinearLayout.LayoutParams(-1,Ui.dp(activity,180)));
   add=button(body,"添加应用");add.setOnClickListener(v->{
-   Set<String> excluded=new HashSet<>(selected);excluded.addAll(Arrays.asList("io.github.xitc.windowdeck","io.github.xitc.windowdeck","com.oplus.pscanvas","com.android.launcher","com.android.systemui"));
+   Set<String> excluded=new HashSet<>(selected);excluded.addAll(Arrays.asList("dev.windowdeck.app","io.github.xitc.windowdeck","com.oplus.pscanvas","com.android.launcher","com.android.systemui"));
    AppPicker.show(activity,excluded,(component,label)->{String pkg=component.getPackageName();if(NativeVideoConfigPlan.validPackage(pkg)){selected.add(pkg);render();status.setText("名单已更改，点击“应用名单”后生效。");}});
   });
   apply=button(body,"应用名单");apply.setOnClickListener(v->save(new LinkedHashSet<>(selected)));
