@@ -21,7 +21,7 @@ final class MainWindowSettings {
  }
  static int read(Context context,int fallback){
   try{
-   Bundle answer=context.getContentResolver().call(Uri.parse("content://io.github.xitc.windowdeck.state"),PREF,null,null);
+   Bundle answer=context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),PREF,null,null);
    if(answer!=null&&answer.containsKey(PREF))return CardLayout.mainPercent(answer.getInt(PREF));
   }catch(Exception e){Log.w("WindowDeck","main_window_size_unavailable",e);}
   return CardLayout.mainPercent(fallback);
@@ -30,7 +30,7 @@ final class MainWindowSettings {
  static boolean write(Context context,int percent){
   int value=CardLayout.mainPercent(percent);Bundle request=new Bundle();request.putInt(PREF,value);
   try{
-   Bundle answer=context.getContentResolver().call(Uri.parse("content://io.github.xitc.windowdeck.state"),WRITE,null,request);
+   Bundle answer=context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),WRITE,null,request);
    return answer!=null&&answer.containsKey(PREF)&&answer.getInt(PREF)==value;
   }catch(Exception e){Log.w("WindowDeck","main_window_size_save_failed",e);return false;}
  }

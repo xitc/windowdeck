@@ -19,7 +19,7 @@ final class PickerLaunchPolicy {
  static boolean newApp(boolean hanging,int ownerUser,int requestedUser,int count,boolean replace,String pkg,String[] packages){
   if(!hanging||ownerUser<0||ownerUser!=requestedUser||count<1||count>Caps.MAX_TASKS
     ||(!replace&&count==Caps.MAX_TASKS)||pkg==null||pkg.isEmpty()
-    ||"io.github.xitc.windowdeck".equals(pkg)||"com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)
+    ||ModulePackages.isModule(pkg)||"com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)
     ||packages==null||packages.length!=count)return false;
   for(String existing:packages)if(existing==null||pkg.equals(existing))return false;
   return true;

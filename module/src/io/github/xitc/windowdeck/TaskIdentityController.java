@@ -96,7 +96,7 @@ final class TaskIdentityController {
 
 
  WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception {
-  if(c==null||c.getPackageName().equals(host.packageName())||c.getPackageName().equals("io.github.xitc.windowdeck"))throw new IllegalArgumentException("应用参数无效");
+  if(c==null||c.getPackageName().equals(host.packageName())||ModulePackages.isModule(c.getPackageName()))throw new IllegalArgumentException("应用参数无效");
   for(WorkbenchSlot s:session.slots)if(s!=replacing&&s.component.getPackageName().equals(c.getPackageName()))throw new IllegalArgumentException("该应用已在工作台中");
   ActivityInfo ai=host.packageManager().getActivityInfo(c,0);
   Intent intent=new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(c);

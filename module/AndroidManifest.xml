@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="207" android:versionName="0.5.0-dev.207">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="208" android:versionName="0.5.0-dev.208">
  <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35"/>
  <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent><package android:name="com.android.launcher"/><package android:name="com.oplus.pscanvas"/><package android:name="tv.acfundanmaku.video"/><package android:name="com.google.android.youtube"/></queries>
  <application android:label="多窗工作台" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:supportsRtl="true">
@@ -6,9 +6,9 @@
   <meta-data android:name="xposeddescription" android:value="ColorOS 17 最多五个实时应用窗口工作台实验，作用于多窗口和桌面上滑面板。"/>
   <meta-data android:name="xposedminversion" android:value="82"/>
   <meta-data android:name="xposedscope" android:resource="@array/xposed_scope"/>
-  <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
-  <activity android:name=".IngressActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true" android:taskAffinity="io.github.xitc.windowdeck.ingress"/>
-  <receiver android:name=".LauncherIngressReceiver" android:exported="true"><intent-filter><action android:name="io.github.xitc.windowdeck.ADD_EXISTING_TASK"/></intent-filter></receiver>
-  <provider android:name=".WorkbenchStateProvider" android:authorities="io.github.xitc.windowdeck.state" android:exported="true"/>
+  <activity android:name="io.github.xitc.windowdeck.MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+  <activity android:name="io.github.xitc.windowdeck.IngressActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true" android:taskAffinity="${applicationId}.ingress"/>
+  <receiver android:name="io.github.xitc.windowdeck.LauncherIngressReceiver" android:exported="true"><intent-filter><action android:name="${applicationId}.ADD_EXISTING_TASK"/></intent-filter></receiver>
+  <provider android:name="io.github.xitc.windowdeck.WorkbenchStateProvider" android:authorities="${applicationId}.state" android:exported="true"/>
  </application>
 </manifest>

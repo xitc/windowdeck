@@ -27,7 +27,7 @@ final class SwipeCandidate {
    if(info==null)continue;
    if(info.id==source){
     if(info.userId!=0||info.baseCanvas()||info.topCanvas()
-      ||"com.android.launcher".equals(info.topPackage)||"io.github.xitc.windowdeck".equals(info.topPackage))return false;
+      ||"com.android.launcher".equals(info.topPackage)||ModulePackages.isModule(info.topPackage))return false;
    }
    if(info.workbench&&info.topCanvas()&&stateKnown&&info.id==stateContainer&&stateCount>=Caps.MAX_TASKS)return false;
   }
@@ -56,7 +56,7 @@ final class SwipeCandidate {
   if(sourceInfo.userId!=0||(containerInfo!=null&&containerInfo.userId!=0))return null;
   if(sourceInfo.windowMode!=1)return null;
   String pkg=sourceInfo.topPackage;
-  if("com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)||"io.github.xitc.windowdeck".equals(pkg))return null;
+  if("com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)||ModulePackages.isModule(pkg))return null;
   return new Match(source,live);
  }
 }

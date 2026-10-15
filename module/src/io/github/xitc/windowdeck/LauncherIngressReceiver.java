@@ -10,8 +10,8 @@ import java.util.concurrent.TimeUnit;
 /** Only the real launcher may request the existing task handoff. */
 public final class LauncherIngressReceiver extends BroadcastReceiver {
  private static final java.util.concurrent.atomic.AtomicBoolean BUSY=new java.util.concurrent.atomic.AtomicBoolean();
- static final String ACTION="io.github.xitc.windowdeck.ADD_EXISTING_TASK";
- static final String STATE="io.github.xitc.windowdeck.WORKBENCH_STATE";
+ static final String ACTION=(BuildIdentity.APPLICATION_ID+".ADD_EXISTING_TASK");
+ static final String STATE=(BuildIdentity.APPLICATION_ID+".WORKBENCH_STATE");
  @Override public void onReceive(Context context,Intent intent){
   if(intent==null)return;
   int uid=getSentFromUid();boolean launcher=false,host=false;
@@ -49,7 +49,7 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
     if(container<0){createWorkbench(context,task,user);return;}
     // Deliver to the live container. Starting ContainerActivity from outside can
     // create a second task, whose empty instance then replaces the real one.
-    String command="am broadcast --user 0 --receiver-foreground -a io.github.xitc.windowdeck.ADD_TO_LIVE_WORKBENCH -p com.oplus.pscanvas --ei windowdeck_add_task_id "+task+" --ei windowdeck_add_user_id "+user+" --ei windowdeck_container_task_id "+container;
+    String command="am broadcast --user 0 --receiver-foreground -a "+BuildIdentity.APPLICATION_ID+".ADD_TO_LIVE_WORKBENCH -p com.oplus.pscanvas --ei windowdeck_add_task_id "+task+" --ei windowdeck_add_user_id "+user+" --ei windowdeck_container_task_id "+container;
     Process process=new ProcessBuilder("su","-c",command).redirectErrorStream(true).start();
     if(!process.waitFor(12,TimeUnit.SECONDS)&&process.isAlive()){process.destroy();throw new IOException("am start timed out");}
     if(process.exitValue()!=0)throw new IOException("am broadcast exit="+process.exitValue());

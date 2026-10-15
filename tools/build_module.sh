@@ -19,6 +19,18 @@ if [ ! -f "$xposed_api" ]; then
  exit 1
 fi
 manifest="$project_dir/module/AndroidManifest.xml"
+application_id=$(sed -n 's/.* package="\([^"]*\)".*/\1/p' "$manifest")
+if [ "$#" -ne 0 ]; then
+ if [ "$#" -ne 2 ] || [ "$1" != --application-id ]; then
+  printf '%s\n' 'Usage: build_module.sh [--application-id dev.windowdeck.app|io.github.xitc.windowdeck]' >&2
+  exit 1
+ fi
+ application_id=$2
+fi
+case "$application_id" in
+ dev.windowdeck.app|io.github.xitc.windowdeck) ;;
+ *) printf '%s\n' 'Unsupported application ID' >&2; exit 1;;
+esac
 version=$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$manifest")
 code=$(sed -n 's/.*android:versionCode="\([^"]*\)".*/\1/p' "$manifest")
 case "$version" in ''|*[!a-zA-Z0-9.-]*) printf '%s\n' 'Invalid APK version' >&2; exit 1;; esac
@@ -33,14 +45,19 @@ case "$version" in
   ;;
 esac
 out="$project_dir/build/windowdeck"
+# A direct research build must not overwrite a public APK with the same version.
+if [ "$application_id" = dev.windowdeck.app ]; then out="$out/$application_id"; fi
 # Wipe the intermediates first. Without this a deleted or renamed source leaves
 # its old .class behind, and the jar/d8 step happily packs that stale class into
 # the APK — which then shows up in bytecode checks as a feature that no longer
 # exists. The signed APKs in $out are left alone.
 rm -rf "$out/classes" "$out/dex" "$out/gen"
 mkdir -p "$out/classes" "$out/dex" "$out/gen"
+# Only the generated manifest varies; Java source and Xposed entry stay fixed.
+sed -e "s/ package=\"[^\"]*\"/ package=\"$application_id\"/" \
+    -e 's/${applicationId}/'"$application_id"'/g' "$manifest" > "$out/AndroidManifest.xml"
 "$build_tools/aapt2" compile --dir "$project_dir/module/res" -o "$out/resources.zip"
-"$build_tools/aapt2" link -o "$out/base.apk" -I "$sdk_path/platforms/android-35/android.jar" --manifest "$project_dir/module/AndroidManifest.xml" --java "$out/gen" -A "$project_dir/module/assets" "$out/resources.zip"
+"$build_tools/aapt2" link -o "$out/base.apk" -I "$sdk_path/platforms/android-35/android.jar" --manifest "$out/AndroidManifest.xml" --custom-package io.github.xitc.windowdeck --java "$out/gen" -A "$project_dir/module/assets" "$out/resources.zip"
 mkdir -p "$out/gen/io/github/xitc/windowdeck"
 cat > "$out/gen/io/github/xitc/windowdeck/Version.java" <<EOF
 package io.github.xitc.windowdeck;
@@ -49,6 +66,15 @@ final class Version {
  static final int CODE = $code;
  static final String NAME = "$version";
  private Version() {}
+}
+EOF
+cat > "$out/gen/io/github/xitc/windowdeck/BuildIdentity.java" <<EOF
+package io.github.xitc.windowdeck;
+/** Generated installation identity. Never derive this from a hooked host Context. */
+final class BuildIdentity {
+ static final String APPLICATION_ID = "$application_id";
+ static final String STATE_URI = "content://$application_id.state";
+ private BuildIdentity() {}
 }
 EOF
 find "$project_dir/module/src" "$out/gen" -name '*.java' > "$out/sources.list"

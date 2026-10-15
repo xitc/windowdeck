@@ -98,7 +98,7 @@ final class CandidateProbe {
   }
   boolean providerKnown=false;int providerContainer=-1,providerCount=0;
   if(LiveWorkbenchState.published()==null)try{
-   Bundle state=context.getContentResolver().call(Uri.parse("content://io.github.xitc.windowdeck.state"),"state",null,null);
+   Bundle state=context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),"state",null,null);
    if(state!=null){providerKnown=true;providerContainer=state.getInt("container",-1);providerCount=state.getInt("count",0);}
   }catch(Throwable ignored){}
   return new Snapshot(tasks.toArray(new SwipeCandidate.Task[0]),providerKnown,providerContainer,providerCount);

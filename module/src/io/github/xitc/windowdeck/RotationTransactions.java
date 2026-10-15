@@ -17,8 +17,8 @@ import java.util.function.Consumer;
  * Merge the canvas draw first, then let the already permitted launcher submit it.
  * No system permission check, unrelated transaction, or module scope is changed. */
 final class RotationTransactions {
- private static final String TAG="WindowDeck",CONNECT="io.github.xitc.windowdeck.CONNECT_ROTATION_TRANSACTIONS";
- private static final String DESCRIPTOR="io.github.xitc.windowdeck.RotationTransactions";
+ private static final String TAG="WindowDeck",CONNECT=(BuildIdentity.APPLICATION_ID+".CONNECT_ROTATION_TRANSACTIONS");
+ private static final String DESCRIPTOR=(BuildIdentity.APPLICATION_ID+".RotationTransactions");
  private static final int PING=IBinder.FIRST_CALL_TRANSACTION,APPLY=PING+1;
  private static boolean registered;
  interface Failure { void failed(int task,int generation); }

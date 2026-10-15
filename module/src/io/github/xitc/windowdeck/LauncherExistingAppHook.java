@@ -10,8 +10,8 @@ import de.robv.android.xposed.*;
 
 /** Route picker clicks before the launcher sends a fullscreen app start. */
 final class LauncherExistingAppHook {
- static final String SELECT="io.github.xitc.windowdeck.SELECT_EXISTING_CARD";
- static final String LAUNCH="io.github.xitc.windowdeck.LAUNCH_PICKER_APP";
+ static final String SELECT=(BuildIdentity.APPLICATION_ID+".SELECT_EXISTING_CARD");
+ static final String LAUNCH=(BuildIdentity.APPLICATION_ID+".LAUNCH_PICKER_APP");
  static void install(){
   XposedHelpers.findAndHookMethod(Instrumentation.class,"execStartActivity",Context.class,IBinder.class,IBinder.class,Activity.class,Intent.class,int.class,Bundle.class,new XC_MethodHook(){
    protected void beforeHookedMethod(MethodHookParam p){

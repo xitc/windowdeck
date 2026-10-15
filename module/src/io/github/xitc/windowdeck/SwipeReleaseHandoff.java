@@ -385,7 +385,7 @@ final class SwipeReleaseHandoff {
     return;
    }catch(Throwable e){Log.w(TAG,"swipe_create_direct_failed",e);}
   }else try{
-   Intent add=new Intent("io.github.xitc.windowdeck.LAUNCHER_ADD_TO_WORKBENCH").setPackage("com.oplus.pscanvas");
+   Intent add=new Intent((BuildIdentity.APPLICATION_ID+".LAUNCHER_ADD_TO_WORKBENCH")).setPackage("com.oplus.pscanvas");
    add.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
    add.putExtra("windowdeck_add_task_id",candidate.task);
    add.putExtra("windowdeck_add_user_id",0);
@@ -422,10 +422,10 @@ final class SwipeReleaseHandoff {
  }
  private static void dispatchRootHandoff(Context context,SwipeCandidate.Match candidate){
   Bundle message=new Bundle();message.putInt("taskId",candidate.task);message.putInt("userId",0);message.putInt("containerTaskId",candidate.container);
-  try{if(context.getContentResolver().call(Uri.parse("content://io.github.xitc.windowdeck.state"),"add_task",null,message)!=null)return;}
+  try{if(context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),"add_task",null,message)!=null)return;}
   catch(Throwable e){Log.w(TAG,"swipe_provider_fallback",e);}
   try{
-   Intent request=new Intent().setComponent(new ComponentName("io.github.xitc.windowdeck","io.github.xitc.windowdeck.IngressActivity"));
+   Intent request=new Intent().setComponent(new ComponentName(BuildIdentity.APPLICATION_ID,"io.github.xitc.windowdeck.IngressActivity"));
    request.putExtras(message);request.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION|Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
    context.startActivity(request,ActivityOptions.makeBasic().setShareIdentityEnabled(true).toBundle());
   }catch(Throwable e){Log.e(TAG,"swipe_add_dispatch_failed",e);}

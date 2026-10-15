@@ -55,10 +55,10 @@ final class WorkbenchStatePublisher {
   if(generation!=statePublishGeneration)return;
   Bundle state=liveState(count);
   if(attempt==0)try{LiveWorkbenchState.publish(host.context(),state);}catch(Throwable e){Log.w(TAG,"live_state_publish_failed",e);}
-  try{if(host.contentResolver().call(android.net.Uri.parse("content://io.github.xitc.windowdeck.state"),"publish",null,state)!=null)return;}
+  try{if(host.contentResolver().call(android.net.Uri.parse(BuildIdentity.STATE_URI),"publish",null,state)!=null)return;}
   catch(Throwable e){Log.w(TAG,"publish_provider_failed attempt="+attempt,e);}
   if(attempt==0){
-   Intent message=new Intent(LauncherIngressReceiver.STATE).setComponent(new ComponentName("io.github.xitc.windowdeck","io.github.xitc.windowdeck.LauncherIngressReceiver"));
+   Intent message=new Intent(LauncherIngressReceiver.STATE).setComponent(new ComponentName(BuildIdentity.APPLICATION_ID,"io.github.xitc.windowdeck.LauncherIngressReceiver"));
    message.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES|Intent.FLAG_RECEIVER_FOREGROUND);message.putExtras(state);
    // Receiver checks getSentFromUid(). Without identity sharing a fallback can
    // be rejected even though the originating host is trusted.

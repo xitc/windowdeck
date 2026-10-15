@@ -29,8 +29,8 @@ public final class WorkbenchActivity extends Activity implements
  private static final String TAG="WindowDeck";
  /** True while a workbench is on screen. CanvasImeBridge only pushes IME state for our container. */
  static volatile boolean foreground;
- private static final String ADD_TO_LIVE_WORKBENCH="io.github.xitc.windowdeck.ADD_TO_LIVE_WORKBENCH";
- private static final String REVEAL_ADDED_CARD="io.github.xitc.windowdeck.REVEAL_ADDED_CARD";
+ private static final String ADD_TO_LIVE_WORKBENCH=(BuildIdentity.APPLICATION_ID+".ADD_TO_LIVE_WORKBENCH");
+ private static final String REVEAL_ADDED_CARD=(BuildIdentity.APPLICATION_ID+".REVEAL_ADDED_CARD");
  final WorkbenchSession session=new WorkbenchSession();
  final CanvasBinding rom=new CanvasBinding();
  final LiveContentPump pump=new LiveContentPump();
@@ -167,7 +167,7 @@ public final class WorkbenchActivity extends Activity implements
   // Root am broadcast may report an unknown sender UID (-1) in onReceive.
   IntentFilter addFilter=new IntentFilter(ADD_TO_LIVE_WORKBENCH);addFilter.addAction(REVEAL_ADDED_CARD);
   registerReceiver(addReceiver,addFilter,android.Manifest.permission.DUMP,handler,Context.RECEIVER_EXPORTED);addReceiverRegistered=true;
-  IntentFilter launcherFilter=new IntentFilter("io.github.xitc.windowdeck.LAUNCHER_ADD_TO_WORKBENCH");launcherFilter.addAction(LiveWorkbenchState.QUERY);launcherFilter.addAction(LauncherExistingAppHook.SELECT);launcherFilter.addAction(LauncherExistingAppHook.LAUNCH);launcherFilter.addAction(VideoWindowCompat.QUERY);
+  IntentFilter launcherFilter=new IntentFilter((BuildIdentity.APPLICATION_ID+".LAUNCHER_ADD_TO_WORKBENCH"));launcherFilter.addAction(LiveWorkbenchState.QUERY);launcherFilter.addAction(LauncherExistingAppHook.SELECT);launcherFilter.addAction(LauncherExistingAppHook.LAUNCH);launcherFilter.addAction(VideoWindowCompat.QUERY);
   registerReceiver(launcherReceiver,launcherFilter,android.Manifest.permission.REORDER_TASKS,handler,Context.RECEIVER_EXPORTED);launcherReceiverRegistered=true;
   getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT,hostBack);
   getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);

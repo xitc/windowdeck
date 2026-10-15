@@ -121,8 +121,10 @@ Hook 仅在 `com.oplus.pscanvas` 中对携带本模块标记的容器启动生�
 
 ## 源码与构建来源
 
-运行模块以开发原型的完整 module 为唯一来源，公开树经过包名转换导出，源码清单随模块同步。公开树中的单独修复须先回到开发来源，避免两套运行逻辑分叉。正式发布包以 Release 的 BUILD_INFO 和校验和为准；开发候选另在 APK 的 `assets/windowdeck/BUILD_INFO.json` 内携带源码指纹，并配套输入报告和源码归档。源码版本号不代表某台设备已经安装或通过验收。
+运行模块以开发原型的完整 module 为唯一维护来源，公开树原样导出模块与构建脚本，不替换 Java 包名或内容。Java 命名空间固定为 `io.github.xitc.windowdeck`；安装身份通过构建参数选择。公开树中的单独修复须先回到开发来源，避免两套运行逻辑分叉。正式发布包以 Release 的 BUILD_INFO 和校验和为准；开发候选另在 APK 的 `assets/windowdeck/BUILD_INFO.json` 内携带源码指纹，并配套输入报告和源码归档。源码版本号不代表某台设备已经安装或通过验收。
+
+`sh tools/build_module.sh` 默认生成公开安装包；添加 `--application-id dev.windowdeck.app` 可从同一份源码构建原型安装包。Provider、广播及 Binder 标识随安装身份生成，组件类名与 Xposed 入口保持固定。原型直接构建的输出在 `build/windowdeck/dev.windowdeck.app/`，公开输出仍在 `build/windowdeck/`。两个安装包均被应用选择器排除。
 
 核心多窗口契约不匹配时，在 pscanvas 安装自定义 Hook 前停止，保留原生 Activity。Activity 负责生命周期与组件组装，任务身份、入场、交接、挂起、布局、全屏及释放分别由对应控制器管理；桌面上滑的视图、动画、源帧和交接也独立维护。替换与全屏阶段隔离旧提交回调，入场状态及取消操作有统一入口。部分跨组件 Host 接口仍较宽，编排状态机还需继续收束。
 
-本轮拆分通过本地 97 项回归、35 组布局检查及两种包名的候选构建。设备安装、Hook 加载、取消／后台恢复与视觉验收仍为 **UNVERIFIED**；构建通过不代表运行验收通过。
+单源码迁移通过本地 99 项回归、35 组布局检查、选择器检查及两种安装身份构建；APK 组件、Xposed 入口和 IPC 标识已核对。设备安装、Hook 加载、取消／后台恢复与视觉验收仍为 **UNVERIFIED**；构建通过不代表运行验收通过。

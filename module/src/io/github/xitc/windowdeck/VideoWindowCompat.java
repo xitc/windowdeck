@@ -13,7 +13,7 @@ import de.robv.android.xposed.*;
 
 /** App-side multiwindow compatibility, authenticated by the live WindowDeck host. */
 final class VideoWindowCompat {
- static final String QUERY="io.github.xitc.windowdeck.QUERY_VIDEO_WINDOW_COMPAT";
+ static final String QUERY=(BuildIdentity.APPLICATION_ID+".QUERY_VIDEO_WINDOW_COMPAT");
  static final String HOST_BINDER="videoCompatHost";
  private static volatile Bundle state;
  private static Handler main;

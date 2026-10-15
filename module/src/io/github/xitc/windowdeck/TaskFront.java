@@ -9,7 +9,7 @@ public final class TaskFront {
   System.out.println("WindowDeck task_front task="+taskId);
   if(args.length==2){
    int source=Integer.parseInt(args[1]);if(source<0)throw new IllegalArgumentException("invalid source");
-   Process reveal=new ProcessBuilder("am","broadcast","--user","0","--receiver-foreground","-a","io.github.xitc.windowdeck.REVEAL_ADDED_CARD","-p","com.oplus.pscanvas","--ei","windowdeck_add_task_id",Integer.toString(source),"--ei","windowdeck_container_task_id",Integer.toString(taskId)).redirectErrorStream(true).start();
+   Process reveal=new ProcessBuilder("am","broadcast","--user","0","--receiver-foreground","-a",(BuildIdentity.APPLICATION_ID+".REVEAL_ADDED_CARD"),"-p","com.oplus.pscanvas","--ei","windowdeck_add_task_id",Integer.toString(source),"--ei","windowdeck_container_task_id",Integer.toString(taskId)).redirectErrorStream(true).start();
    if(!reveal.waitFor(8,java.util.concurrent.TimeUnit.SECONDS)){reveal.destroy();throw new IllegalStateException("reveal timed out");}
    if(reveal.exitValue()!=0)throw new IllegalStateException("reveal failed");
   }

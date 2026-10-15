@@ -89,7 +89,7 @@ final class AppPicker {
    List<ResolveInfo> infos=pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0);
    for(ResolveInfo r:infos){
     String pkg=r.activityInfo.packageName;
-    if("com.oplus.pscanvas".equals(pkg)||"io.github.xitc.windowdeck".equals(pkg)||!seen.add(pkg))continue;
+    if("com.oplus.pscanvas".equals(pkg)||ModulePackages.isModule(pkg)||!seen.add(pkg))continue;
     CharSequence label=r.loadLabel(pm);next.add(new Entry(new ComponentName(pkg,r.activityInfo.name),label==null?pkg:label.toString()));
    }
    next.sort((a,b)->a.label.compareToIgnoreCase(b.label));

@@ -10,8 +10,8 @@ import de.robv.android.xposed.*;
 
 /** Current host -> launcher state. Does not require starting the module APK. */
 final class LiveWorkbenchState {
- static final String UPDATE="io.github.xitc.windowdeck.LIVE_WORKBENCH_STATE";
- static final String QUERY="io.github.xitc.windowdeck.QUERY_LIVE_WORKBENCH";
+ static final String UPDATE=(BuildIdentity.APPLICATION_ID+".LIVE_WORKBENCH_STATE");
+ static final String QUERY=(BuildIdentity.APPLICATION_ID+".QUERY_LIVE_WORKBENCH");
  private static boolean registered;
  private static volatile Bundle latest;
  static void installLauncher(){

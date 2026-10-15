@@ -135,7 +135,7 @@ final class NativeAppPicker {
    for(Map.Entry<?,?> app:apps.entrySet()){
     Pair<?,?> identity=(Pair<?,?>)staticCall(loader,UTIL,"P1",app.getKey());
     String pkg=(String)identity.first;int profile=(Integer)identity.second;
-    if(profile!=user||excluded.contains(pkg)||"io.github.xitc.windowdeck".equals(pkg)||"com.oplus.pscanvas".equals(pkg)||(hidden!=null&&hidden.containsKey(pkg)))continue;
+    if(profile!=user||excluded.contains(pkg)||ModulePackages.isModule(pkg)||"com.oplus.pscanvas".equals(pkg)||(hidden!=null&&hidden.containsKey(pkg)))continue;
     labels.put(pkg,(String)app.getValue());entries.add(entry.newInstance(app.getValue(),pkg,null,4,profile));
    }
    @SuppressWarnings("unchecked") Comparator<Object> order=(Comparator<Object>)Class.forName("l2.a",false,loader).getConstructor().newInstance();entries.sort(order);

@@ -116,7 +116,7 @@ final class HangPickController {
 
  boolean readOriginalPlus(){
   try{
-   Bundle answer=host.contentResolver().call(android.net.Uri.parse("content://io.github.xitc.windowdeck.state"),HangPlace.PREF,null,null);
+   Bundle answer=host.contentResolver().call(android.net.Uri.parse(BuildIdentity.STATE_URI),HangPlace.PREF,null,null);
    boolean value=answer!=null&&answer.getBoolean(HangPlace.PREF,HangPlace.DEFAULT);
    Log.i(TAG,"original_plus="+value);return value;
   }catch(Throwable e){Log.w(TAG,"original_plus_unavailable",e);return false;}
