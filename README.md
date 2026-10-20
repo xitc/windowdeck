@@ -10,7 +10,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `v0.5.0-dev.206`，下载包以实际 Release 为准。本地源码基线已同步完整开发模块，并加入主窗大小、输入法避让、布局切换、替换控制器与宿主 ROM 契约检查；这不是新版本已经发布的声明。此前 dev.194 开发包完成过部分虚拟机控制验收，本轮源码与公开包安装、真机视觉和完整流畅度均为 **UNVERIFIED**。dev.148 的 YouTube 全屏方向兼容失败没有在本轮关闭。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `v0.5.0-dev.208`，下载包以实际 Release 为准。本地源码基线已同步完整开发模块，并加入主窗大小、输入法避让、布局切换、替换控制器与宿主 ROM 契约检查；这不是新版本已经发布的声明。此前 dev.194 开发包完成过部分虚拟机控制验收，本轮源码与公开包安装、真机视觉和完整流畅度均为 **UNVERIFIED**。dev.148 的 YouTube 全屏方向兼容失败没有在本轮关闭。
 
 ## 环境与验收范围
 
@@ -79,7 +79,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 sh tools/build_module.sh
 ```
 
-输出：`build/windowdeck/windowdeck-v0.5.0-dev.206.apk`。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
+输出：`build/scratch/<applicationId>/build.<随机编号>/windowdeck-v<versionName>.apk`，以脚本最后一行返回路径为准。同一身份的并发编译也使用不同目录；编译临时文件不能覆盖既有候选。可用 `BUILD_TOOLS_VERSION` 覆盖 Build Tools 版本。脚本也会尝试发现本地 Gradle 缓存中的 Xposed API 82。
 
 测试、ROM 审计及其它辅助脚本仅在维护者本地保留，不随源码仓库分发。
 
@@ -123,8 +123,10 @@ Hook 仅在 `com.oplus.pscanvas` 中对携带本模块标记的容器启动生�
 
 运行模块以开发原型的完整 module 为唯一维护来源，公开树原样导出模块与构建脚本，不替换 Java 包名或内容。Java 命名空间固定为 `io.github.xitc.windowdeck`；安装身份通过构建参数选择。公开树中的单独修复须先回到开发来源，避免两套运行逻辑分叉。正式发布包以 Release 的 BUILD_INFO 和校验和为准；开发候选另在 APK 的 `assets/windowdeck/BUILD_INFO.json` 内携带源码指纹，并配套输入报告和源码归档。源码版本号不代表某台设备已经安装或通过验收。
 
-`sh tools/build_module.sh` 默认生成公开安装包；添加 `--application-id dev.windowdeck.app` 可从同一份源码构建原型安装包。Provider、广播及 Binder 标识随安装身份生成，组件类名与 Xposed 入口保持固定。原型直接构建的输出在 `build/windowdeck/dev.windowdeck.app/`，公开输出仍在 `build/windowdeck/`。两个安装包均被应用选择器排除。
+`sh tools/build_module.sh` 默认生成公开安装包；添加 `--application-id dev.windowdeck.app` 可从同一份源码构建原型安装包。Provider、广播及 Binder 标识随安装身份生成，组件类名与 Xposed 入口保持固定。两种身份分别使用 `build/scratch/<applicationId>/build.<随机编号>/`；发布工作流直接读取本次构建返回路径。两个安装包均被应用选择器排除。
 
 核心多窗口契约不匹配时，在 pscanvas 安装自定义 Hook 前停止，保留原生 Activity。Activity 负责生命周期与组件组装，任务身份、入场、交接、挂起、布局、全屏及释放分别由对应控制器管理；桌面上滑的视图、动画、源帧和交接也独立维护。替换与全屏阶段隔离旧提交回调，入场状态及取消操作有统一入口。部分跨组件 Host 接口仍较宽，编排状态机还需继续收束。
 
 单源码迁移通过本地 99 项回归、35 组布局检查、选择器检查及两种安装身份构建；APK 组件、Xposed 入口和 IPC 标识已核对。设备安装、Hook 加载、取消／后台恢复与视觉验收仍为 **UNVERIFIED**；构建通过不代表运行验收通过。
+
+本次调整仅更新构建隔离与工作流取包方式，运行模块仍保持既有发布快照。构建与签名不代表安装、Hook 或真机视觉已通过。单向导出工具会为后续快照生成 `SOURCE_SNAPSHOT.json`，记录开发来源提交、完整模块指纹和构建脚本哈希；旧快照缺失时应如实标记，不能追写猜测的来源。

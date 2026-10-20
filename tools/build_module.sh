@@ -44,14 +44,11 @@ case "$version" in
   fi
   ;;
 esac
-out="$project_dir/build/windowdeck"
-# A direct research build must not overwrite a public APK with the same version.
-if [ "$application_id" = dev.windowdeck.app ]; then out="$out/$application_id"; fi
-# Wipe the intermediates first. Without this a deleted or renamed source leaves
-# its old .class behind, and the jar/d8 step happily packs that stale class into
-# the APK — which then shows up in bytecode checks as a feature that no longer
-# exists. The signed APKs in $out are left alone.
-rm -rf "$out/classes" "$out/dex" "$out/gen"
+# Compilation is disposable and never writes a versioned candidate directory.
+# A unique directory also isolates simultaneous builds of the same identity.
+scratch="$project_dir/build/scratch/$application_id"
+mkdir -p "$scratch"
+out=$(mktemp -d "$scratch/build.XXXXXXXX")
 mkdir -p "$out/classes" "$out/dex" "$out/gen"
 # Only the generated manifest varies; Java source and Xposed entry stay fixed.
 sed -e "s/ package=\"[^\"]*\"/ package=\"$application_id\"/" \
