@@ -26,7 +26,7 @@ final class MotionSpec {
  static final long FULLSCREEN_MS = 400;
  /** The hang shelf sliding the live windows to the edge fold. */
  static final long SHELF_MS = 500;
- /** Snapshot → real card hand-off. Short on purpose: the two are already pixel-identical. */
+ /** Snapshot → real card hand-off after committed geometry/content; pixel identity is not assumed. */
  static final long CROSS_FADE_MS = 110;
  /** Watchdog for the entrance cover; a failure path must never leave it on screen. */
  static final long COVER_TIMEOUT_MS = 2000;

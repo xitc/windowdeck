@@ -8,8 +8,11 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.util.Log;
 import android.view.Gravity;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,8 +24,9 @@ final class HangShelf {
   Card(Bitmap face,String pkg,Rect start,boolean main){this.face=face;this.pkg=pkg;this.start=new Rect(start);this.main=main;}
  }
  private static final int SMALL_DP=20,LARGE_DP=48;
+ private final ArrayList<FrameLayout> windows=new ArrayList<>();
+ private final ArrayList<View> hitTargets=new ArrayList<>();
  private final ArrayList<ImageView> views=new ArrayList<>();
- private final ArrayList<WindowManager.LayoutParams> params=new ArrayList<>();
  private final ArrayList<Rect> starts=new ArrayList<>();
  private final ArrayList<Rect> ends=new ArrayList<>();
  private WindowManager windowManager;
@@ -37,9 +41,12 @@ final class HangShelf {
   int small=Ui.dp(app,SMALL_DP),large=Ui.dp(app,LARGE_DP);
   Rect[] targets=ends(cards,screen,topBottom,portrait,small,large);
   PackageManager pm=app.getPackageManager();
-  int flags=WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN|WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+  int flags=WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN|WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS|WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
   for(int i=0;i<cards.size();i++){
    Card card=cards.get(i);
+   Rect travel=new Rect(card.start);travel.union(targets[i]);
+   FrameLayout window=new FrameLayout(app);
+   window.setClipChildren(false);
    ImageView view=new ImageView(app);
    view.setScaleType(card.face==null?ImageView.ScaleType.CENTER_INSIDE:ImageView.ScaleType.CENTER_CROP);
    view.setBackgroundColor(0xff202838);
@@ -47,14 +54,16 @@ final class HangShelf {
    else try{view.setImageDrawable(pm.getApplicationIcon(card.pkg));}catch(Throwable ignored){}
    Ui.round(view,Ui.dp(app,card.main?18:10));
    view.setContentDescription(card.main?"主窗口已挂起，点按恢复":"侧窗口已挂起，点按恢复");
-   view.setOnClickListener(v->restore.run());
-   WindowManager.LayoutParams lp=new WindowManager.LayoutParams(card.start.width(),card.start.height(),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,flags,PixelFormat.TRANSLUCENT);
+   FrameLayout.LayoutParams image=new FrameLayout.LayoutParams(card.start.width(),card.start.height());
+   image.leftMargin=card.start.left-travel.left;image.topMargin=card.start.top-travel.top;
+   window.addView(view,image);
+   WindowManager.LayoutParams lp=new WindowManager.LayoutParams(travel.width(),travel.height(),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,flags,PixelFormat.TRANSLUCENT);
    lp.gravity=Gravity.TOP|Gravity.LEFT;
-   lp.x=card.start.left;lp.y=card.start.top;
+   lp.x=travel.left;lp.y=travel.top;
    lp.setTitle(card.main?"WindowDeckHangMain":"WindowDeckHangSide");
    lp.setFitInsetsTypes(0);
-   windowManager.addView(view,lp);
-   views.add(view);params.add(lp);starts.add(new Rect(card.start));ends.add(targets[i]);
+   windowManager.addView(window,lp);
+   windows.add(window);views.add(view);starts.add(new Rect(card.start));ends.add(targets[i]);
   }
   anim=ValueAnimator.ofFloat(0f,1f);
   anim.setDuration(MotionSpec.SHELF_MS);
@@ -63,20 +72,35 @@ final class HangShelf {
    if(anim!=a)return;
    float f=(Float)a.getAnimatedValue();
    for(int i=0;i<views.size();i++){
-    Rect from=starts.get(i),to=ends.get(i);WindowManager.LayoutParams lp=params.get(i);
-    lp.x=from.left+Math.round((to.left-from.left)*f);
-    lp.y=from.top+Math.round((to.top-from.top)*f);
-    try{windowManager.updateViewLayout(views.get(i),lp);}catch(Throwable ignored){}
+    Rect from=starts.get(i),to=ends.get(i);ImageView view=views.get(i);
+    view.setTranslationX(Math.round((to.left-from.left)*f));
+    view.setTranslationY(Math.round((to.top-from.top)*f));
    }
   });
-  anim.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator animation){if(anim==animation)anim=null;}});
+  anim.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator animation){if(anim!=animation)return;anim=null;addHitTargets(app,screen,restore);}});
   anim.start();
+ }
+ private void addHitTargets(Context context,Rect screen,Runnable restore){
+  int flags=WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL|WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN|WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+  for(int i=0;i<windows.size();i++){
+   Rect visible=new Rect(ends.get(i));
+   if(!visible.intersect(screen))continue;
+   View hit=new View(context);
+   hit.setContentDescription(views.get(i).getContentDescription());
+   hit.setOnClickListener(v->restore.run());
+   WindowManager.LayoutParams lp=new WindowManager.LayoutParams(visible.width(),visible.height(),WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,flags,PixelFormat.TRANSLUCENT);
+   lp.gravity=Gravity.TOP|Gravity.LEFT;lp.x=visible.left;lp.y=visible.top;
+   lp.setTitle(i==0?"WindowDeckHangMainTouch":"WindowDeckHangSideTouch");
+   lp.setFitInsetsTypes(0);
+   try{windowManager.addView(hit,lp);hitTargets.add(hit);}catch(Throwable e){Log.w("WindowDeck","hang_touch_target_failed",e);}
+  }
  }
  void hide(){
   ValueAnimator current=anim;anim=null;
   if(current!=null)current.cancel();
-  if(windowManager!=null)for(ImageView view:views)try{windowManager.removeViewImmediate(view);}catch(Throwable ignored){}
-  views.clear();params.clear();starts.clear();ends.clear();
+  if(windowManager!=null)for(View hit:hitTargets)try{windowManager.removeViewImmediate(hit);}catch(Throwable ignored){}
+  if(windowManager!=null)for(FrameLayout window:windows)try{windowManager.removeViewImmediate(window);}catch(Throwable ignored){}
+  hitTargets.clear();windows.clear();views.clear();starts.clear();ends.clear();
  }
  /** @deprecated superseded by {@link MotionSpec#geometry(float)} — the COUI spring C17 itself
   *  uses. The old closed form lives on in {@link SpringCurve#legacyEntrance(float)} for reference;

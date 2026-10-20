@@ -10,9 +10,9 @@ package io.github.xitc.windowdeck;
  *  into an upright plate by {@link OrientationPolicy#rotatePresentation} whether
  *  or not this is on.
  *
- *  <p>The entry screen owns the switch. It reaches the workbench as the
- *  {@link #EXTRA} intent extra, because the workbench runs inside the pscanvas
- *  process and cannot read this app's own preferences. */
+ *  <p>The entry screen owns the switch. The pscanvas host reads it through
+ *  SideWindowSettings through the module provider or an identity-checked
+ *  broadcast; {@link #EXTRA} is the startup fallback. */
 final class AtomicPresentation {
  /** Off unless the user turns it on. */
  static final boolean DEFAULT=false;

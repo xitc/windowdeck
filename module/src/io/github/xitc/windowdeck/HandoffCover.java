@@ -68,7 +68,7 @@ final class HandoffCover {
  private HandoffFrameTrace frameTrace;
  private Runnable pendingSourceMotion;
  private float geometryProgress,backgroundProgress;
- private boolean backgroundStarted;
+ private boolean backgroundStarted,portraitReveal;
  private Consumer<String> closedListener;
  private Consumer<Boolean> motionResult;
  private final HandoffReveal reveal=new HandoffReveal();
@@ -655,6 +655,7 @@ final class HandoffCover {
  private void beginMotion(RectF source,float sourceRadius,RectF target,float targetRadius,Bitmap targetBackdrop,int turns,float[] velocity,long sampledAt,boolean liveReady){
   if(closed||view==null||scene==null)return;
   final boolean portraitEntrance=EntranceMotion.portraitHandoff(turns,captureWidth,captureHeight);
+  portraitReveal=portraitEntrance;
   final long duration=portraitEntrance?MotionSpec.PORTRAIT_HANDOFF_MS:MotionSpec.ADD_CARD_MS;
   float[] rebased=DisplayGeometry.rect(new float[]{source.left,source.top,source.right,source.bottom},captureWidth,captureHeight,turns);
   RectF portrait=new RectF(rebased[0],rebased[1],rebased[2],rebased[3]);
@@ -733,9 +734,10 @@ final class HandoffCover {
  private void fadeToLive(){
   if(closed||view==null)return;
   hideUnderlay();
-  ValueAnimator fade=ValueAnimator.ofFloat(1,0);motion=fade;
-  fade.setDuration(MotionSpec.CROSS_FADE_MS);fade.setInterpolator(MotionSpec::geometry);
-  fade.addUpdateListener(a->{if(!closed&&motion==a)view.setAlpha((Float)a.getAnimatedValue());});
+  ValueAnimator fade=ValueAnimator.ofFloat(0,1);motion=fade;
+  fade.setDuration(MotionSpec.CROSS_FADE_MS);fade.setInterpolator(null);
+  fade.addUpdateListener(a->{if(!closed&&motion==a){float time=(Float)a.getAnimatedValue();view.setAlpha(portraitReveal?EntranceMotion.revealAlpha(time):1-MotionSpec.geometry(time));}});
+  Log.i(TAG,"handoff_reveal_alpha curve="+(portraitReveal?"smooth_alpha":"coui_geometry")+" duration_ms="+MotionSpec.CROSS_FADE_MS);
   fade.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
    if(closed||motion!=a)return;motion=null;
    Consumer<Boolean> result=motionResult;motionResult=null;

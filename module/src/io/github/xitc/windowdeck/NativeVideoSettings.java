@@ -23,9 +23,9 @@ final class NativeVideoSettings {
  static void show(Activity activity){new NativeVideoSettings(activity).open();}
  private void open(){
   selected.addAll(prefs.getStringSet("packages",new HashSet<>(Arrays.asList("tv.acfundanmaku.video","com.google.android.youtube"))));
-  LinearLayout body=new LinearLayout(activity);body.setOrientation(1);int pad=Ui.dp(activity,16);body.setPadding(pad,pad,pad,pad);body.setBackgroundColor(Ui.CHROME);
-  TextView hint=Ui.text(activity,"让名单应用在工作台中使用正常的全屏按钮，需要 Root。设置也会影响这些应用的其他多窗口场景。",14,Ui.MUTED);body.addView(hint);
-  status=Ui.text(activity,"正在读取系统兼容状态…",13,Ui.MUTED);status.setPadding(0,pad,0,pad);body.addView(status);
+  LinearLayout body=new LinearLayout(activity);body.setOrientation(1);int pad=Ui.dp(activity,16);body.setPadding(pad,pad,pad,pad);body.setBackgroundColor(SettingsTheme.cardColor(activity));
+  TextView hint=Ui.text(activity,"让名单应用在工作台中使用正常的全屏按钮，需要 Root。设置也会影响这些应用的其他多窗口场景。",14,SettingsTheme.secondary(activity));body.addView(hint);
+  status=Ui.text(activity,"正在读取系统兼容状态…",13,SettingsTheme.secondary(activity));status.setPadding(0,pad,0,pad);body.addView(status);
   rows=new LinearLayout(activity);rows.setOrientation(1);ScrollView scroll=new ScrollView(activity);scroll.addView(rows);body.addView(scroll,new LinearLayout.LayoutParams(-1,Ui.dp(activity,180)));
   add=button(body,"添加应用");add.setOnClickListener(v->{
    Set<String> excluded=new HashSet<>(selected);excluded.addAll(Arrays.asList("dev.windowdeck.app","io.github.xitc.windowdeck","com.oplus.pscanvas","com.android.launcher","com.android.systemui"));
@@ -43,18 +43,18 @@ final class NativeVideoSettings {
   });}catch(Exception e){main.post(()->{if(active()){setBusy(false);status.setText("读取失败："+e.getMessage());}});}},"native-video-read").start();
  }
  private Button button(LinearLayout parent,String text){
-  Button b=Ui.button(activity,text);b.setTextColor(Ui.TEXT);b.setBackground(Ui.bg(Ui.CARD,Ui.dp(activity,10)));
+  Button b=Ui.button(activity,text);b.setTextColor(SettingsTheme.text(activity));b.setBackground(Ui.bg(SettingsTheme.background(activity),Ui.dp(activity,10)));
   LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,Ui.dp(activity,44));lp.topMargin=Ui.dp(activity,8);parent.addView(b,lp);return b;
  }
  private boolean active(){return !activity.isFinishing()&&!activity.isDestroyed()&&dialog.isShowing();}
  private String label(String pkg){try{return activity.getPackageManager().getApplicationLabel(activity.getPackageManager().getApplicationInfo(pkg,0)).toString();}catch(Exception e){return pkg;}}
  private void render(){
   rows.removeAllViews();
-  if(selected.isEmpty())rows.addView(Ui.text(activity,"名单为空，添加应用后点击应用。",14,Ui.MUTED));
+  if(selected.isEmpty())rows.addView(Ui.text(activity,"名单为空，添加应用后点击应用。",14,SettingsTheme.secondary(activity)));
   for(String pkg:selected){
    LinearLayout row=new LinearLayout(activity);row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-   TextView name=Ui.text(activity,label(pkg),15,Ui.TEXT);name.setSingleLine();name.setEllipsize(android.text.TextUtils.TruncateAt.END);row.addView(name,new LinearLayout.LayoutParams(0,Ui.dp(activity,48),1));
-   Button remove=Ui.button(activity,"移除");remove.setTextColor(Ui.MUTED);remove.setEnabled(!busy);remove.setOnClickListener(v->{selected.remove(pkg);render();status.setText("名单已更改，点击“应用名单”后生效。");});row.addView(remove,new LinearLayout.LayoutParams(Ui.dp(activity,64),Ui.dp(activity,44)));rows.addView(row);
+   TextView name=Ui.text(activity,label(pkg),15,SettingsTheme.text(activity));name.setSingleLine();name.setEllipsize(android.text.TextUtils.TruncateAt.END);row.addView(name,new LinearLayout.LayoutParams(0,Ui.dp(activity,48),1));
+   Button remove=Ui.button(activity,"移除");remove.setTextColor(SettingsTheme.secondary(activity));remove.setEnabled(!busy);remove.setOnClickListener(v->{selected.remove(pkg);render();status.setText("名单已更改，点击“应用名单”后生效。");});row.addView(remove,new LinearLayout.LayoutParams(Ui.dp(activity,64),Ui.dp(activity,44)));rows.addView(row);
   }
  }
  private void setBusy(boolean value){busy=value;for(Button b:new Button[]{add,apply,revoke,defaults})b.setEnabled(!value);render();}

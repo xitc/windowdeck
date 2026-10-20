@@ -31,6 +31,8 @@ final class WorkbenchMenuController {
   boolean backReady();
   boolean backgrounded();
   void cancelAnimation();
+  void abortSideSort(String reason);
+  boolean sideSortActive();
   void cancelAnimation(boolean preservePose);
   CardLayout.Result cardGeometry();
   void chooseApp(WorkbenchSlot replacing);
@@ -95,7 +97,7 @@ final class WorkbenchMenuController {
 
 
  void menu(WorkbenchSlot s){
-  if(host.closing()||s.released||recovering||dragging!=null)return;
+  if(host.sideSortActive()||host.closing()||s.released||recovering||dragging!=null)return;
   showWorkbenchDialog(new AlertDialog.Builder(host.context()).setTitle(s.label).setItems(new String[]{"切换为主应用",s.pinned?"取消固定":"固定此应用","替换应用","从工作台移出"},(d,which)->{
    if(s.released||recovering||dragging!=null)return;
    if(which==0)host.promote(session.slots.indexOf(s));else if(which==1)togglePin(s);else if(which==2)host.chooseApp(s);else removeSlot(s);
@@ -108,7 +110,7 @@ final class WorkbenchMenuController {
  void removeSlot(WorkbenchSlot s){removeSlot(s,false);}
  void removeSlot(WorkbenchSlot s,boolean taskGone){
   int index=session.slots.indexOf(s);if(index<0||host.closing()||s.released)return;
-  if(!taskGone&&(recovering||dragging!=null))return;
+  if(!taskGone&&(host.sideSortActive()||recovering||dragging!=null))return;
   if(!taskGone&&s.pinned){Toast.makeText(host.context(),"请先取消固定",Toast.LENGTH_SHORT).show();return;}
   cancelDrag();
   if(session.slots.size()==1){host.closeWorkbench();return;}
@@ -120,6 +122,7 @@ final class WorkbenchMenuController {
   host.releaseSlot(s);host.updateNaturalBounds();host.layoutCards(false);host.refreshStatus();host.restoreContainerFocus();Log.i(TAG,"remove slot="+s.id+" task="+s.taskId+" count="+session.slots.size());
  }
  void prepareRecovery(WorkbenchSlot excluded,Runnable mutation){
+  host.abortSideSort("recovery");
   host.cancelAnimation();recovering=true;
   for(int i=0;i<session.slots.size();i++){
    WorkbenchSlot active=session.slots.get(i);host.inputRole(active,i==session.primary);
@@ -141,9 +144,9 @@ final class WorkbenchMenuController {
  void clearRecoveryCovers(){
   for(WorkbenchSlot active:session.slots)if(active.recoveryCover!=null){active.recoveryCover.setBitmap(null);active.card.removeView(active.recoveryCover);active.recoveryCover=null;}
  }
- void cancelDrag(){if(dragging!=null){WorkbenchSlot old=dragging;dragging=null;if(old.card!=null)old.card.resetGesture();}}
+ void cancelDrag(){host.abortSideSort("cancel_drag");if(dragging!=null){WorkbenchSlot old=dragging;dragging=null;if(old.card!=null)old.card.resetGesture();}}
  boolean beginDrag(WorkbenchSlot s){
-  if(host.closing()||recovering||host.switching()||dragging!=null||s.released||s.pinned||session.slots.indexOf(s)==session.primary||s.taskId<0)return false;
+  if(host.sideSortActive()||host.closing()||recovering||host.switching()||dragging!=null||s.released||s.pinned||session.slots.indexOf(s)==session.primary||s.taskId<0)return false;
   dragging=s;Log.i(TAG,"drag_start slot="+s.id);return true;
  }
  void finishDrag(WorkbenchSlot s,boolean commit){
@@ -176,6 +179,7 @@ final class WorkbenchMenuController {
   return finish;
  }
  void primaryMenu(){
+  if(host.sideSortActive())return;
   if(host.taskRotationRun()!=null||host.closing()||recovering||dragging!=null||session.slots.isEmpty()||host.more()==null||host.more().getVisibility()!=View.VISIBLE||host.stage()==null||host.stage().getWidth()<=0)return;
   dismissPrimaryMenu();
   WorkbenchSlot main=session.slots.get(session.primary);

@@ -20,17 +20,22 @@ final class AppPicker {
  private static boolean loading;
  private static Runnable pendingBind;
  static void show(Activity activity,Set<String> excluded,Selection callback){
+  boolean settings=activity instanceof MainActivity;
+  int surface=settings?SettingsTheme.cardColor(activity):Ui.CHROME;
+  int card=settings?SettingsTheme.background(activity):Ui.CARD;
+  int foreground=settings?SettingsTheme.text(activity):Ui.TEXT;
+  int muted=settings?SettingsTheme.secondary(activity):Ui.MUTED;
   int pad=Ui.dp(activity,16),rowH=Ui.dp(activity,56),icon=Ui.dp(activity,36),radius=Ui.dp(activity,16);
-  LinearLayout body=new LinearLayout(activity);body.setOrientation(1);body.setBackground(Ui.bg(Ui.CHROME,radius));body.setPadding(pad,pad,pad,pad);
-  TextView title=Ui.text(activity,"选择应用",20,Ui.TEXT);title.setPadding(0,0,0,Ui.dp(activity,12));body.addView(title);
-  EditText search=new EditText(activity);search.setSingleLine();search.setHint("搜索应用");search.setHintTextColor(Ui.MUTED);search.setTextColor(Ui.TEXT);
-  search.setBackground(Ui.bg(Ui.CARD,Ui.dp(activity,12)));search.setPadding(pad,Ui.dp(activity,10),pad,Ui.dp(activity,10));search.setTextSize(15);
+  LinearLayout body=new LinearLayout(activity);body.setOrientation(1);body.setBackground(Ui.bg(surface,radius));body.setPadding(pad,pad,pad,pad);
+  TextView title=Ui.text(activity,"选择应用",20,foreground);title.setPadding(0,0,0,Ui.dp(activity,12));body.addView(title);
+  EditText search=new EditText(activity);search.setSingleLine();search.setHint("搜索应用");search.setHintTextColor(muted);search.setTextColor(foreground);
+  search.setBackground(Ui.bg(card,Ui.dp(activity,12)));search.setPadding(pad,Ui.dp(activity,10),pad,Ui.dp(activity,10));search.setTextSize(15);
   LinearLayout.LayoutParams searchLp=new LinearLayout.LayoutParams(-1,-2);searchLp.bottomMargin=Ui.dp(activity,8);body.addView(search,searchLp);
-  TextView empty=Ui.text(activity,"正在加载应用…",14,Ui.MUTED);empty.setGravity(Gravity.CENTER);empty.setPadding(0,Ui.dp(activity,24),0,Ui.dp(activity,24));
+  TextView empty=Ui.text(activity,"正在加载应用…",14,muted);empty.setGravity(Gravity.CENTER);empty.setPadding(0,Ui.dp(activity,24),0,Ui.dp(activity,24));
   ListView list=new ListView(activity);list.setDivider(null);list.setDividerHeight(0);list.setSelector(android.R.color.transparent);list.setCacheColorHint(0);
   FrameLayout pane=new FrameLayout(activity);pane.addView(list,new FrameLayout.LayoutParams(-1,-1));pane.addView(empty,new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER));
   body.addView(pane,new LinearLayout.LayoutParams(-1,0,1));
-  TextView cancel=Ui.text(activity,"取消",16,Ui.MUTED);cancel.setGravity(Gravity.CENTER);cancel.setPadding(0,Ui.dp(activity,14),0,Ui.dp(activity,4));cancel.setClickable(true);
+  TextView cancel=Ui.text(activity,"取消",16,muted);cancel.setGravity(Gravity.CENTER);cancel.setPadding(0,Ui.dp(activity,14),0,Ui.dp(activity,4));cancel.setClickable(true);
   body.addView(cancel,new LinearLayout.LayoutParams(-1,-2));
   ArrayList<Entry> shown=new ArrayList<>();
   BaseAdapter adapter=new BaseAdapter(){
@@ -44,7 +49,7 @@ final class AppPicker {
      row=new LinearLayout(activity);row.setOrientation(0);row.setGravity(Gravity.CENTER_VERTICAL);row.setPadding(Ui.dp(activity,8),0,Ui.dp(activity,8),0);row.setMinimumHeight(rowH);
      image=new ImageView(activity);image.setScaleType(ImageView.ScaleType.CENTER_CROP);Ui.round(image,Ui.dp(activity,8));
      LinearLayout.LayoutParams iconLp=new LinearLayout.LayoutParams(icon,icon);iconLp.rightMargin=Ui.dp(activity,12);row.addView(image,iconLp);
-     name=Ui.text(activity,"",16,Ui.TEXT);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);row.addView(name,new LinearLayout.LayoutParams(0,-2,1));
+     name=Ui.text(activity,"",16,foreground);name.setSingleLine();name.setEllipsize(TextUtils.TruncateAt.END);row.addView(name,new LinearLayout.LayoutParams(0,-2,1));
     }
     Entry item=shown.get(i);name.setText(item.label);
     if(item.icon==null){

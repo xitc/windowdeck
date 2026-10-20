@@ -6,6 +6,7 @@ import android.os.ResultReceiver;
 /** Framework-only parcel types across launcher and pscanvas class loaders. */
 final class HandoffProtocol {
  static final int READY=1,FAILED=2,CANCELLED=3,PREPARED=4,BACKGROUND=5,POSE_QUERY=6,POSE_COMMITTED=7,OWNERSHIP=8,BOOTSTRAP_COMMITTED=9,SOURCE_RELEASED=10,HOST_STARTED=11;
+ static final int EXISTING_ACCEPTED=12;
  static final String TASK="task",CONTAINER="container",TARGET="target",RADIUS="radius",COMPLETE="complete",BACKDROP="backdrop",ROTATION="rotation",CORNERS="corners",CROP="crop",POSE_REPLY="pose_reply",POSE_STAGE="pose_stage";
  static final String SNAPSHOT="pose_snapshot",SNAPSHOT_CROP="pose_snapshot_crop",SNAPSHOT_COLOR_SPACE="pose_snapshot_color_space";
  /** Actual live fit: task bitmap size, task-space L/T/R/B crop and screen-space LT/RT/RB/LB quad. */

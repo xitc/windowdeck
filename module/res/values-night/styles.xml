@@ -1,0 +1,8 @@
+<resources>
+ <style name="WindowDeckSettingsTheme" parent="android:style/Theme.Material.NoActionBar">
+  <item name="android:colorAccent">#1a8cff</item>
+  <item name="android:windowBackground">#000000</item>
+  <item name="android:colorControlActivated">#1a8cff</item>
+  <item name="android:forceDarkAllowed">false</item>
+ </style>
+</resources>

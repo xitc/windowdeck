@@ -44,6 +44,11 @@ final class TaskSurfaceRenderer {
   boolean entranceInputBlocked();
   void fail(Throwable e);
   void finishDrag(WorkbenchSlot s,boolean commit);
+  boolean beginSideSort(WorkbenchSlot s);
+  void moveSideSort(float dx,float dy);
+  void releaseSideSort();
+  void dismissSideSortMenu();
+  boolean sideSortLifted(WorkbenchSlot s);
   void finishTaskRotation(TaskIdentityController.RotationRun run,String result);
   boolean focusPrimary(String reason);
   FullscreenController.FullscreenRun fullscreenRun();
@@ -156,8 +161,22 @@ final class TaskSurfaceRenderer {
   s.card.gesturesEnabled=host.layoutSwitchVisuals()==null&&host.taskRotationRun()==null&&!host.handoffPresentation()&&TransitionPolicy.gesturesEnabled(isPrimary,host.recovering(),entranceRunning,host.entranceInputBlocked());s.card.vertical=effectiveMode()==PaneLayout.TOP_BOTTOM;s.pin.setVisibility(s.pinned?View.VISIBLE:View.GONE);
   s.card.setContentDescription(s.label+(isPrimary?"主应用，顶部菜单":"，点击切换，长按管理"));
   s.icon.setVisibility(isPrimary?View.GONE:View.VISIBLE);
+  positionCardBadges(s,isPrimary);
   applyCardRadius(s,isPrimary);
   try{if(rom.interceptInput.getBoolean(s.surface)!=preview){rom.interceptInput.setBoolean(s.surface,preview);s.surface.requestLayout();}}catch(Throwable e){host.fail(e);}
+ }
+ void positionCardBadges(WorkbenchSlot s,boolean isPrimary){
+  // The enlarged main can overlap the lower part of a top rail. Keep side
+  // chrome in its exposed top strip, as Vivo's phone holder does.
+  boolean top=!isPrimary&&effectiveMode()==PaneLayout.TOP_BOTTOM;
+  positionBadge(s.icon,top,Ui.dp(host.context(),6));
+  positionBadge(s.pin,top,Ui.dp(host.context(),8));
+ }
+ static void positionBadge(View badge,boolean top,int inset){
+  FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)badge.getLayoutParams();
+  int gravity=Gravity.LEFT|(top?Gravity.TOP:Gravity.BOTTOM),above=top?inset:0,below=top?0:inset;
+  if(lp.gravity==gravity&&lp.topMargin==above&&lp.bottomMargin==below)return;
+  lp.gravity=gravity;lp.topMargin=above;lp.bottomMargin=below;badge.setLayoutParams(lp);
  }
  int cardRadius(boolean isPrimary){return Ui.dp(host.context(),isPrimary?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS);}
  void applyCardRadius(WorkbenchSlot s,boolean isPrimary){
@@ -166,17 +185,22 @@ final class TaskSurfaceRenderer {
 
   int radius=cardRadius(isPrimary);
   s.renderRadius=radius;
+  if(host.stage().ownsSurfaceAperture){motionOutline(s);return;}
   if(isPrimary){
    if(s.card.getBackground() instanceof android.graphics.drawable.GradientDrawable)((android.graphics.drawable.GradientDrawable)s.card.getBackground()).setCornerRadius(radius);
    else s.card.setBackground(Ui.bg(Ui.CARD,radius));
   }else if(s.card.getBackground()!=null)s.card.setBackground(null);
   clipSide(s.card,s.card.getWidth(),s.card.getHeight(),!isPrimary);
   if(s.surface==null||rom.cornerRadius==null)return;
-  Ui.round(s.surface,radius);
+  // The rounded task supplies the projected outline. A rectangular SurfaceView
+  // outline (and its retained native radius) must not cut through a tilted edge.
+  boolean projected=AtomicPresentation.perspective(atomicRotate,!isPrimary)&&rom.leashMatrix4!=null;
+  int surfaceRadius=projected?0:radius;
+  Ui.round(s.surface,surfaceRadius);s.surface.setClipToOutline(!projected);
   try{
-   if(Math.abs(rom.cornerRadius.getFloat(s.surface)-radius)<0.5f)return;
-   rom.cornerRadius.setFloat(s.surface,radius);
-   rom.viewApi.getMethod("setCornerRadius",float.class).invoke(s.surface,(float)radius);
+   if(Math.abs(rom.cornerRadius.getFloat(s.surface)-surfaceRadius)<0.5f)return;
+   rom.cornerRadius.setFloat(s.surface,surfaceRadius);
+   rom.viewApi.getMethod("setCornerRadius",float.class).invoke(s.surface,(float)surfaceRadius);
   }catch(Throwable e){Log.w(TAG,"corner_radius_failed slot="+s.id,e);}
  }
  void updateNaturalBounds(){
@@ -208,7 +232,7 @@ final class TaskSurfaceRenderer {
   try{Method method=rom.canvas.viewMethod("reparent");method.setAccessible(true);method.invoke(s.surface);s.surface.setBackground(null);
    // reparent may return early while a task is being restored. Reapply our
    // display transform explicitly, including when the plate was recreated.
-   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){if(writeLeashFit(s,fit)){if(s.motionPose!=null||(host.poseHeld()&&s==host.poseSlot())||(host.taskRotationRun()!=null&&host.taskRotationRun().slot==s&&host.taskRotationRun().changingLayout)||(host.rotationTransactions()!=null&&host.rotationTransactions().pending())){submitMotionFit(fit);host.stage().invalidate();}else fit.apply();}}}
+   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){if(writeLeashFit(s,fit)){if(s.motionPose!=null||(host.poseHeld()&&s==host.poseSlot())||(host.taskRotationRun()!=null&&host.taskRotationRun().slot==s&&host.taskRotationRun().changingLayout)||(host.rotationTransactions()!=null&&host.rotationTransactions().pending())||projectedHostFrameReady(s)){submitMotionFit(fit);host.stage().invalidate();}else fit.apply();}}}
   catch(Throwable e){Log.w(TAG,"surface_sync_failed slot="+s.id,e);}
  }
  void syncSurface(WorkbenchSlot s){
@@ -264,7 +288,7 @@ final class TaskSurfaceRenderer {
    });
    slot.card.setOnClickListener(v->host.promote(session.slots.indexOf(slot)));
    slot.card.beginDrag=()->host.beginDrag(slot);slot.card.cancelDrag=()->host.finishDrag(slot,false);slot.card.dismiss=()->host.finishDrag(slot,true);
-   slot.card.setOnLongClickListener(v->{if(!host.switching())host.menu(slot);return true;});
+   slot.card.beginSort=()->host.beginSideSort(slot);slot.card.moveSort=(x,y)->host.moveSideSort(x,y);slot.card.releaseSort=host::releaseSideSort;slot.card.dismissSortMenu=host::dismissSideSortMenu;
    slot.surface=(View)rom.canvas.constructor.newInstance(host.context());
    EmbeddedTaskGuard.watch(slot.surface,host.taskId(),embedded->{
     slot.embedded=embedded;
@@ -359,7 +383,7 @@ final class TaskSurfaceRenderer {
      boolean rotationOwns=(host.taskRotationRun()!=null&&host.taskRotationRun().slot==slot&&host.taskRotationRun().changingLayout)
        ||(host.rotationTransactions()!=null&&host.rotationTransactions().pending());
      boolean fullscreenOwns=host.fullscreenRun()!=null&&host.fullscreenRun().lifecycle.open()&&host.fullscreenRun().main==slot;
-     if(fitted&&(slot.motionPose!=null||(host.deferPortrait()&&slot==host.poseSlot())||rotationOwns||fullscreenOwns)&&(!host.closing()||fullscreenOwns)&&!host.stopped()&&!host.backgrounded()
+     if(fitted&&(slot.motionPose!=null||(host.deferPortrait()&&slot==host.poseSlot())||rotationOwns||fullscreenOwns||projectedHostFrameReady(slot))&&(!host.closing()||fullscreenOwns)&&!host.stopped()&&!host.backgrounded()
        &&Looper.myLooper()==handler.getLooper()&&host.stage().isAttachedToWindow()&&host.stage().isHardwareAccelerated()){
       submitMotionFit(t);host.stage().invalidate();return true;
      }
@@ -372,25 +396,34 @@ final class TaskSurfaceRenderer {
    FrameLayout.LayoutParams badge=new FrameLayout.LayoutParams(Ui.dp(host.context(),22),Ui.dp(host.context(),22),Gravity.BOTTOM|Gravity.LEFT);badge.leftMargin=Ui.dp(host.context(),6);badge.bottomMargin=Ui.dp(host.context(),6);slot.card.addView(slot.icon,badge);
    slot.pin=Ui.text(host.context(),"钉",9,0xffffffff);slot.pin.setGravity(Gravity.CENTER);slot.pin.setBackground(Ui.bg(0xff365db5,Ui.dp(host.context(),8)));slot.pin.setContentDescription("已固定，先取消固定才能替换或移出");
    FrameLayout.LayoutParams pinLp=new FrameLayout.LayoutParams(Ui.dp(host.context(),16),Ui.dp(host.context(),16),Gravity.BOTTOM|Gravity.LEFT);pinLp.leftMargin=Ui.dp(host.context(),32);pinLp.bottomMargin=Ui.dp(host.context(),8);slot.card.addView(slot.pin,pinLp);
+   positionCardBadges(slot,session.slots.indexOf(slot)==session.primary);
    host.stage().addView(slot.card);host.layoutCaption();host.status().bringToFront();
    handler.postDelayed(()->{if(!host.closing()&&!slot.released&&slot.taskId<0){slot.failed=true;host.abandonEntrance(slot);host.refreshStatus();Log.w(TAG,"startup_timeout slot="+slot.id);}},10000);
   }catch(Throwable e){slot.failed=true;if(host.replacements().current()!=null&&host.replacements().current().fresh==slot)host.replacements().cancel(host.replacements().current(),"create_failed");host.fail(e);}
  }
  float[] displayQuad(WorkbenchSlot s,int w,int h){
   if(s.motionPose!=null)return CardMotion.localQuad(s.motionPose,w,h);
-  return roleQuad(w,h,s.card.getTop(),session.slots.indexOf(s)!=session.primary);
+  return roleQuad(w,h,s.card.getLeft(),s.card.getTop(),session.slots.indexOf(s)!=session.primary);
  }
- float[] roleQuad(int w,int h,float top,boolean preview){
+ float[] roleQuad(int w,int h,float left,float top,boolean preview){
+  return roleQuad(w,h,left,top,preview,false);
+ }
+ float[] roleQuad(int w,int h,float left,float top,boolean preview,boolean target){
   if(!AtomicPresentation.perspective(atomicRotate,preview)||rom.leashMatrix4==null)
    return new float[]{0,0,w,0,w,h,0,h};
-  float density=host.resources().getDisplayMetrics().density;
-  if(effectiveMode()==PaneLayout.LEFT_RIGHT)
-   return CardPerspective.columnQuad(w,h,density,host.stage().getHeight()/2f-top);
-  return CardPerspective.quad(w,h,effectiveMode(),density);
+  CanvasStage stage=host.stage();
+  CardSpace space=stage.cardSpace();
+  int extent=target?(effectiveMode()==PaneLayout.LEFT_RIGHT?
+    PaneLayout.leftRightSideW(stage.getWidth(),layoutGap()):PaneLayout.topBottomSideH(stage.getHeight(),layoutGap())):
+    effectiveMode()==PaneLayout.LEFT_RIGHT?w:h;
+  return CardPerspective.railTargetQuad(w,h,effectiveMode(),space.density,space.portrait,
+    left+space.x,top+space.y,space.width,space.height,extent);
  }
  CardMotion.Pose rolePose(WorkbenchSlot s,float[] box,boolean preview){
-  int[] src=presentationSize(s),crop=preview?SurfaceFit.coverCrop(src[0],src[1],Math.round(box[2]),Math.round(box[3])):new int[]{0,0,src[0],src[1]};
-  return CardMotion.at(box,roleQuad(Math.round(box[2]),Math.round(box[3]),box[1],preview),
+  // Vivo maps the whole task bounds to the card (snapshot fitXY), not a
+  // centered cover crop. Both rails retain the header and all content edges.
+  int[] src=presentationSize(s),crop=new int[]{0,0,src[0],src[1]};
+  return CardMotion.at(box,roleQuad(Math.round(box[2]),Math.round(box[3]),box[0],box[1],preview,true),
    new float[]{crop[0],crop[1],crop[2],crop[3]},cardRadius(!preview));
  }
  float[] cardBox(WorkbenchSlot s){return new float[]{s.card.getX(),s.card.getY(),Math.max(1,s.card.getWidth()*s.card.getScaleX()),Math.max(1,s.card.getHeight()*s.card.getScaleY())};}
@@ -408,7 +441,7 @@ final class TaskSurfaceRenderer {
   if(s.motionPose!=null)return s.motionPose;
   boolean preview=session.slots.indexOf(s)!=session.primary;
   float[] box=cardBox(s),quad=displayQuad(s,w,h);int[] src=presentationSize(s);
-  int[] crop=preview?SurfaceFit.coverCrop(src[0],src[1],w,h):new int[]{0,0,src[0],src[1]};
+  int[] crop=new int[]{0,0,src[0],src[1]};
   for(int i=0;i<8;i+=2){quad[i]*=box[2]/Math.max(1,w);quad[i+1]*=box[3]/Math.max(1,h);}
   float radius=(s.renderRadius<0?cardRadius(!preview):s.renderRadius)*Math.min(s.card.getScaleX(),s.card.getScaleY());
   return CardMotion.at(box,quad,new float[]{crop[0],crop[1],crop[2],crop[3]},radius);
@@ -430,7 +463,9 @@ final class TaskSurfaceRenderer {
  }
  static float[] identity4(){return new float[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};}
  void clearProjection(WorkbenchSlot s){
+  if(s.card!=null)host.stage().surfaceAperture(s.card,null);
   SurfaceControl leash=s.projectedLeash;
+  if(Log.isLoggable("WindowDeckContour",Log.DEBUG))Log.d("WindowDeckContour","projection_clear slot="+s.id+" task="+s.taskId+" layer="+LiveTaskContent.layerId(leash)+" valid="+(leash!=null&&leash.isValid())+" stopped="+host.stopped());
   if(leash==null||!leash.isValid()||rom.leashMatrix4==null)return;
   try(SurfaceControl.Transaction reset=new SurfaceControl.Transaction()){
    // Only reset our projective matrix. The system owns fullscreen scale/position.
@@ -461,7 +496,9 @@ final class TaskSurfaceRenderer {
   try{
    SurfaceControl leash=(SurfaceControl)rom.taskLeash.get(s.surface);
    SurfaceControl plate=((SurfaceView)s.surface).getSurfaceControl();
-   if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return false;
+   if(leash==null||!leash.isValid()||plate==null||!plate.isValid()){
+    host.stage().surfaceAperture(s.card,null);return false;
+   }
    writeSurfaceOrder(s,t,plate,preview);
    t.setCrop(plate,new Rect(0,0,w,h));
    try{Field bg=SurfaceView.class.getDeclaredField("mBackgroundControl");bg.setAccessible(true);SurfaceControl background=(SurfaceControl)bg.get(s.surface);if(background!=null&&background.isValid())t.setVisibility(background,false);}catch(Throwable ignored){}
@@ -473,14 +510,16 @@ final class TaskSurfaceRenderer {
    // FlexibleTaskView also rounds the parent SurfaceView plate. During a main→side
    // exchange the retained plate is initially scaled about 5x; its fixed radius
    // would clip the correctly rounded task into an excessively round rectangle.
-   // The task leash alone owns the moving outline. Restore the plate's local
-   // radius when the pose settles, inside this same atomic fitting transaction.
-   if(rom.leashRadius!=null)rom.leashRadius.invoke(t,plate,s.motionPose!=null?0f:
+   // A managed aperture keeps the task leash as contour owner even when settled.
+   // Older unsupported hosts retain their native steady-state fallback.
+   if(rom.leashRadius!=null)rom.leashRadius.invoke(t,plate,(host.stage().ownsSurfaceAperture||s.motionPose!=null||
+     (AtomicPresentation.perspective(atomicRotate,preview)&&rom.leashMatrix4!=null))?0f:
      (float)(s.renderRadius<0?cardRadius(!preview):s.renderRadius));
    float x=pose.crop[0],y=pose.crop[1],r=x+pose.crop[2],b=y+pose.crop[3];
    float[] source=CardMotion.sourceQuad(pose,src[0],rotate);
    Rect rect=rotate?new Rect((int)Math.floor(y),(int)Math.floor(src[0]-r),(int)Math.ceil(b),(int)Math.ceil(src[0]-x)):new Rect((int)Math.floor(x),(int)Math.floor(y),(int)Math.ceil(r),(int)Math.ceil(b));
-   t.setCrop(plate,new Rect(0,(int)Math.floor(Math.min(0,target[3])),w,(int)Math.ceil(Math.max(h,target[5]))));
+   int[] projectedBounds=CardPerspective.bounds(w,h,target);
+   t.setCrop(plate,new Rect(projectedBounds[0],projectedBounds[1],projectedBounds[2],projectedBounds[3]));
    if(rotation!=null&&rotation.slot==s&&rotation.changingLayout){
     host.ensureRotationMotion(rotation);
     target=rotation.nativeMotion.target(source,target,rotation.fraction);
@@ -490,25 +529,40 @@ final class TaskSurfaceRenderer {
    Matrix map=new Matrix();if(!map.setPolyToPoly(source,0,target,0,4))return false;
    float[] m=new float[9];map.getValues(m);
    boolean perspective=SurfaceFit.hasPerspective(m,source)&&rom.leashMatrix4!=null;
-   if(!perspective&&rom.leashMatrix4!=null){rom.leashMatrix4.invoke(t,leash,(Object)identity4());s.projectedLeash=null;}
+   boolean presentationMatrix=rom.leashMatrix4!=null&&SurfaceFit.usePresentationMatrix(m,source,
+     rotation!=null&&rotation.slot==s&&rotation.changingLayout);
+   if(presentationMatrix&&!perspective&&s.perspectiveApplied)
+    Log.i(TAG,"presentation_matrix_residual slot="+s.id+" task="+s.taskId+" policy=retain_full_map");
+   if(!presentationMatrix&&rom.leashMatrix4!=null){rom.leashMatrix4.invoke(t,leash,(Object)identity4());s.projectedLeash=null;}
    s.perspectiveApplied=perspective;
    t.setCrop(leash,rect);
    if(rom.leashRadius!=null)rom.leashRadius.invoke(t,leash,CardMotion.sourceRadius(pose));
    // A native wallpaper underlay fills the SurfaceView hole. No rectangular
    // card-colored layer may remain outside the projective task outline.
-   if(perspective){
+   if(presentationMatrix){
     Matrix base=new Matrix();base.setPolyToPoly(source,0,new float[]{0,0,w,0,w,h,0,h},0,4);
     float[] affine=new float[9];base.getValues(affine);
     rom.leashMatrix.invoke(t,leash,affine[0],affine[3],affine[1],affine[4]);t.setPosition(leash,affine[2],affine[5]);
     Matrix inverse=new Matrix();if(!base.invert(inverse))return false;
     Matrix tilt=new Matrix();tilt.setConcat(inverse,map);float[] tiltValues=new float[9];tilt.getValues(tiltValues);
     float[] m4={tiltValues[0],tiltValues[1],0,tiltValues[2],tiltValues[3],tiltValues[4],0,tiltValues[5],0,0,1,0,tiltValues[6],tiltValues[7],0,tiltValues[8]};
+    if(Log.isLoggable("WindowDeckContour",Log.DEBUG)&&LiveTaskContent.layerId(s.projectedLeash)!=LiveTaskContent.layerId(leash))Log.d("WindowDeckContour","projection_adopt slot="+s.id+" task="+s.taskId+" old="+LiveTaskContent.layerId(s.projectedLeash)+" layer="+LiveTaskContent.layerId(leash));
     rom.leashMatrix4.invoke(t,leash,(Object)m4);s.projectedLeash=leash;
    }else if(rom.leashMatrix!=null){
     rom.leashMatrix.invoke(t,leash,m[0],m[3],m[1],m[4]);t.setPosition(leash,m[2],m[5]);
    }
    if(host.layoutSwitchVisuals()!=null&&!preview)host.layoutSwitchVisuals().fitBlur(t,plate,w,h,
      pose.radius/Math.max(0.0001f,Math.min(pose.box[2]/w,pose.box[3]/h)));
+   // Native SurfaceView only punches its unprojected rectangle in the host.
+   // Use the presentation quad (before independent task rotation) for that hole.
+   float[] viewport=displayQuad(s,w,h);
+   if(host.stage().ownsSurfaceAperture)
+    host.stage().surfaceAperture(s.card,viewport,pose.crop[2],pose.crop[3],CardMotion.sourceRadius(pose));
+   else host.stage().surfaceAperture(s.card,CardMotion.projective(viewport,w,h)?viewport:null);
+   if(Log.isLoggable("WindowDeckContour",Log.DEBUG))Log.d("WindowDeckContour","surface_contour task="+s.taskId
+     +" motion="+(s.motionPose!=null)+" managed="+host.stage().ownsSurfaceAperture+" plate="+w+"x"+h
+     +" crop="+Arrays.toString(pose.crop)+" source_radius="+CardMotion.sourceRadius(pose)
+     +" aperture_radius="+s.card.apertureRadius+" quad="+Arrays.toString(viewport));
    s.fittedPose=pose;
    // Local coordinates are meaningful only under this plate. WM can reparent
    // a still-embedded task during an Activity transition, retaining our scale.
@@ -536,9 +590,10 @@ final class TaskSurfaceRenderer {
   if(viewRootSurface==null||!viewRootSurface.isValid())throw new IllegalStateException("Missing host surface");
   // AOSP's setter records the next traversal's requested sublayer. Also write it
   // into this fit transaction, so role swaps do not wait for another traversal.
-  ((SurfaceView)s.surface).setZOrderMediaOverlay(!preview);
+  boolean lifted=host.sideSortLifted(s);
+  ((SurfaceView)s.surface).setZOrderMediaOverlay(!preview||lifted);
   if(surfaceRelativeLayer==null)surfaceRelativeLayer=SurfaceControl.Transaction.class.getMethod("setRelativeLayer",SurfaceControl.class,SurfaceControl.class,int.class);
-  surfaceRelativeLayer.invoke(t,plate,viewRootSurface,preview?-2:-1);
+  surfaceRelativeLayer.invoke(t,plate,viewRootSurface,lifted?-1:preview?-2:-1);
  }
  void apply(WorkbenchSlot s,int[] r){
   if(s.card==null)return;
@@ -554,15 +609,15 @@ final class TaskSurfaceRenderer {
  void clipSide(View card,int w,int h,boolean side){
   if(card!=null){
    Ui.round(card,Ui.dp(host.context(),side?Ui.SIDE_RADIUS:Ui.MAIN_RADIUS));
-   boolean projective=AtomicPresentation.perspective(atomicRotate,side);
+   boolean projective=host.stage().ownsSurfaceAperture||AtomicPresentation.perspective(atomicRotate,side);
    for(WorkbenchSlot s:session.slots)if(s.card==card&&s.motionPose!=null){projective=true;break;}
    card.setClipToOutline(!projective);
    if(card instanceof android.view.ViewGroup)((android.view.ViewGroup)card).setClipChildren(!projective);
   }
  }
  void motionOutline(WorkbenchSlot s){
-  // The rounded task leash supplies the animated outline. A final-role View clip
-  // or rectangular backdrop would cut off the old trapezoid at the first frame.
+  // The rounded task leash supplies the contour in both motion and steady state.
+  // The stage opens the matching projected rounded path; no second View clip.
   s.card.setClipToOutline(false);s.card.setClipChildren(false);
   if(s.card.getBackground()!=null)s.card.setBackground(null);
   if(s.surface!=null){
@@ -570,8 +625,8 @@ final class TaskSurfaceRenderer {
    s.surface.setClipToOutline(false);
    // SurfaceView also punches a rounded hole in the host Canvas. That radius is
    // multiplied by the card scale, independently of the SurfaceControl plate.
-   // Keep both the ROM's retained radius and the Canvas hole square while the
-   // task leash supplies the animated outline; applyCardRadius restores them.
+   // The aperture hook suppresses this native hole only while our contour is
+   // present. Without that hook, retain the earlier motion-only fallback.
    try{
     if(rom.cornerRadius!=null&&rom.cornerRadius.getFloat(s.surface)!=0f)rom.cornerRadius.setFloat(s.surface,0f);
     float hole=((Number)rom.viewApi.getMethod("getCornerRadius").invoke(s.surface)).floatValue();
@@ -583,6 +638,10 @@ final class TaskSurfaceRenderer {
   s.motionPose=pose;s.card.setPivotX(0);s.card.setPivotY(0);
   s.card.setTranslationX(pose.box[0]-target.box[0]);s.card.setTranslationY(pose.box[1]-target.box[1]);
   s.card.setScaleX(pose.box[2]/target.box[2]);s.card.setScaleY(pose.box[3]/target.box[3]);motionOutline(s);
+ }
+ boolean projectedHostFrameReady(WorkbenchSlot s){
+  return s.card!=null&&s.card.surfaceAperture!=null&&Looper.myLooper()==handler.getLooper()
+    &&host.stage().isAttachedToWindow()&&host.stage().isHardwareAccelerated();
  }
  void submitMotionFit(SurfaceControl.Transaction fit){
   TaskIdentityController.RotationRun run=host.taskRotationRun();
@@ -602,7 +661,7 @@ final class TaskSurfaceRenderer {
  }
  void raiseMain(){
   if(session.primary<0||session.primary>=session.slots.size())return;
-  WorkbenchSlot s=session.slots.get(session.primary);if(s.card!=null)s.card.bringToFront();
+  WorkbenchSlot s=session.slots.get(session.primary);host.stage().mainCard=s.card;if(s.card!=null)s.card.bringToFront();
   if(host.status()!=null)host.status().bringToFront();
  }
 void resetCardTransform(WorkbenchSlot s){s.card.setTranslationX(0);s.card.setTranslationY(0);s.card.setScaleX(1);s.card.setScaleY(1);s.motionFromRadius=-1f;s.renderRadius=-1;applyCardRadius(s,session.slots.indexOf(s)==session.primary);}
@@ -621,7 +680,9 @@ void animateCardRadius(WorkbenchSlot s,float fraction,float scaleX,float scaleY)
   float target=cardRadius(isPrimary),from=s.motionFromRadius<0?target:s.motionFromRadius;
   int radius=Math.round(MotionSpec.viewRadius(from,target,fraction,scaleX,scaleY));
   if(radius==s.renderRadius)return;
-  s.renderRadius=radius;Ui.round(s.card,radius);
+  s.renderRadius=radius;
+  if(host.stage().ownsSurfaceAperture){motionOutline(s);return;}
+  Ui.round(s.card,radius);
   if(s.card.getBackground() instanceof android.graphics.drawable.GradientDrawable)
    ((android.graphics.drawable.GradientDrawable)s.card.getBackground()).setCornerRadius(radius);
 }

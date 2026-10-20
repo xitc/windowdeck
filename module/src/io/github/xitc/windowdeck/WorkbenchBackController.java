@@ -42,6 +42,7 @@ final class WorkbenchBackController {
   int imeBottom();
   boolean keepSurfaceOnBackground();
   int layoutMode();
+  boolean layoutPreparationPending();
   int modalWindows();
   PopupWindow primaryPopup();
   void publishState(int count);
@@ -83,6 +84,10 @@ final class WorkbenchBackController {
 
  boolean backReady(){return host.taskRotationRun()==null&&!host.switchPreparation().pending()&&!host.closing()&&!host.backgrounded()&&!host.stopped()&&host.modalWindows()==0&&!host.recovering()&&!host.switching()&&!host.entranceInputBlocked()&&!host.handoffPresentation()&&host.dragging()==null&&!session.slots.isEmpty();}
  boolean focusPrimary(String reason){
+  // Menu dismissal is posted while layout snapshots are being prepared. Do not
+  // insert a synchronous WM focus round trip ahead of their bounded callback.
+  // The transition restores focus after settling; a cancelled prepare retries it.
+  if(host.layoutPreparationPending())return false;
   if(!backReady()||host.stage()==null||!host.stage().isShown()||host.screenArrival())return false;
   WorkbenchSlot main=session.slots.get(session.primary);if(main.released||main.taskId<0)return false;
   host.refreshIme();

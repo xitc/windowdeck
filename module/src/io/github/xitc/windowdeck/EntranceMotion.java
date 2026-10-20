@@ -29,6 +29,8 @@ final class EntranceMotion {
  static float backdropFraction(float time){
   float t=Math.max(0,Math.min(1,time));return t*t*(3-2*t);
  }
+ /** Portrait snapshot opacity, with zero endpoint slopes over the actual reveal duration. */
+ static float revealAlpha(float time){return 1-backdropFraction(time);}
  /** Project measured screen-space rectangle velocity onto the requested trajectory.
   * Reject stale/opposing motion rather than transferring finger velocity across coordinate spaces. */
  static float startSpeed(float[] source,float[] target,float[] velocity,long ageMs,long durationMs){

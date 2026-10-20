@@ -23,6 +23,10 @@ public final class WorkbenchStateProvider extends ContentProvider {
    prefs.edit().putInt("container",container).putInt("count",count).putLong("token",token).apply();
    Log.i("WindowDeck","state_published container="+container+" count="+count);return Bundle.EMPTY;
   }
+  if(SideWindowSettings.PREF.equals(method)){
+   if(!host)return null;
+   Bundle answer=new Bundle();answer.putBoolean(SideWindowSettings.PREF,SideWindowSettings.local(getContext()));return answer;
+  }
   if(HangPlace.PREF.equals(method)){
    if(!host||getContext()==null)return null;
    Bundle answer=new Bundle();

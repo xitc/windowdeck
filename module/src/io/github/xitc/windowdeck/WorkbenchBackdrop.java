@@ -32,7 +32,7 @@ final class WorkbenchBackdrop {
  private BroadcastReceiver receiver;
  private WallpaperManager wallpaperManager;
  private WallpaperManager.OnColorsChangedListener colorsListener;
- private Bitmap owned,nativeBitmap;
+ private Bitmap owned,nativeBitmap,nativeSource;
  private android.view.SurfaceControl underlay;
  private final BackdropRequests requests=new BackdropRequests();
  private int visualGeneration,appliedRotation=-1,appliedW,appliedH;
@@ -86,7 +86,7 @@ final class WorkbenchBackdrop {
   attached=false;requests.invalidate();ready=false;placeholder=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
   if(thread!=null){thread.quitSafely();thread=null;bg=null;}
   if(underlay!=null){try(android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){t.reparent(underlay,null).apply();}underlay.release();underlay=null;}
-  recycle(nativeBitmap);nativeBitmap=null;
+  recycle(nativeBitmap);nativeBitmap=null;nativeSource=null;
   owned=null;activity=null;
  }
  private void register(){
@@ -166,6 +166,7 @@ final class WorkbenchBackdrop {
   if(previous!=null&&previous!=owned)main.postDelayed(()->{if(previous!=owned)recycle(previous);},1000);
  }
  private boolean applyUnderlay(Activity host,Bitmap bitmap,int width,int height){
+  Bitmap created=null;
   try{
    java.lang.reflect.Method rootMethod=android.view.View.class.getDeclaredMethod("getViewRootImpl");rootMethod.setAccessible(true);
    Object root=rootMethod.invoke(host.getWindow().getDecorView());
@@ -173,14 +174,20 @@ final class WorkbenchBackdrop {
    android.view.SurfaceControl parent=(android.view.SurfaceControl)root.getClass().getMethod("getSurfaceControl").invoke(root);
    if(parent==null||!parent.isValid())return false;
    if(underlay==null||!underlay.isValid())underlay=new android.view.SurfaceControl.Builder().setName("WindowDeckWallpaperUnderlay").setParent(parent).setBufferSize(bitmap.getWidth(),bitmap.getHeight()).build();
-   Bitmap next=bitmap.copy(Bitmap.Config.HARDWARE,false);
+   long prepareStarted=android.os.SystemClock.uptimeMillis();
+   boolean reuse=nativeSource==bitmap&&usable(nativeBitmap);
+   Bitmap next=nativeBitmap;
+   if(!reuse){created=bitmap.copy(Bitmap.Config.HARDWARE,false);next=created;}
+   if(!usable(next))return false;
    try(android.hardware.HardwareBuffer buffer=next.getHardwareBuffer();android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){
     t.reparent(underlay,parent).setBuffer(underlay,buffer).setLayer(underlay,-10000).setScale(underlay,width/(float)bitmap.getWidth(),height/(float)bitmap.getHeight()).setPosition(underlay,0,0).setVisibility(underlay,true);
     t.addTransactionCommittedListener(main::post,()->{if(attached&&activity==host&&owned==bitmap){signalReady();Log.i(TAG,"wallpaper_underlay_ready committed=true");}});t.apply();
    }
-   Bitmap previous=nativeBitmap;nativeBitmap=next;if(previous!=null)main.postDelayed(()->recycle(previous),1000);
+   if(!reuse){Bitmap previous=nativeBitmap;nativeBitmap=next;nativeSource=bitmap;created=null;if(previous!=null)main.postDelayed(()->recycle(previous),1000);}
+   Log.i(TAG,"wallpaper_underlay_buffer reused="+reuse+" prepare_ms="+(android.os.SystemClock.uptimeMillis()-prepareStarted));
    return true;
   }catch(Throwable e){Log.w(TAG,"wallpaper_underlay_failed",e);return false;}
+  finally{recycle(created);}
  }
  private static Bitmap fetchDrawable(Activity host){
   try{

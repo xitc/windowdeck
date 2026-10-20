@@ -32,6 +32,11 @@ final class LiveWorkbenchState {
   Bundle state=latest;if(state==null)return null;
   return new int[]{state.getInt("containerTaskId",-1),state.getInt("count",0)};
  }
+ static SwipeMembership swipeMembership(){
+  Bundle state=latest;
+  if(state==null||state.getInt("count",0)<=0)return null;
+  return new SwipeMembership(state.getInt("containerTaskId",-1),state.getInt("userId",-1),state.getStringArray("packages"),state.getIntArray("tasks"));
+ }
  static void register(Context context){
   if(context!=null)CandidateProbe.warm(context);
   if(registered)return;

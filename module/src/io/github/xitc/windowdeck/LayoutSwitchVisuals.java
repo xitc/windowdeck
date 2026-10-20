@@ -18,7 +18,7 @@ final class LayoutSwitchVisuals implements AutoCloseable {
  private final int oldMode;
  private final float oldExtent;
  private SurfaceControl blur,parent;
- private Method setBlur;
+ private Method setBlur,setCorner;
  private boolean blurUnavailable,closed;
  private int radius=LayoutSwitchMotion.BLUR_RADIUS;
  LayoutSwitchVisuals(FrameLayout stage,int oldMode,float oldExtent){
@@ -26,13 +26,11 @@ final class LayoutSwitchVisuals implements AutoCloseable {
   ghosts=new FrameLayout(stage.getContext());ghosts.setClipChildren(false);ghosts.setClipToPadding(false);
   ghosts.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
  }
- void side(Bitmap bitmap,CardMotion.Pose pose,int taskWidth,int taskHeight,int presentedWidth,boolean rotate){
+ void sideOwned(Bitmap bitmap,CardMotion.Pose pose,int taskWidth,int taskHeight,int presentedWidth,boolean rotate){
   if(bitmap==null||bitmap.isRecycled())throw new IllegalStateException("Missing side snapshot");
-  // getSnapBitMap's ownership is unspecified. Keep a private copy and never recycle its result.
-  Bitmap copy=bitmap.copy(Bitmap.Config.ARGB_8888,false);
-  if(copy==null)throw new IllegalStateException("Uncopyable side snapshot");
-  owned.add(copy);
-  RecoveryCover cover=new RecoveryCover(stage.getContext());cover.setBitmap(copy);
+  // The background capture already made an owned software copy at preview size.
+  owned.add(bitmap);
+  RecoveryCover cover=new RecoveryCover(stage.getContext());cover.setBitmap(bitmap);
   cover.fit(CardMotion.sourceQuad(pose,presentedWidth,rotate),pose.quad,taskWidth,taskHeight,CardMotion.sourceRadius(pose));
   ghosts.addView(cover,new FrameLayout.LayoutParams(stage.getWidth(),stage.getHeight()));
  }
@@ -61,6 +59,7 @@ final class LayoutSwitchVisuals implements AutoCloseable {
    if(blur==null){
     if(radius==0)return;
     setBlur=SurfaceControl.Transaction.class.getMethod("setBackgroundBlurRadius",SurfaceControl.class,int.class);
+    setCorner=SurfaceControl.Transaction.class.getMethod("setCornerRadius",SurfaceControl.class,float.class);
     SurfaceControl.Builder builder=SurfaceControl.Builder.class.getConstructor().newInstance();
     SurfaceControl.Builder.class.getMethod("setName",String.class).invoke(builder,"WindowDeck-LayoutSwitchMainBlur");
     SurfaceControl.Builder.class.getMethod("setParent",SurfaceControl.class).invoke(builder,plate);
@@ -71,7 +70,7 @@ final class LayoutSwitchVisuals implements AutoCloseable {
    }
    if(parent!=plate)throw new IllegalStateException("Main plate replaced during layout switch");
    transaction.setCrop(blur,new Rect(0,0,width,height));
-   SurfaceControl.Transaction.class.getMethod("setCornerRadius",SurfaceControl.class,float.class).invoke(transaction,blur,corner);
+   setCorner.invoke(transaction,blur,corner);
    setBlur.invoke(transaction,blur,radius);
   }catch(Throwable e){blurUnavailable=true;removeBlur();Log.w("WindowDeck","layout_switch_blur_degraded",e);}
  }

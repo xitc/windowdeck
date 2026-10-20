@@ -11,8 +11,9 @@ final class SwipeCandidate {
   boolean topCanvas(){return "com.oplus.pscanvas".equals(topPackage);}
  }
  static final class Match {
-  final int task,container;
-  Match(int task,int container){this.task=task;this.container=container;}
+  final int task,container,existingTask;
+  Match(int task,int container){this(task,container,-1);}
+  Match(int task,int container,int existingTask){this.task=task;this.container=container;this.existingTask=existingTask;}
  }
  private SwipeCandidate(){}
  /**
@@ -21,6 +22,9 @@ final class SwipeCandidate {
   * the entry available, but never use this result to authorize adding a task (see {@link #match}).
   */
  static boolean showEntry(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount){
+  return showEntry(source,tasks,stateKnown,stateContainer,stateCount,null);
+ }
+ static boolean showEntry(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount,SwipeMembership members){
   if(source<0)return false;
   if(tasks==null)return true;
   for(Task info:tasks){
@@ -29,7 +33,8 @@ final class SwipeCandidate {
     if(info.userId!=0||info.baseCanvas()||info.topCanvas()
       ||"com.android.launcher".equals(info.topPackage)||ModulePackages.isModule(info.topPackage))return false;
    }
-   if(info.workbench&&info.topCanvas()&&stateKnown&&info.id==stateContainer&&stateCount>=Caps.MAX_TASKS)return false;
+   if(info.workbench&&info.topCanvas()&&stateKnown&&info.id==stateContainer&&stateCount>=Caps.MAX_TASKS
+     &&existing(source,tasks,members,stateContainer)<0)return false;
   }
   return true;
  }
@@ -38,6 +43,9 @@ final class SwipeCandidate {
   *        A live container with no published state is refused instead of queried here.
   */
  static Match match(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount){
+  return match(source,tasks,stateKnown,stateContainer,stateCount,null);
+ }
+ static Match match(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount,SwipeMembership members){
   if(source<0||tasks==null)return null;
   Task sourceInfo=null,containerInfo=null;boolean otherCanvas=false;
   for(Task info:tasks){
@@ -49,14 +57,20 @@ final class SwipeCandidate {
   if(containerInfo==null&&otherCanvas)return null;
   if(sourceInfo==null||sourceInfo.basePackage==null||sourceInfo.topPackage==null)return null;
   int live=containerInfo==null?-1:containerInfo.id;
+  int existing=live==stateContainer?existing(source,tasks,members,live):-1;
   if(live>=0&&source==live)return null;
   if(!stateKnown){if(live>=0)return null;}
-  else if(!IngressPolicy.canEnter(live,stateContainer,stateCount))return null;
+  else if(!IngressPolicy.canEnter(live,stateContainer,stateCount,existing>=0))return null;
   if(!sourceInfo.basePackage.equals(sourceInfo.topPackage))return null;
   if(sourceInfo.userId!=0||(containerInfo!=null&&containerInfo.userId!=0))return null;
   if(sourceInfo.windowMode!=1)return null;
   String pkg=sourceInfo.topPackage;
   if("com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)||ModulePackages.isModule(pkg))return null;
-  return new Match(source,live);
+  return new Match(source,live,existing);
+ }
+ private static int existing(int source,Task[] tasks,SwipeMembership members,int container){
+  if(members==null||tasks==null)return -1;
+  for(Task task:tasks)if(task!=null&&task.id==source)return members.task(container,task.userId,task.basePackage,task.topPackage);
+  return -1;
  }
 }

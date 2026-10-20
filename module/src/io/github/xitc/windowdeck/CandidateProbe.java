@@ -49,7 +49,7 @@ final class CandidateProbe {
   boolean known=published!=null||(shot!=null&&shot.providerKnown);
   int container=published!=null?published[0]:shot!=null?shot.providerContainer:-1;
   int count=published!=null?published[1]:shot!=null?shot.providerCount:0;
-  return SwipeCandidate.showEntry(runningTask(handler),shot==null?null:shot.tasks,known,container,count);
+  return SwipeCandidate.showEntry(runningTask(handler),shot==null?null:shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
  }
  static SwipeCandidate.Match match(Object handler){
   Snapshot shot=snapshot;
@@ -60,7 +60,7 @@ final class CandidateProbe {
   if(published!=null){known=true;container=published[0];count=published[1];}
   else if(shot.providerKnown){known=true;container=shot.providerContainer;count=shot.providerCount;}
   else{known=false;container=-1;count=0;}
-  return SwipeCandidate.match(source,shot.tasks,known,container,count);
+  return SwipeCandidate.match(source,shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
  }
  private static void loop(){
   while(true){

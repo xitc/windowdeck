@@ -1,6 +1,16 @@
 package io.github.xitc.windowdeck;
 /** Cover-crop a source buffer into a destination plate. Row is left, top, width, height. */
 final class SurfaceFit {
+ /** Tiny projective terms can fall below the perspective threshold while their
+  * affine part still shears. C17 strips that affine part from host submissions.
+  * Keep the full presentation map until it really preserves rectangles. An
+  * independent task rotation continues through the privileged rotation bridge. */
+ static boolean usePresentationMatrix(float[] matrix,float[] source,boolean taskRotation){
+  return hasPerspective(matrix,source)||(!taskRotation&&!preservesRectangles(matrix));
+ }
+ static boolean preservesRectangles(float[] matrix){
+  return (matrix[1]==0f&&matrix[3]==0f)||(matrix[0]==0f&&matrix[4]==0f);
+ }
  /** Perspective changes the homogeneous denominator across the source crop.
   * A rotated, translated, or sheared rectangle is still affine; comparing its
   * corners with an axis-aligned plate does not distinguish these cases. */

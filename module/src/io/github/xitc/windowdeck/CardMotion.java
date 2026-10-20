@@ -16,6 +16,8 @@ final class CardMotion {
  }
  static Pose between(Pose from,Pose to,float fraction){
   float f=Math.max(0,Math.min(1,fraction));
+  if(f==0)return new Pose(from.box,from.quad,from.crop,from.radius);
+  if(f==1)return new Pose(to.box,to.quad,to.crop,to.radius);
   return new Pose(blend(from.box,to.box,f),blend(from.quad,to.quad,f),
    blend(from.crop,to.crop,f),from.radius+(to.radius-from.radius)*f);
  }

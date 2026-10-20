@@ -169,6 +169,11 @@ final class SwipeReleaseHandoff {
   });
   android.os.ResultReceiver localReady=new android.os.ResultReceiver(main){
    @Override protected void onReceiveResult(int code,Bundle data){
+    if(code==HandoffProtocol.EXISTING_ACCEPTED){
+     outcome[0]=HandoffProtocol.READY;
+     Log.i(TAG,"swipe_existing_handoff accepted=true task="+candidate.task+" container="+candidate.container);
+     finish.run();return;
+    }
     if(code==HandoffProtocol.HOST_STARTED){
      if(finished.get()||portraitWait==null)return;
      if(data==null||!portraitWait.hostStarted(data.getInt(HandoffProtocol.TASK,-1),data.getInt(HandoffProtocol.CONTAINER,-1),
@@ -405,13 +410,11 @@ final class SwipeReleaseHandoff {
       try{TaskFrontBinder.moveToFront(context,candidate.container);}
       catch(Throwable e){Log.w(TAG,"swipe_prepared_front_failed",e);finish.run();}
      }
-     // 3 = the host already holds this app and refused the add. The original raises the
-     // window it has instead of opening a second one, so raise the container and stop.
-     else if(result==3){
-      finish.run();
-      try{TaskFrontBinder.moveToFront(context,candidate.container);}
-      catch(Throwable e){Log.w(TAG,"swipe_existing_front_failed",e);}
+     else if(result==4){
+      try{TaskFrontBinder.moveToFront(context,candidate.container);ready.send(HandoffProtocol.EXISTING_ACCEPTED,Bundle.EMPTY);}
+      catch(Throwable e){Log.w(TAG,"swipe_existing_front_failed",e);finish.run();}
      }
+     else if(result==3)finish.run();
      else if(result==0){finish.run();dispatchRootHandoff(context,candidate);}
      else if(result!=1)finish.run();
     }

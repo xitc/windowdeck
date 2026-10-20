@@ -46,8 +46,10 @@ final class CanvasContract {
   viewMethod("setEnforceStart",void.class,boolean.class);
   viewMethod("setNoNeedStartEmbedded",void.class,boolean.class);
   viewMethod("release",void.class);
-  viewMethod("releaseExtraView",void.class);
-  viewMethod("reparent",void.class);
+  // Both are private on shipping C17 builds (verified on PJZ110). getMethod()
+  // finds only public methods and would disable every custom host hook.
+  declaredViewMethod("releaseExtraView");
+  declaredViewMethod("reparent");
   viewMethod("interceptBackPressedOnTaskRoot",void.class,boolean.class);
   managerMethod("isAppSupportPocketStudio",boolean.class,Intent.class,int.class);
   managerMethod("removeEmbeddedContainerTask",void.class,int.class,int.class);
@@ -87,6 +89,12 @@ final class CanvasContract {
  }
  private void viewMethod(String name,Class<?> result,Class<?>... args) throws ReflectiveOperationException {
   viewMethods.put(name,method(view,name,result,false,args));
+ }
+ private void declaredViewMethod(String name) throws ReflectiveOperationException {
+  Method method=view.getDeclaredMethod(name);
+  require(method.getReturnType()==void.class&&!Modifier.isStatic(method.getModifiers()),
+    TASK_VIEW+"."+name+" expected instance void");
+  method.setAccessible(true);viewMethods.put(name,method);
  }
  private void managerMethod(String name,Class<?> result,Class<?>... args) throws ReflectiveOperationException {
   managerMethods.put(name,method(manager,name,result,false,args));

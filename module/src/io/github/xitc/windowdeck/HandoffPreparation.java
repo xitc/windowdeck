@@ -4,9 +4,9 @@ import java.util.function.BiPredicate;
 
 /** Geometry may travel before live pixels; background never implies live readiness. */
 final class HandoffPreparation<T> {
- /** PREPARED may precede draw/fit for the original task in a stable single-card layout. */
- static boolean singleTask(int count,int task,int sourceTask,boolean geometryReady){
-  return count==1&&task>=0&&task==sourceTask&&geometryReady;
+ /** PREPARED may precede draw/fit only after the original task and whole group are measured. */
+ static boolean measuredLayout(int count,int task,int sourceTask,boolean geometryReady){
+  return count>=1&&count<=Caps.MAX_TASKS&&task>=0&&task==sourceTask&&geometryReady;
  }
  enum Event { PREPARED, BACKGROUND, READY }
  enum Action { WAIT, START, START_LIVE, BACKGROUND, LIVE, IGNORE, REJECT }

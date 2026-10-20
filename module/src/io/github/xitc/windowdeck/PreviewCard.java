@@ -8,19 +8,39 @@ import android.widget.FrameLayout;
 import java.util.function.BooleanSupplier;
 /** Owns each gesture through UP/CANCEL; previews never forward input to a task. */
 final class PreviewCard extends FrameLayout {
+ float[] surfaceAperture;
+ float apertureWidth,apertureHeight,apertureRadius;
  boolean preview=true, gesturesEnabled=true, vertical;
  BooleanSupplier beginDrag=()->false;
- Runnable cancelDrag=()->{}, dismiss=()->{};
+ Runnable cancelDrag=()->{}, dismiss=()->{}, releaseSort=()->{}, dismissSortMenu=()->{};
+ BooleanSupplier beginSort=()->false;
+ java.util.function.BiConsumer<Float,Float> moveSort=(x,y)->{};
+ private boolean sorting;
+ private float lastX,lastY,sortX,sortY;
  private float downX,downY;
  private boolean dragging,suppressed;
  private VelocityTracker velocity;
  private ValueAnimator settle;
- PreviewCard(Context context){super(context);setClickable(true);}
+ PreviewCard(Context context){super(context);setClickable(true);setOnLongClickListener(v->{
+  if(suppressed||dragging||!gesturesEnabled||!beginSort.getAsBoolean())return true;
+  sorting=true;sortX=lastX;sortY=lastY;getParent().requestDisallowInterceptTouchEvent(true);return true;
+ });}
  @Override public boolean onInterceptTouchEvent(MotionEvent event){return preview||super.onInterceptTouchEvent(event);}
  @Override public boolean onTouchEvent(MotionEvent e){
   if(!preview)return super.onTouchEvent(e);
-  int action=e.getActionMasked();
+  int action=e.getActionMasked();lastX=e.getRawX();lastY=e.getRawY();
+  if(sorting){
+   if(action==MotionEvent.ACTION_MOVE)moveSort.accept(lastX-sortX,lastY-sortY);
+   if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL||action==MotionEvent.ACTION_POINTER_DOWN){
+    sorting=false;suppressed=true;cancelLongPress();setPressed(false);recycleVelocity();
+    MotionEvent cancel=MotionEvent.obtain(e);cancel.setAction(MotionEvent.ACTION_CANCEL);super.onTouchEvent(cancel);cancel.recycle();
+    releaseSort.run();getParent().requestDisallowInterceptTouchEvent(false);
+   }
+   return true;
+  }
   if(action==MotionEvent.ACTION_DOWN){
+   if(!gesturesEnabled){suppressed=true;return true;}
+   dismissSortMenu.run();
    if(dragging)cancelDrag.run();resetGesture();downX=e.getRawX();downY=e.getRawY();suppressed=!gesturesEnabled;
    velocity=VelocityTracker.obtain();track(e);
    if(!suppressed)super.onTouchEvent(e);return true;
@@ -50,6 +70,8 @@ final class PreviewCard extends FrameLayout {
   if(action==MotionEvent.ACTION_UP)recycleVelocity();
   return result;
  }
+ float downRawX(){return downX;}
+ float downRawY(){return downY;}
  private void track(MotionEvent e){
   // View translation changes local coordinates; velocity must use screen coordinates.
   MotionEvent raw=MotionEvent.obtain(e);raw.offsetLocation(e.getRawX()-e.getX(),e.getRawY()-e.getY());velocity.addMovement(raw);raw.recycle();
@@ -65,7 +87,8 @@ final class PreviewCard extends FrameLayout {
  }
  void resetGesture(){
   if(settle!=null){ValueAnimator old=settle;settle=null;old.cancel();}
-  recycleVelocity();dragging=false;suppressed=true;
+  recycleVelocity();dragging=false;sorting=false;suppressed=true;
+  if(getParent()!=null)getParent().requestDisallowInterceptTouchEvent(false);
   setTranslationX(0);setTranslationY(0);setAlpha(1);cancelLongPress();setPressed(false);
   MotionEvent cancel=MotionEvent.obtain(0,android.os.SystemClock.uptimeMillis(),MotionEvent.ACTION_CANCEL,0,0,0);super.onTouchEvent(cancel);cancel.recycle();
  }

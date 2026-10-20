@@ -33,6 +33,7 @@ final class HandoffController {
   boolean backgrounded();
   void beginHangEntrance();
   void cancelAnimation();
+  void abortSideSort(String reason);
   void cancelAnimation(boolean preservePose);
   CardLayout.Result cardGeometry();
   int cardRadius(boolean isPrimary);
@@ -89,6 +90,7 @@ final class HandoffController {
   void unlockEntranceInput();
   void updateNaturalBounds();
   WorkbenchSlot validateSourceTask(int id,int user) throws Exception;
+  void queueExistingSwitch(WorkbenchSlot selected,long selectionSession);
   boolean writeLeashFit(WorkbenchSlot s,SurfaceControl.Transaction t);
  }
 
@@ -115,8 +117,43 @@ final class HandoffController {
  boolean presentationLiveReady;
  View entranceFlying;
  WorkbenchSlot entranceSlot;
+ WorkbenchSlot existingSwipeSlot;
+ int existingSwipeTask=-1;
 
 
+ /** 0 is a new app, 4 is a validated reuse, 3 is a rejected reuse request. */
+ int restoreExistingTask(Intent request){
+  int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
+  if(id<0||user!=android.os.Process.myUid()/100000||request.getIntExtra("windowdeck_container_task_id",-1)!=host.taskId()
+    ||host.closing()||host.recovering()||!host.initialized()||host.pendingPickerLaunch()!=null)return 3;
+  try{
+   ActivityManager.RunningTaskInfo source=null;
+   java.util.List<?> tasks=rom.canvas.tasks();
+   for(Object value:tasks){ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)value;if(task.taskId==id)source=task;}
+   if(source==null||source.baseActivity==null||source.topActivity==null
+     ||source.getClass().getField("userId").getInt(source)!=user
+     ||((Number)source.getClass().getMethod("getWindowingMode").invoke(source)).intValue()!=1
+     ||!source.baseActivity.getPackageName().equals(source.topActivity.getPackageName()))return 3;
+   String pkg=source.baseActivity.getPackageName();
+   for(WorkbenchSlot slot:session.slots){
+    if(slot.released||!slot.component.getPackageName().equals(pkg))continue;
+    if(entrance.pending()!=null||host.addAnimation()!=null)return 3;
+    ActivityManager.RunningTaskInfo held=null;
+    for(Object value:tasks){ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)value;if(task.taskId==slot.taskId)held=task;}
+    if(held==null||held.baseActivity==null||!pkg.equals(held.baseActivity.getPackageName())
+      ||held.getClass().getField("userId").getInt(held)!=user)return 3;
+    // onResume restores the original task with the existing embedding options.
+    // Do not create a second Slot or send this through the add entrance watchdog.
+    host.abortSideSort("existing_restore");
+    if(slot.taskId==id||!slot.embedded)slot.pendingTask=slot.taskId;
+    existingSwipeSlot=slot;existingSwipeTask=slot.taskId;
+    if(!host.stopped()&&!host.backgrounded())resumeExistingSwipe();
+    Log.i(TAG,"swipe_existing_restored source="+id+" task="+slot.taskId+" slot="+slot.id+" container="+host.taskId()+" count="+session.slots.size());
+    return 4;
+   }
+   return 0;
+  }catch(Throwable e){Log.w(TAG,"swipe_existing_restore_failed task="+id,e);return 3;}
+ }
  boolean addExistingTask(Intent request){
   int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
   int expectedContainer=request.getIntExtra("windowdeck_container_task_id",-1);
@@ -131,6 +168,7 @@ final class HandoffController {
   }catch(Throwable e){Log.w(TAG,"add_existing_failed task="+id,e);if(!host.hangQuiet())Toast.makeText(host.context(),"未能加入："+(e.getMessage()==null?"原应用保持不变":e.getMessage()),Toast.LENGTH_LONG).show();return false;}
  }
  boolean attachTaskEntrance(WorkbenchSlot fresh,boolean replace,boolean hang,Intent request) throws Exception {
+   host.abortSideSort("task_entrance");
    if(replace){
     WorkbenchSlot old=session.slots.get(session.primary);if(old.pinned)throw new IllegalArgumentException("请先取消固定");
     host.prepareReplacement(session.slots.indexOf(old),old,fresh);
@@ -198,9 +236,9 @@ void requestEntranceFrame(){
   if(host.deferPortrait())return; // The live-pose path owns layout until rotation/final fit commit.
   sendHandoffBackground();
   if(entrance.pending()==null||!entrance.frontReady()||host.stopped()||host.backgrounded()||host.closing()||host.stage().getWidth()==0||entrance.framePending())return;
-  // A measured single-task target can start the opaque snapshot before live
+  // A measured whole-group target can start the opaque snapshot before live
   // content and wallpaper finish. The launcher only accepts a hole-free expansion.
-  if(gestureHandoff&&HandoffPreparation.singleTask(session.slots.size(),entrance.pending().taskId,entrance.pending().sourceTaskId,
+  if(gestureHandoff&&HandoffPreparation.measuredLayout(session.slots.size(),entrance.pending().taskId,entrance.pending().sourceTaskId,
     handoffReady!=null&&handoffGeometryKey()!=null))beginHandoffPresentation(entrance.pending(),false);
   // Only the window having *something* to draw is required. The wallpaper underlay is loaded on
   // a background thread, and waiting for it held the whole entrance behind an async task
@@ -261,8 +299,8 @@ void requestEntranceFrame(){
   String key=handoffLayoutKey();
   if(key==null){retryHandoffLayout(expected);return;}
   // L1: measured geometry can travel under the opaque snapshot while the final fit/frame
-  // barrier completes. Multi-card/hot-add retains the existing stable-layout path.
-  if(!host.deferPortrait()&&HandoffPreparation.singleTask(session.slots.size(),expected.taskId,expected.sourceTaskId,handoffReady!=null))
+  // barrier completes. Every live fit and stable host frame remains required.
+  if(!host.deferPortrait()&&HandoffPreparation.measuredLayout(session.slots.size(),expected.taskId,expected.sourceTaskId,handoffReady!=null))
    beginHandoffPresentation(expected,false);
   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
    for(WorkbenchSlot s:session.slots)if(!host.writeLeashFit(s,fit))throw new IllegalStateException("Unfitted slot "+s.id);
@@ -325,7 +363,7 @@ void requestEntranceFrame(){
    // Attachment/layout can settle after the first requestEntranceFrame attempt.
    // Retry geometry while pixels are pending, rather than gating PREPARED on draw.
    if(!host.deferPortrait()&&entrance.frontReady()&&!host.stopped()&&!host.backgrounded()
-     &&HandoffPreparation.singleTask(session.slots.size(),slot.taskId,slot.sourceTaskId,handoffReady!=null&&handoffGeometryKey()!=null))
+     &&HandoffPreparation.measuredLayout(session.slots.size(),slot.taskId,slot.sourceTaskId,handoffReady!=null&&handoffGeometryKey()!=null))
     beginHandoffPresentation(slot,false);
    try{
     int state=host.taskDrawState(slot);
@@ -462,7 +500,36 @@ void cancelHandoffPresentation(){
  Log.i(TAG,"handoff_presentation_result result=cancelled");
 }
  void acceptGestureSource(WorkbenchSlot fresh){entrance.acceptGestureSource(fresh);gestureHandoff=true;}
- void noteGestureFront(){entrance.noteGestureFront();}
+ void noteGestureFront(){entrance.noteGestureFront();resumeExistingSwipe();}
+ void resumeExistingSwipe(){
+  if(existingSwipeSlot==null)return;
+  WorkbenchSlot selected=existingSwipeSlot;int task=existingSwipeTask;
+  // Start restoration readiness at foreground resume, not while the ordered
+  // broadcast is still raising a stopped host. A rebind may briefly publish -1.
+  handler.post(()->awaitExistingSwipe(selected,task,SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS));
+ }
+ void awaitExistingSwipe(WorkbenchSlot selected,int task,long deadline){
+  if(existingSwipeSlot!=selected||existingSwipeTask!=task)return;
+  if(host.closing()||selected.released||!session.slots.contains(selected)||(selected.taskId>=0&&selected.taskId!=task)){
+   existingSwipeSlot=null;existingSwipeTask=-1;Log.w(TAG,"swipe_existing_failed reason=identity_changed task="+task);return;
+  }
+  if(host.stopped()||host.backgrounded())return;
+  boolean bound=selected.taskId==task&&selected.pendingTask<0;
+  for(WorkbenchSlot slot:session.slots)bound&=slot.taskId>=0;
+  if(bound){
+   existingSwipeSlot=null;existingSwipeTask=-1;
+   if(session.slots.indexOf(selected)==session.primary){
+    // Already-main restoration has no role exchange. Do not enter a preparation
+    // barrier whose promote(primary) would return without restoring input roles.
+    for(int i=0;i<session.slots.size();i++)host.inputRole(session.slots.get(i),i==session.primary);
+    host.focusPrimary("swipe_existing_main");
+    Log.i(TAG,"swipe_existing_ready role=primary task="+task+" count="+session.slots.size());
+   }else host.queueExistingSwitch(selected,SystemClock.uptimeMillis());
+   return;
+  }
+  if(SystemClock.uptimeMillis()>=deadline){existingSwipeSlot=null;existingSwipeTask=-1;Log.w(TAG,"swipe_existing_failed reason=rebind_timeout task="+task);return;}
+  handler.postDelayed(()->awaitExistingSwipe(selected,task,deadline),MotionSpec.SURFACE_RETRY_MS);
+ }
  void adoptPendingEntrance(WorkbenchSlot fresh,boolean gesture){entrance.adoptPending(fresh);gestureHandoff=gesture;}
  void resetPendingEntrance(){entrance.resetPending();}
  void blockInput(){entrance.blockInput();}

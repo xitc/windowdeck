@@ -34,12 +34,12 @@ final class MainWindowSettings {
    return answer!=null&&answer.containsKey(PREF)&&answer.getInt(PREF)==value;
   }catch(Exception e){Log.w("WindowDeck","main_window_size_save_failed",e);return false;}
  }
- static void show(Activity activity,Button entry){
+ static void show(Activity activity,TextView entry){
   SharedPreferences prefs=activity.getSharedPreferences(PREF_FILE,0);
   LinearLayout body=new LinearLayout(activity);body.setOrientation(LinearLayout.VERTICAL);
-  int pad=Ui.dp(activity,20);body.setPadding(pad,pad,pad,pad);body.setBackgroundColor(Ui.CHROME);
-  TextView value=Ui.text(activity,label(local(activity)),20,Ui.TEXT);body.addView(value);
-  TextView hint=Ui.text(activity,"100% 为默认大小。主窗按比例缩放，放大可覆盖部分侧窗；到达屏幕边缘或侧窗最小可操作区域时会自动限制。保存后返回工作台生效。",14,Ui.MUTED);
+  int pad=Ui.dp(activity,20);body.setPadding(pad,pad,pad,pad);body.setBackgroundColor(SettingsTheme.cardColor(activity));
+  TextView value=Ui.text(activity,label(local(activity)),20,SettingsTheme.text(activity));body.addView(value);
+  TextView hint=Ui.text(activity,"100% 为默认大小。主窗按比例缩放，放大可覆盖部分侧窗；到达屏幕边缘或侧窗最小可操作区域时会自动限制。保存后返回工作台生效。",14,SettingsTheme.secondary(activity));
   hint.setPadding(0,pad,0,pad);body.addView(hint);
   SeekBar slider=new SeekBar(activity);slider.setMax(CardLayout.MAIN_MAX_PERCENT-CardLayout.MAIN_MIN_PERCENT);
   slider.setProgress(local(activity)-CardLayout.MAIN_MIN_PERCENT);slider.setContentDescription("主窗口大小百分比");
@@ -53,7 +53,7 @@ final class MainWindowSettings {
    .setNegativeButton("取消",null).setNeutralButton("恢复默认",null)
    .setPositiveButton("保存",(d,which)->{
     int percent=CardLayout.mainPercent(slider.getProgress()+CardLayout.MAIN_MIN_PERCENT);
-    prefs.edit().putInt(PREF,percent).apply();entry.setText(label(percent));
+    prefs.edit().putInt(PREF,percent).apply();entry.setText(percent+"%");
    }).create();
   dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v->slider.setProgress(CardLayout.MAIN_DEFAULT_PERCENT-CardLayout.MAIN_MIN_PERCENT)));
   dialog.show();

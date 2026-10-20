@@ -31,6 +31,7 @@ final class TaskReleaseController {
   void cancelAnimation();
   void cancelAnimation(boolean preservePose);
   void cancelDrag();
+  void abortSideSort(String reason);
   void cancelSwitchPreparation(String reason);
   int cardRadius(boolean isPrimary);
   void clearProjection(WorkbenchSlot s);
@@ -87,11 +88,15 @@ void releaseSlot(WorkbenchSlot s){releaseSlot(s,false);}
   releaseSlot(s,toFront,false);
  }
  void releaseSlot(WorkbenchSlot s,boolean toFront,boolean retainPlate){
+  host.abortSideSort("task_release");
   if(host.taskRotationRun()!=null&&host.taskRotationRun().slot==s)host.finishTaskRotation(host.taskRotationRun(),"released");
   if(s.released)return;
   s.drawEvidence.invalidate();
+  // The retained SurfaceView keeps showing the same task during fullscreen
+  // handoff. Remove our projective transform while the leash is still ours;
+  // clearing only the Java reference leaves the trapezoid on WM's task layer.
+  host.clearProjection(s);
   EmbeddedTaskGuard.forget(s.surface);s.embedded=false;
-  if(retainPlate)s.projectedLeash=null;else host.clearProjection(s);
   if(s.transaction!=null){
    LeashTransactions.unregister(s.transaction);
    try{

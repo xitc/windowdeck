@@ -35,6 +35,7 @@ final class FullscreenController {
   void clearRecoveryCovers();
   void closeEntranceCover(String why);
   boolean closing();
+  Handler contentWorker();
   Context context();
   CardMotion.Pose currentPose(WorkbenchSlot s);
   void detachCaption();
@@ -74,6 +75,7 @@ final class FullscreenController {
  private static final String TAG="WindowDeck";
 
  FullscreenRun fullscreenRun;
+ FullscreenRotationBridge rotatingHandoff;
 
  static final class FullscreenRun {
   final WorkbenchSlot main;final int task;final FullscreenMotion motion;
@@ -190,6 +192,40 @@ final class FullscreenController {
   if(finishHost&&!host.finishing())host.finishAndRemoveTask();
  }
  void handoffFullscreen(WorkbenchSlot main,boolean retainPlate,String reason){
+  if(prepareFullscreenRotation(main,retainPlate,reason))return;
+  completeFullscreenHandoff(main,retainPlate,reason);
+ }
+ boolean prepareFullscreenRotation(WorkbenchSlot main,boolean retainPlate,String reason){
+  if(rotatingHandoff!=null)return true;
+  if(main.orientationAxis!=2||!(host.context() instanceof Activity)||main.surface==null||main.released)return false;
+  Activity activity=(Activity)host.context();
+  android.util.DisplayMetrics metrics=activity.getResources().getDisplayMetrics();
+  if(metrics.widthPixels>=metrics.heightPixels)return false;
+  int requested=main.taskOrientation.requested();
+  if(requested==-2)try{requested=activity.getPackageManager().getActivityInfo(main.activeComponent==null?main.component:main.activeComponent,0).screenOrientation;}catch(Exception e){return false;}
+  if(OrientationPolicy.axis(requested)!=2)return false;
+  try{
+   FullscreenRotationBridge bridge=new FullscreenRotationBridge(activity,handler,host.contentWorker(),main.taskId,main.renderBounds.width(),main.renderBounds.height(),requested,(finished,ready,why)->{
+    if(rotatingHandoff!=finished){finished.close();return;}
+    rotatingHandoff=null;
+    if(host.stopped()||host.finishing()||main.released){finished.close();host.releaseWindows();if(!host.finishing())host.finishAndRemoveTask();return;}
+    if(!ready)finished.close();
+    // A ready picture remains in the host until the original task covers it.
+    // Its detach callback recycles it after the host window is removed.
+    completeFullscreenHandoff(main,retainPlate,reason+"_rotation_"+(ready?"ready":why));
+   });
+   rotatingHandoff=bridge;
+   bridge.start((SurfaceControl)rom.taskLeash.get(main.surface));
+   return true;
+  }catch(Throwable e){if(rotatingHandoff!=null)rotatingHandoff.close();rotatingHandoff=null;Log.w(TAG,"fullscreen_rotation_prepare_failed task="+main.taskId,e);return false;}
+ }
+ void cancelFullscreenHandoff(String reason){
+  FullscreenRotationBridge bridge=rotatingHandoff;if(bridge==null)return;
+  rotatingHandoff=null;bridge.close();host.releaseWindows();
+  Log.i(TAG,"fullscreen_rotation_result result=cancelled reason="+reason);
+  if(!host.finishing())host.finishAndRemoveTask();
+ }
+ void completeFullscreenHandoff(WorkbenchSlot main,boolean retainPlate,String reason){
   // Unlink the main task first, but keep its full-screen source SurfaceView alive
   // until WM reparents that same task to its normal root. No module writer or
   // FlexibleTaskView listener may reset the surface after WM has taken ownership.
@@ -203,7 +239,24 @@ final class FullscreenController {
   }catch(Throwable e){Log.w(TAG,"container_to_back_failed",e);}
   handler.post(()->{if(!host.finishing())host.finishAndRemoveTask();});
  }
+ Bundle fullscreenOptions(){
+  ActivityOptions options=ActivityOptions.makeCustomAnimation(host.context(),0,0);
+  Bundle extra=new Bundle();
+  extra.putInt("androidx.activity.LaunchScenario",0);
+  extra.putBoolean("androidx.flexible.activityNoAnimation",true);
+  extra.putBoolean("androidx.task.ForceOpaqueSplitTask",true);
+  extra.putString("androidx.activity.startReason","startTargetActivityAsFullScreen");
+  try{
+   // C17 ContainerActivity.u2 uses the vendor extra bundle, not just a zero
+   // resource Activity animation: the latter still permits a Shell TO_FRONT.
+   Object prepared=rom.managerApi.getMethod("setExtraBundle",ActivityOptions.class,Bundle.class).invoke(rom.manager,options,extra);
+   if(!(prepared instanceof Bundle))throw new IllegalStateException("Missing fullscreen options");
+   Log.i(TAG,"fullscreen_launch_options protocol=c17 scenario=0 no_animation=true force_opaque=true");
+   return (Bundle)prepared;
+  }catch(Throwable e){Log.w(TAG,"fullscreen_launch_options_degraded protocol=activity_only",e);return options.toBundle();}
+ }
  boolean bringTaskFullscreen(int taskId,ComponentName component){
+  Bundle options=fullscreenOptions();
   if(taskId>=0){
    // No ActivityManager.moveTaskToFront here on purpose. uid 10243 holds no REORDER_TASKS, so the
    // call was refused on every attempt (9/9 in logs/logcat_cap2.txt) and only added a Permission
@@ -211,7 +264,7 @@ final class FullscreenController {
    // cannot make the transition more correct, and it kept the acceptance grep non-zero (TODO B1).
    try{
     Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
-    Object result=Class.forName("android.app.IActivityTaskManager").getMethod("startActivityFromRecents",int.class,Bundle.class).invoke(service,taskId,ActivityOptions.makeCustomAnimation(host.context(),0,0).toBundle());
+    Object result=Class.forName("android.app.IActivityTaskManager").getMethod("startActivityFromRecents",int.class,Bundle.class).invoke(service,taskId,options);
     int code=result instanceof Integer?(Integer)result:Integer.MIN_VALUE;
     boolean accepted=TransitionPolicy.startAccepted(code);
     Log.i(TAG,"fullscreen_recents task="+taskId+" result="+result+" accepted="+accepted);
@@ -223,7 +276,7 @@ final class FullscreenController {
   }
   if(component==null)return false;
   try{
-   host.startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_REORDER_TO_FRONT|Intent.FLAG_ACTIVITY_NO_ANIMATION),ActivityOptions.makeCustomAnimation(host.context(),0,0).toBundle());
+   host.startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_REORDER_TO_FRONT|Intent.FLAG_ACTIVITY_NO_ANIMATION),options);
    Log.i(TAG,"fullscreen_intent component="+component.flattenToShortString());
    return true;
   }catch(Throwable e){Log.w(TAG,"fullscreen_intent_failed",e);return false;}
