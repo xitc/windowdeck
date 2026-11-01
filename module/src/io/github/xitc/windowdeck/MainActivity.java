@@ -119,14 +119,22 @@ public final class MainActivity extends Activity {
   }else selectApp(slot);
  }
  private void selectApp(int slot){
-  Set<String> excluded=new HashSet<>();for(int i=0;i<SLOTS;i++)if(i!=slot&&!components[i].isEmpty()){ComponentName c=ComponentName.unflattenFromString(components[i]);if(c!=null)excluded.add(c.getPackageName());}
-  AppPicker.show(this,excluded,(c,label)->savePick(slot,c.flattenToString(),label));
+  Set<String> excluded=new HashSet<>();for(int i=0;i<SLOTS;i++)if(i!=slot&&!components[i].isEmpty()){ComponentName c=ComponentName.unflattenFromString(userPart(components[i])[0]);if(c!=null)excluded.add(c.getPackageName()+"/"+userPart(components[i])[1]);}
+  AppPicker.show(this,excluded,(c,label,user)->savePick(slot,user>0?c.flattenToString()+"|"+user:c.flattenToString(),label));
+ }
+ /** Slot components carry an optional "|<user>" suffix for clones; split it off here. */
+ static String[] userPart(String flat){
+  if(flat==null)return new String[]{"",String.valueOf(0)};
+  int bar=flat.lastIndexOf('|');
+  if(bar>=0){try{int u=Integer.parseInt(flat.substring(bar+1));if(u>=0)return new String[]{flat.substring(0,bar),String.valueOf(u)};}catch(Throwable ignored){}}
+  return new String[]{flat,String.valueOf(0)};
  }
  private void savePick(int slot,String component,String label){components[slot]=component;labels[slot]=label;picks[slot].setValue(label);getPreferences(0).edit().putString("component"+slot,component).putString("label"+slot,label).apply();}
  private static String quote(String s){return "'"+s.replace("'","'\\''")+"'";}
  private void launch(boolean resume){
-  ComponentName first=ComponentName.unflattenFromString(components[0]),second=ComponentName.unflattenFromString(components[1]);
-  if(first==null||second==null||first.getPackageName().equals(second.getPackageName())){status.setText("请选择两个不同的应用。");return;}
+  ComponentName first=ComponentName.unflattenFromString(userPart(components[0])[0]),second=ComponentName.unflattenFromString(userPart(components[1])[0]);
+  // Same package in a different Android user is allowed: that is the 应用分身 twin.
+  if(first==null||second==null||components[0].equals(components[1])){status.setText("请选择两个不同的应用。");return;}
   start.setEnabled(false);status.setText("正在请求 Root 并启动…");
   String[] extra={"c","d","e"};
   StringBuilder cmd=new StringBuilder("am start --user 0 -f ").append(resume?"0x30020000":"0x10008000")

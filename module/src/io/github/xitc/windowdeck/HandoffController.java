@@ -124,7 +124,7 @@ final class HandoffController {
  /** 0 is a new app, 4 is a validated reuse, 3 is a rejected reuse request. */
  int restoreExistingTask(Intent request){
   int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
-  if(id<0||user!=android.os.Process.myUid()/100000||request.getIntExtra("windowdeck_container_task_id",-1)!=host.taskId()
+  if(id<0||user<0||request.getIntExtra("windowdeck_container_task_id",-1)!=host.taskId()
     ||host.closing()||host.recovering()||!host.initialized()||host.pendingPickerLaunch()!=null)return 3;
   try{
    ActivityManager.RunningTaskInfo source=null;
@@ -140,8 +140,9 @@ final class HandoffController {
     if(entrance.pending()!=null||host.addAnimation()!=null)return 3;
     ActivityManager.RunningTaskInfo held=null;
     for(Object value:tasks){ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)value;if(task.taskId==slot.taskId)held=task;}
-    if(held==null||held.baseActivity==null||!pkg.equals(held.baseActivity.getPackageName())
-      ||held.getClass().getField("userId").getInt(held)!=user)return 3;
+    if(held==null||held.baseActivity==null||!pkg.equals(held.baseActivity.getPackageName()))return 3;
+    // Same package, different Android user: that is the twin, not this slot's task.
+    if(held.getClass().getField("userId").getInt(held)!=user)continue;
     // onResume restores the original task with the existing embedding options.
     // Do not create a second Slot or send this through the add entrance watchdog.
     host.abortSideSort("existing_restore");

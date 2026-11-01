@@ -279,7 +279,14 @@ public final class WorkbenchActivity extends Activity implements
    }
    int[] savedSources=state==null?null:state.getIntArray("sourceTaskIds");
    for(String component:input)if(component!=null&&!component.isEmpty()){
-    if(session.slots.size()>=Caps.MAX_TASKS)break;WorkbenchSlot restored=identity.validate(ComponentName.unflattenFromString(component),null);
+    if(session.slots.size()>=Caps.MAX_TASKS)break;
+    // A slot string may carry a "|<user>" suffix: the 应用分身 clone of the same
+    // package in another Android user. Identity and the embedded launch must be
+    // resolved against that user, not the owner, or the twin opens the main install.
+    String[] parts=MainActivity.userPart(component);
+    int slotUser=Integer.parseInt(parts[1]);
+    WorkbenchSlot restored=identity.validate(ComponentName.unflattenFromString(parts[0]),null,slotUser>0?slotUser:-1);
+    if(slotUser>0)restored.sourceUserId=slotUser;
     int index=session.slots.size();if(savedSources!=null&&index<savedSources.length&&savedSources[index]>=0){restored.sourceTaskId=savedSources[index];restored.sourceUserId=android.os.Process.myUid()/100000;}
     session.slots.add(restored);
    }
@@ -489,6 +496,7 @@ private void seamlessRotation(){
  public void showNativePicker(java.util.Set<String> excluded,NativeAppPicker.Selection callback){NativeAppPicker.show(this,excluded,callback);}
  public long stateToken(){return publisher.stateToken;}
  public WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception{return identity.validate(c,replacing);}
+ public WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing,int user) throws Exception{return identity.validate(c,replacing,user);}
  public void withEntranceCover(String reason,Runnable action){cover.withEntranceCover(reason,action);}
  public Activity activity(){return this;}
  public boolean backReady(){return back.backReady();}

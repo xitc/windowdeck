@@ -69,7 +69,9 @@ final class LiveWorkbenchState {
   if(!state.getBoolean(PickerLaunchPolicy.EMBED_BEFORE_LAUNCH,false)){
    Log.i("WindowDeck","picker_launch_fullscreen package="+pkg+" session="+state.getLong("selectionSession"));return null;
   }
-  Bundle result=new Bundle(state);result.putString("selectedPackage",pkg);return result;
+  // The workbench state already carries a "userId" of its own; the selected app's user must
+  // replace it, or every pick is resolved against the owner install.
+  Bundle result=new Bundle(state);result.putString("selectedPackage",pkg);result.putInt("userId",user);return result;
  }
  static void publish(Context context,Bundle state){
   BroadcastOptions options=BroadcastOptions.makeBasic();options.setShareIdentityEnabled(true);
