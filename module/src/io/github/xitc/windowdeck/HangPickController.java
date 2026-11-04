@@ -77,6 +77,7 @@ final class HangPickController {
   int taskId();
   void updateNaturalBounds();
   WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception;
+  WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing,int user) throws Exception;
   WorkbenchSlot validateSourceTask(int id,int user) throws Exception;
   WindowManager windowManager();
   void withEntranceCover(String reason,Runnable action);
@@ -177,7 +178,8 @@ final class HangPickController {
    if(top==null||taskTop(top)==null){handler.postDelayed(hangWatch,300);return;}
    int id=top.getClass().getField("taskId").getInt(top);
    ComponentName topActivity=taskTop(top);
-   if(id!=lastHangFocus){lastHangFocus=id;Log.i(TAG,"hang_focus task="+id+" top="+topActivity.flattenToShortString()+" type="+top.getClass().getMethod("getActivityType").invoke(top)+" mode="+top.getClass().getMethod("getWindowingMode").invoke(top));}
+   int topUser=taskUser(top);
+   if(id!=lastHangFocus){lastHangFocus=id;Log.i(TAG,"hang_focus task="+id+" top="+topActivity.flattenToShortString()+" user="+topUser+" type="+top.getClass().getMethod("getActivityType").invoke(top)+" mode="+top.getClass().getMethod("getWindowingMode").invoke(top));}
    boolean home=isHomeTask(top)||id==host.taskId();
    if(home)hangSawHome=isHomeTask(top)||hangSawHome;
    // A child of ours stays focused while the group is still leaving. Counting that as
@@ -190,8 +192,11 @@ final class HangPickController {
    // The original keeps exactly one window per app: re-opening an app that is already in
    // the workbench raises the window it holds instead of adding a second one, and only
    // speaks up when that window is already the main one. It never rejects into a dead end.
-   WorkbenchSlot existing=focused;if(existing==null)for(WorkbenchSlot s:session.slots)if(s.component.getPackageName().equals(pkg)){existing=s;break;}
+   // A clone shares the package with the owner install and only differs by Android user,
+   // so the user must take part in the match or the twin is swallowed by the first card.
+   WorkbenchSlot existing=focused;if(existing==null)for(WorkbenchSlot s:session.slots)if(s.component.getPackageName().equals(pkg)&&slotUser(s)==topUser){existing=s;break;}
    if(existing!=null){
+    Log.i(TAG,"hang_match task="+id+" pkg="+pkg+" user="+topUser+" slot="+existing.id+" slotUser="+slotUser(existing));
     finishExistingHang(existing,false);return;
    }
    String block=embedBlock(top);
@@ -207,6 +212,12 @@ final class HangPickController {
  }
  ComponentName taskTop(Object task) throws Exception {return (ComponentName)task.getClass().getField("topActivity").get(task);}
  ComponentName taskBase(Object task) throws Exception {return (ComponentName)task.getClass().getField("baseActivity").get(task);}
+ /** Android user a running task belongs to; 999 on ColorOS is a cloned app. */
+ int taskUser(Object task){
+  try{return task.getClass().getField("userId").getInt(task);}
+  catch(Throwable e){return android.os.Process.myUid()/100000;}
+ }
+ int slotUser(WorkbenchSlot s){return s.sourceUserId>=0?s.sourceUserId:android.os.Process.myUid()/100000;}
  boolean isHomeTask(Object task) throws Exception {
   ComponentName top=taskTop(task);
   if(top!=null&&"com.android.launcher".equals(top.getPackageName()))return true;
@@ -231,9 +242,10 @@ final class HangPickController {
   return new Rect(loc[0],loc[1],loc[0]+w,loc[1]+h);
  }
  void acceptHang(int task,int user,String pkg){
-  for(WorkbenchSlot s:session.slots)if(s.component.getPackageName().equals(pkg)){
+  for(WorkbenchSlot s:session.slots)if(s.component.getPackageName().equals(pkg)&&slotUser(s)==user){
    finishExistingHang(s,false);return;
   }
+  Log.i(TAG,"hang_instance task="+task+" pkg="+pkg+" user="+user+" slots="+session.slots.size());
   hanging=false;handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();host.publishState(session.slots.size());
   hangTask=task;hangUser=user;hangConsumeTries=0;Log.i(TAG,"hang_pick task="+task+" pkg="+pkg);
   final int generation=++hangSourceGeneration;final boolean[] finished={false};final long began=SystemClock.uptimeMillis();
@@ -302,7 +314,8 @@ final class HangPickController {
   if(decision!=PickerLaunchPolicy.Decision.ACCEPT)return false;
   long selectionSession=request.getLongExtra("selectionSession",0);int task=request.getIntExtra("selectedTask",-1);
   String pkg=request.getStringExtra("selectedPackage");
-  for(WorkbenchSlot s:session.slots)if(!s.released&&s.taskId==task&&s.component.getPackageName().equals(pkg)){
+  int user=request.getIntExtra("userId",-1);
+  for(WorkbenchSlot s:session.slots)if(!s.released&&s.taskId==task&&s.component.getPackageName().equals(pkg)&&slotUser(s)==user){
    if(host.recovering()||host.dragging()!=null){Toast.makeText(host.context(),"请等待窗口恢复后再选择",Toast.LENGTH_SHORT).show();return true;}
    lastSelectionSession=selectionSession;finishExistingHang(s,true);return true;
   }
@@ -318,9 +331,14 @@ final class HangPickController {
   if(launch==null||launch.getComponent()==null||!launch.getComponent().getPackageName().equals(pkg)
     ||!Intent.ACTION_MAIN.equals(launch.getAction())||!launch.hasCategory(Intent.CATEGORY_LAUNCHER)
     ||launch.getData()!=null||launch.getSelector()!=null||launch.getClipData()!=null||launch.hasExtra(Intent.EXTRA_USER))return false;
-  String[] current=new String[session.slots.size()];for(int i=0;i<session.slots.size();i++)current[i]=session.slots.get(i).component.getPackageName();
-  int user=android.os.Process.myUid()/100000;
-  if(!PickerLaunchPolicy.newApp(hanging,user,request.getIntExtra("userId",-1),session.slots.size(),hangReplace,pkg,current))return false;
+  int ownerUser=android.os.Process.myUid()/100000;int requestedUser=request.getIntExtra("userId",-1);
+  // A clone is the same package in another Android user: the requested user, not the owner,
+  // decides which running task is the twin and whether this pick is a duplicate.
+  int user=requestedUser>=0?requestedUser:ownerUser;
+  String[] current=new String[session.slots.size()];int[] users=new int[session.slots.size()];
+  for(int i=0;i<session.slots.size();i++){WorkbenchSlot s=session.slots.get(i);current[i]=s.component.getPackageName();users[i]=slotUser(s);}
+  Log.i(TAG,"picker_launch_user package="+pkg+" requested="+requestedUser+" effective="+user+" slots="+session.slots.size()+" replace="+hangReplace);
+  if(!PickerLaunchPolicy.newAppForInstance(hanging,ownerUser,requestedUser,session.slots.size(),hangReplace,pkg,current,users))return false;
   // Recheck stale launcher state before reserving a direct-embed selection.
   // Returning false replays the original launch once; watchHang retains ownership
   // of the later fullscreen-to-main transition and the same source task.
@@ -330,7 +348,7 @@ final class HangPickController {
   try{
    WorkbenchSlot replaced=hangReplace?session.slots.get(session.primary):null;
    if(replaced!=null&&replaced.pinned)return false;
-   WorkbenchSlot fresh=validatePickerLaunch(launch,replaced,user);
+   WorkbenchSlot fresh=validatePickerLaunch(launch,replaced,user);if(fresh.sourceUserId<0)fresh.sourceUserId=user;
    // Reserve the first selection before raising the host. Creating a FlexibleTaskView
    // in a stopped Activity could start its task before destination geometry exists.
    lastSelectionSession=request.getLongExtra("selectionSession",0);
@@ -364,7 +382,7 @@ final class HangPickController {
   ComponentName component=launch.getComponent();
   ActivityInfo info=host.packageManager().getActivityInfo(component,0);
   if(!info.enabled||!info.exported||!info.applicationInfo.enabled)throw new IllegalArgumentException("桌面入口不可用");
-  WorkbenchSlot fresh=host.validate(component,replaced);
+  WorkbenchSlot fresh=host.validate(component,replaced,user);
   // Keep an already running external task and its page. Cold starts retain the
   // original launcher Intent and receive scenario/container options from C17.
   java.util.List<?> tasks=rom.canvas.tasks();
@@ -444,12 +462,20 @@ final class HangPickController {
   if(host.closing()||!host.initialized()||host.recovering()||host.dragging()!=null)return;
   if(replacing!=null&&replacing.pinned){Toast.makeText(host.context(),"请先取消固定",Toast.LENGTH_SHORT).show();return;}
   if(replacing==null&&session.slots.size()>=Caps.MAX_TASKS){Toast.makeText(host.context(),"最多同时打开五个应用",Toast.LENGTH_SHORT).show();return;}
-  Set<String> excluded=new HashSet<>();for(WorkbenchSlot s:session.slots)excluded.add(s.component.getPackageName());
+  Set<String> excluded=new HashSet<>();int selfUser=android.os.Process.myUid()/100000;
+  for(WorkbenchSlot s:session.slots)excluded.add(s.component.getPackageName()+"/"+(s.sourceUserId>=0?s.sourceUserId:selfUser));
   host.showNativePicker(excluded,(launch,user)->{
    if(host.closing()||host.recovering()||host.dragging()!=null||(replacing!=null&&replacing.pinned))return;
    try{
-    if(host.stopped()||host.backgrounded()||user!=android.os.Process.myUid()/100000||launch.getComponent()==null)return;
-    WorkbenchSlot fresh=host.validate(launch.getComponent(),replacing);fresh.launchIntent=new Intent(launch);int index=replacing==null?session.slots.size():session.slots.indexOf(replacing);if(index<0)return;
+    if(host.stopped()||host.backgrounded()||user<0||launch.getComponent()==null)return;
+    WorkbenchSlot fresh=host.validate(launch.getComponent(),replacing,user);
+    // A clone shares its ComponentName with the owner-user install. Left alone the system
+    // matches the already embedded twin and simply moves it onto this card, so the second
+    // pick looks like a replacement of the first. Force a separate task instead.
+    boolean twin=false;String pkg=launch.getComponent().getPackageName();
+    for(WorkbenchSlot s:session.slots)if(s!=replacing&&s.component.getPackageName().equals(pkg)){twin=true;break;}
+    fresh.launchIntent=twin?new Intent(launch).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_MULTIPLE_TASK):new Intent(launch);
+    fresh.sourceUserId=user;int index=replacing==null?session.slots.size():session.slots.indexOf(replacing);if(index<0)return;
     host.cancelAnimation();
     if(replacing==null){
      session.slots.add(fresh);host.publishState(session.slots.size());host.updateNaturalBounds();host.createWindow(fresh);host.layoutCards(false);host.refreshStatus();

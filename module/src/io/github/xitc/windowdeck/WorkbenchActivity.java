@@ -42,6 +42,7 @@ public final class WorkbenchActivity extends Activity implements
  final HangPickController hang=new HangPickController(this,session,handler,rom,pump);
  final WorkbenchMenuController menu=new WorkbenchMenuController(this,session,handler,rom);
  final SideSortController sideSort=new SideSortController(this);
+ final CornerResizeController cornerResize=new CornerResizeController(this);
  final TaskSurfaceRenderer surfaces=new TaskSurfaceRenderer(this,session,handler,rom);
  final LayoutMotionController layout=new LayoutMotionController(this,session,handler,rom,pump);
  final PortraitPoseController portrait=new PortraitPoseController(this,session,handler,rom);
@@ -61,7 +62,7 @@ public final class WorkbenchActivity extends Activity implements
  private boolean perspectiveBusy(){
   return layout.animation!=null||layout.addAnimation!=null||layout.switchPreparation.pending()
     ||arrival.screenArrival||portrait.deferPortrait||handoff.handoffPresentation
-    ||identity.taskRotationRun!=null||replacements.current()!=null||menu.recovering||sideSort.active();
+    ||identity.taskRotationRun!=null||replacements.current()!=null||menu.recovering||sideSort.active()||cornerResize.active();
  }
  private void refreshPerspective(){
   handler.removeCallbacks(refreshPerspective);
@@ -217,6 +218,7 @@ public final class WorkbenchActivity extends Activity implements
   detachLeashBeforeTransition=getIntent().getBooleanExtra(TransitionPolicy.EXTRA_DETACH_LEASH,TransitionPolicy.DETACH_LEASH_DEFAULT);
   Log.i(TAG,"transition_policy keep_surface="+keepSurfaceOnBackground+" detach_leash="+detachLeashBeforeTransition);
   stage=new CanvasStage(this);root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
+  stage.getViewTreeObserver().addOnPreDrawListener(()->{cornerResize.layout();return true;});
   try{
    identity.rotationTransactions=new RotationTransactions.Host(this,handler,getTaskId(),publisher.stateToken,(task,generation)->{
     TaskIdentityController.RotationRun run=identity.taskRotationRun;
@@ -260,12 +262,13 @@ public final class WorkbenchActivity extends Activity implements
     WorkbenchSlot fresh=identity.validateSourceTask(initialSource,getIntent().getIntExtra("windowdeck_create_source_user",-1));
     session.slots.add(fresh);handoff.acceptGestureSource(fresh);
     handoff.handoffReady=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
-    handoff.handoffDeadline=SystemClock.uptimeMillis()+(fresh.orientationAxis==2?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS);
+    long readyBudget=portrait.deferPortrait||fresh.orientationAxis==2?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
+    handoff.handoffDeadline=SystemClock.uptimeMillis()+readyBudget;
     handoff.portraitHandoffLimit=getIntent().getLongExtra(HandoffProtocol.PORTRAIT_LIMIT,0);
     if(handoff.portraitHandoffLimit>0){
      long now=SystemClock.uptimeMillis();
      if(!PortraitHandoffDeadline.validHostStart(portrait.deferPortrait,fresh.orientationAxis,handoff.handoffReady!=null,
-       handoff.portraitHandoffLimit,now,MotionSpec.COVER_TIMEOUT_MS))throw new IllegalArgumentException(
+       handoff.portraitHandoffLimit,now,readyBudget))throw new IllegalArgumentException(
          "portrait handoff deadline axis="+fresh.orientationAxis+" defer="+portrait.deferPortrait
          +" reply="+(handoff.handoffReady!=null)+" remaining_ms="+(handoff.portraitHandoffLimit-now));
      handoff.handoffDeadline=Math.min(handoff.handoffDeadline,handoff.portraitHandoffLimit);
@@ -278,13 +281,26 @@ public final class WorkbenchActivity extends Activity implements
     input=new String[0];
    }
    int[] savedSources=state==null?null:state.getIntArray("sourceTaskIds");
+   int[] savedUsers=state==null?null:state.getIntArray("sourceUserIds");
    for(String component:input)if(component!=null&&!component.isEmpty()){
-    if(session.slots.size()>=Caps.MAX_TASKS)break;WorkbenchSlot restored=identity.validate(ComponentName.unflattenFromString(component),null);
-    int index=session.slots.size();if(savedSources!=null&&index<savedSources.length&&savedSources[index]>=0){restored.sourceTaskId=savedSources[index];restored.sourceUserId=android.os.Process.myUid()/100000;}
+    if(session.slots.size()>=Caps.MAX_TASKS)break;
+    // A slot string may carry a "|<user>" suffix: the 应用分身 clone of the same
+    // package in another Android user. Identity and the embedded launch must be
+    // resolved against that user, not the owner, or the twin opens the main install.
+    String[] parts=MainActivity.userPart(component);
+    int slotUser=Integer.parseInt(parts[1]);
+    WorkbenchSlot restored=identity.validate(ComponentName.unflattenFromString(parts[0]),null,slotUser>0?slotUser:-1);
+    if(slotUser>0)restored.sourceUserId=slotUser;
+    int index=session.slots.size();
+    if(savedUsers!=null&&index<savedUsers.length&&savedUsers[index]>=0)restored.sourceUserId=savedUsers[index];
+    if(savedSources!=null&&index<savedSources.length&&savedSources[index]>=0){
+     restored.sourceTaskId=savedSources[index];
+     if(restored.sourceUserId<0)restored.sourceUserId=android.os.Process.myUid()/100000;
+    }
     session.slots.add(restored);
    }
    if(session.slots.isEmpty())throw new IllegalArgumentException("请至少选择一个应用");
-   if(state!=null){String pinned=state.getString("pinned");for(WorkbenchSlot slot:session.slots)slot.pinned=slot.component.flattenToString().equals(pinned);}
+   if(state!=null){String pinned=state.getString("pinned");for(WorkbenchSlot slot:session.slots)slot.pinned=MainActivity.componentWithUser(slot.component,slot.sourceUserId).equals(pinned);}
    session.primary=state==null?0:Math.max(0,Math.min(session.slots.size()-1,state.getInt("primary",0)));
    publisher.publishState(session.slots.size());
    stage.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
@@ -310,11 +326,11 @@ public final class WorkbenchActivity extends Activity implements
    }catch(Throwable e){writer.println(prefix+"    surface unavailable="+e.getClass().getSimpleName());}
   }
  }
- @Override protected void onPause(){identity.immersiveForeground=false;handler.removeCallbacks(identity.immersivePoll);if(identity.systemRotationObserver!=null)identity.systemRotationObserver.close();menu.dismissPrimaryMenu();menu.cancelDrag();if(!closing&&!arrival.screenArrival&&!portrait.deferPortrait&&identity.taskRotationRun==null)layout.cancelAnimation();if(initialized&&!closing&&!arrival.screenArrival&&!portrait.deferPortrait&&identity.taskRotationRun==null)layout.layoutCards(false);super.onPause();}
- @Override protected void onResume(){super.onResume();handler.post(refreshPerspective);menu.refreshMainWindowSize();if(identity.rotationTransactions!=null)identity.rotationTransactions.connect();CanvasImeBridge.start(this);identity.immersiveForeground=true;if(identity.systemRotationObserver==null)identity.systemRotationObserver=new SystemRotationObserver(this,handler,identity::queueTaskDirections);identity.systemRotationObserver.start();if(identity.orientationObserver==null){identity.orientationObserver=new TaskOrientationObserver(handler,identity::onTaskOrientationRequested);identity.orientationObserver.start();}foreground=true;stopped=false;backgrounded=false;if(initialized&&!closing)publisher.publishState(session.slots.size());handoff.noteGestureFront();if(backdrop!=null)backdrop.onResume();handler.post(release::restorePendingTasks);handler.post(hang::consumePickerLaunch);handler.post(hang::consumeHangAdd);handler.post(arrival::beginHangEntrance);handler.post(handoff::maybeAnimateAddedCard);handler.post(identity::queueTaskDirections);handler.post(identity.immersivePoll);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(WorkbenchSlot s:session.slots)surfaces.syncSurface(s);back.focusPrimary("resume");handoff.maybeAnimateAddedCard();},350);}
- @Override protected void onStop(){fullscreen.cancelFullscreenHandoff("host_stopped");CanvasImeBridge.stop(this);foreground=false;stopped=true;if(replacements.current()!=null)replacements.cancel(replacements.current(),"host_stopped");if(fullscreen.fullscreenRun!=null&&fullscreen.fullscreenRun.lifecycle.open())fullscreen.abortFullscreen(fullscreen.fullscreenRun,"host_stopped",true);if(identity.taskRotationRun!=null)identity.finishTaskRotation(identity.taskRotationRun,"host_stopped");if(arrival.screenArrival||handoff.handoffPresentation)layout.cancelAnimation();if(handoff.gestureHandoff&&handoff.entrance.pending()!=null)handoff.failHandoff(handoff.entrance.pending(),"host_stopped");for(WorkbenchSlot s:session.slots){s.drawEvidence.invalidate();surfaces.clearProjection(s);}back.backGeneration++;back.forwardingBack=false;super.onStop();}
+ @Override protected void onPause(){cornerResize.paused=true;cornerResize.abort();cornerResize.detach();identity.immersiveForeground=false;handler.removeCallbacks(identity.immersivePoll);if(identity.systemRotationObserver!=null)identity.systemRotationObserver.close();menu.dismissPrimaryMenu();menu.cancelDrag();if(!closing&&!arrival.screenArrival&&!portrait.deferPortrait&&identity.taskRotationRun==null)layout.cancelAnimation();if(initialized&&!closing&&!arrival.screenArrival&&!portrait.deferPortrait&&identity.taskRotationRun==null)layout.layoutCards(false);super.onPause();}
+ @Override protected void onResume(){super.onResume();cornerResize.paused=false;handler.post(refreshPerspective);menu.refreshMainWindowSize();if(identity.rotationTransactions!=null)identity.rotationTransactions.connect();CanvasImeBridge.start(this);identity.immersiveForeground=true;if(identity.systemRotationObserver==null)identity.systemRotationObserver=new SystemRotationObserver(this,handler,identity::queueTaskDirections);identity.systemRotationObserver.start();if(identity.orientationObserver==null){identity.orientationObserver=new TaskOrientationObserver(handler,identity::onTaskOrientationRequested);identity.orientationObserver.start();}foreground=true;stopped=false;backgrounded=false;if(initialized&&!closing)publisher.publishState(session.slots.size());handoff.noteGestureFront();if(backdrop!=null)backdrop.onResume();handler.post(release::restorePendingTasks);handler.post(hang::consumePickerLaunch);handler.post(hang::consumeHangAdd);handler.post(arrival::beginHangEntrance);handler.post(handoff::maybeAnimateAddedCard);handler.post(identity::queueTaskDirections);handler.post(identity.immersivePoll);handler.postDelayed(()->{if(stopped||backgrounded||closing)return;for(WorkbenchSlot s:session.slots)surfaces.syncSurface(s);back.focusPrimary("resume");handoff.maybeAnimateAddedCard();},350);}
+ @Override protected void onStop(){handoff.cancelHandoffPresentation();fullscreen.cancelFullscreenHandoff("host_stopped");CanvasImeBridge.stop(this);foreground=false;stopped=true;if(replacements.current()!=null)replacements.cancel(replacements.current(),"host_stopped");if(fullscreen.fullscreenRun!=null&&fullscreen.fullscreenRun.lifecycle.open())fullscreen.abortFullscreen(fullscreen.fullscreenRun,"host_stopped",true);if(identity.taskRotationRun!=null)identity.finishTaskRotation(identity.taskRotationRun,"host_stopped");if(arrival.screenArrival||handoff.handoffPresentation)layout.cancelAnimation();if(handoff.gestureHandoff&&handoff.entrance.pending()!=null)handoff.failHandoff(handoff.entrance.pending(),"host_stopped");for(WorkbenchSlot s:session.slots){s.drawEvidence.invalidate();surfaces.clearProjection(s);}back.backGeneration++;back.forwardingBack=false;super.onStop();}
  @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);handler.post(refreshPerspective);menu.refreshMainWindowSize();backgrounded=false;stopped=false;if(intent.hasExtra("windowdeck_add_task_id"))handler.post(()->handoff.addExistingTask(intent));Log.i(TAG,"workbench_resume container="+getTaskId()+" primary="+session.primary+" layout="+layout.layoutMode+" tasks="+layout.taskIds());handler.post(()->{for(WorkbenchSlot s:session.slots)surfaces.syncSurface(s);back.focusPrimary("entry");});}
- public void scheduleLayout(){if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){menu.cancelDrag();surfaces.updateNaturalBounds();if(portrait.deferPortrait&&portrait.poseHeld){if(!portrait.poseSettling)portrait.expandPosePlate(portrait.poseSlot);}else if(arrival.screenArrival)arrival.rebaseArrivalLayout();else{if(identity.taskRotationRun==null||!identity.taskRotationRun.changingLayout||identity.taskRotationRun.started)layout.cancelAnimation();layout.layoutCards(false);}for(WorkbenchSlot s:session.slots)surfaces.resizeSurface(s);handoff.requestEntranceFrame();Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+session.slots.size());layout.scheduleLayoutEvidence("layout");}});}
+ public void scheduleLayout(){cornerResize.abort();if(layoutPosted)return;layoutPosted=true;stage.post(()->{layoutPosted=false;if(!closing){menu.cancelDrag();surfaces.updateNaturalBounds();if(portrait.deferPortrait&&portrait.poseHeld){if(!portrait.poseSettling)portrait.expandPosePlate(portrait.poseSlot);}else if(arrival.screenArrival)arrival.rebaseArrivalLayout();else{if(identity.taskRotationRun==null||!identity.taskRotationRun.changingLayout||identity.taskRotationRun.started)layout.cancelAnimation();layout.layoutCards(false);}for(WorkbenchSlot s:session.slots)surfaces.resizeSurface(s);handoff.requestEntranceFrame();Log.i(TAG,"layout width="+stage.getWidth()+" height="+stage.getHeight()+" ime="+imeBottom+" count="+session.slots.size());layout.scheduleLayoutEvidence("layout");}});}
 public void applyImeInsets(){
   if(contentRoot==null||contentRoot.getHeight()<=0||closing)return;
   int[] location=new int[2];contentRoot.getLocationOnScreen(location);
@@ -327,8 +343,8 @@ public void applyImeInsets(){
    contentRoot.setPadding(sys.left,sys.top,sys.right,bottom);
   if(imeBottom!=keyboard){imeBottom=keyboard;Log.i(TAG,"ime bottom="+keyboard+" source="+(displayBottom>=0?"display":"window"));}
  }
- @Override protected void onDestroy(){fullscreen.cancelFullscreenHandoff("destroyed");layout.cancelLayoutPreparation("destroyed");handler.removeCallbacks(refreshPerspective);if(perspectiveObserver!=null){getContentResolver().unregisterContentObserver(perspectiveObserver);perspectiveObserver=null;}if(fullscreen.fullscreenRun!=null&&fullscreen.fullscreenRun.lifecycle.open())fullscreen.abortFullscreen(fullscreen.fullscreenRun,"destroyed",false);if(identity.rotationTransactions!=null)identity.rotationTransactions.close();CanvasImeBridge.stop(this);handler.removeCallbacks(identity.immersivePoll);if(identity.systemRotationObserver!=null){identity.systemRotationObserver.close();identity.systemRotationObserver=null;}handler.removeCallbacks(identity.applyDirections);identity.directionPosted=false;if(identity.orientationObserver!=null){identity.orientationObserver.close();identity.orientationObserver=null;}portrait.clearHeldPose();hang.clearHangSourceFrame();hang.dismissHang();menu.dismissPrimaryMenu();menu.unregisterControlBarLight();menu.detachCaption();cover.closeEntranceCover("destroy");pump.quit();if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publisher.publishState(0);closing=true;release.releaseWindows();}super.onDestroy();}
- @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[session.slots.size()];int[] sourceTaskIds=new int[session.slots.size()];for(int i=0;i<session.slots.size();i++){WorkbenchSlot s=session.slots.get(i);components[i]=s.component.flattenToString();sourceTaskIds[i]=s.sourceTaskId>=0?(s.taskId>=0?s.taskId:s.sourceTaskId):-1;}b.putStringArray("components",components);b.putIntArray("sourceTaskIds",sourceTaskIds);b.putInt("primary",session.primary);b.putInt("layoutMode",layout.layoutMode);for(WorkbenchSlot s:session.slots)if(s.pinned)b.putString("pinned",s.component.flattenToString());super.onSaveInstanceState(b);}
+ @Override protected void onDestroy(){cornerResize.paused=true;cornerResize.abort();cornerResize.detach();fullscreen.cancelFullscreenHandoff("destroyed");layout.cancelLayoutPreparation("destroyed");handler.removeCallbacks(refreshPerspective);if(perspectiveObserver!=null){getContentResolver().unregisterContentObserver(perspectiveObserver);perspectiveObserver=null;}if(fullscreen.fullscreenRun!=null&&fullscreen.fullscreenRun.lifecycle.open())fullscreen.abortFullscreen(fullscreen.fullscreenRun,"destroyed",false);if(identity.rotationTransactions!=null)identity.rotationTransactions.close();CanvasImeBridge.stop(this);handler.removeCallbacks(identity.immersivePoll);if(identity.systemRotationObserver!=null){identity.systemRotationObserver.close();identity.systemRotationObserver=null;}handler.removeCallbacks(identity.applyDirections);identity.directionPosted=false;if(identity.orientationObserver!=null){identity.orientationObserver.close();identity.orientationObserver=null;}portrait.clearHeldPose();hang.clearHangSourceFrame();hang.dismissHang();menu.dismissPrimaryMenu();menu.unregisterControlBarLight();menu.detachCaption();cover.closeEntranceCover("destroy");pump.quit();if(addReceiverRegistered){unregisterReceiver(addReceiver);addReceiverRegistered=false;}if(launcherReceiverRegistered){unregisterReceiver(launcherReceiver);launcherReceiverRegistered=false;}if(backdrop!=null){backdrop.detach();backdrop=null;}getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(hostBack);if(!closing){if(!isChangingConfigurations())publisher.publishState(0);closing=true;release.releaseWindows();}super.onDestroy();}
+ @Override protected void onSaveInstanceState(Bundle b){String[] components=new String[session.slots.size()];int[] sourceTaskIds=new int[session.slots.size()],sourceUserIds=new int[session.slots.size()];for(int i=0;i<session.slots.size();i++){WorkbenchSlot s=session.slots.get(i);components[i]=MainActivity.componentWithUser(s.component,s.sourceUserId);sourceTaskIds[i]=s.sourceTaskId>=0?(s.taskId>=0?s.taskId:s.sourceTaskId):-1;sourceUserIds[i]=s.sourceUserId;}b.putStringArray("components",components);b.putIntArray("sourceTaskIds",sourceTaskIds);b.putIntArray("sourceUserIds",sourceUserIds);b.putInt("primary",session.primary);b.putInt("layoutMode",layout.layoutMode);for(WorkbenchSlot s:session.slots)if(s.pinned)b.putString("pinned",MainActivity.componentWithUser(s.component,s.sourceUserId));super.onSaveInstanceState(b);}
  @Override public void onConfigurationChanged(Configuration c){super.onConfigurationChanged(c);Log.i(TAG,"configuration orientation="+c.orientation+" tasks="+layout.taskIds()+" defer="+portrait.deferPortrait+" pose="+portrait.poseHeld);if(portrait.poseHeld)portrait.logHeldLayer("defer_rotation_config");if(backdrop!=null)backdrop.onConfigurationChanged();if(stage!=null)scheduleLayout();}
  @Override public void finish(){if(retainInsteadOfFinish("finish"))return;super.finish();}
  @Override public void finishAndRemoveTask(){if(retainInsteadOfFinish("finish_remove"))return;super.finishAndRemoveTask();}
@@ -353,10 +369,10 @@ private void seamlessRotation(){
  public Handler contentWorker(){return pump.worker();}
  public Context context(){return this;}
  public CardMotion.Pose currentPose(WorkbenchSlot s){return surfaces.currentPose(s);}
- public WorkbenchSlot dragging(){return sideSort.active()?sideSort.selected():menu.dragging;}
+ public WorkbenchSlot dragging(){return cornerResize.active()?cornerResize.main:sideSort.active()?sideSort.selected():menu.dragging;}
  public void abortSideSort(String reason){sideSort.abort(reason);}
  public boolean sideSortActive(){return sideSort.active();}
- public boolean beginSideSort(WorkbenchSlot s){return sideSort.begin(s);}
+ public boolean beginSideSort(WorkbenchSlot s){return !cornerResize.active()&&sideSort.begin(s);}
  public void moveSideSort(float dx,float dy){sideSort.move(dx,dy);}
  public void releaseSideSort(){sideSort.release();}
  public void dismissSideSortMenu(){sideSort.dismissMenu();}
@@ -489,9 +505,10 @@ private void seamlessRotation(){
  public void showNativePicker(java.util.Set<String> excluded,NativeAppPicker.Selection callback){NativeAppPicker.show(this,excluded,callback);}
  public long stateToken(){return publisher.stateToken;}
  public WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception{return identity.validate(c,replacing);}
+ public WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing,int user) throws Exception{return identity.validate(c,replacing,user);}
  public void withEntranceCover(String reason,Runnable action){cover.withEntranceCover(reason,action);}
  public Activity activity(){return this;}
- public boolean backReady(){return back.backReady();}
+ public boolean backReady(){return !cornerResize.active()&&back.backReady();}
  public void chooseApp(WorkbenchSlot replacing){sideSort.dismissMenu();hang.chooseApp(replacing);}
  public void closeWorkbench(){back.closeWorkbench();}
  public void exitToFullscreen(){fullscreen.exitToFullscreen();}
@@ -521,7 +538,6 @@ private void seamlessRotation(){
  public boolean handoffPresentation(){return handoff.handoffPresentation;}
  public Runnable immersivePoll(){return identity.immersivePoll;}
  public Intent intent(){return getIntent();}
- public void menu(WorkbenchSlot s){menu.menu(s);}
  public void onEmbeddedTaskVanished(WorkbenchSlot s,int task){release.onEmbeddedTaskVanished(s,task);}
  public int pendingHangFront(){return hang.pendingHangFront;}
  public WorkbenchSlot poseSlot(){return portrait.poseSlot;}

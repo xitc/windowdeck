@@ -40,17 +40,27 @@ final class SwipeReleaseHandoff {
   Object handler=p.args[0];
   if(handler==null){log("release bail=no_handler");return;}
   View panel=(View)XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TRIGGER_PANEL);
+  if(panel==null)return;
   LauncherSwipeHook.State s=LauncherSwipeHook.stateOf(panel);
+  final boolean corner=CornerSwipeHook.owns(handler);
+  if(corner){
+   if(!CornerSwipeHook.ready(handler)){log("release bail=corner_cancelled_or_short");return;}
+   if(s==null)s=new LauncherSwipeHook.State();
+   s.gestureTask=CornerSwipeHook.task(handler);s.candidate=CornerSwipeHook.candidate(handler);
+  }
   // Every bail below used to be silent, which made "no log" indistinguishable from "the hook never
   // ran". One line on entry plus one per reason is what tells those two apart.
   log("release zone="+(s==null||s.zone()==null?"none":s.zone().getVisibility())+" progress="+(s==null?"-":s.progress)+" trigger="+(s==null?"-":s.trigger)+" selected="+(s!=null&&s.motion.selected()));
-  if(s==null||s.zone()==null){log("release bail=no_state");return;}
-  if(s.zone().getVisibility()!=View.VISIBLE){log("release bail=zone_hidden");return;}
-  if(!SwipePanelPolicy.selectable(s.progress,s.trigger)){log("release bail=below_trigger");return;}
+  if(!corner){
+   if(s==null||s.zone()==null){log("release bail=no_state");return;}
+   if(!s.legacyEntry||s.entryRevision!=CornerSwipeHook.revision()){log("release bail=entry_mode");return;}
+   if(s.zone().getVisibility()!=View.VISIBLE){log("release bail=zone_hidden");return;}
+   if(!SwipePanelPolicy.selectable(s.progress,s.trigger)){log("release bail=below_trigger");return;}
+  }
   if(Boolean.TRUE.equals(p.args[RomSymbols.BRIDGE_ARG_BOOLEAN])||Boolean.TRUE.equals(p.args[RomSymbols.BRIDGE_ARG_BOOLEAN+1])){log("release bail=cancelled");return;}
   PointF up=(PointF)p.args[RomSymbols.BRIDGE_ARG_UP_POS];if(up==null||!Float.isFinite(up.x)||!Float.isFinite(up.y)){log("release bail=invalid_up");return;}
-  int rotation=rotation(panel),axis=axisCode(panel),offset=centerOffset(panel);
-  if(!LauncherSwipeHook.midActive()||!SwipePanelPolicy.releaseSelected(s.progress,s.trigger,offset,dp(panel.getContext(),64),axis)){
+  int rotation=corner?CornerSwipeHook.rotation(handler):rotation(panel),axis=axisCode(panel),offset=centerOffset(panel);
+  if(!corner&&(!LauncherSwipeHook.midActive()||!SwipePanelPolicy.releaseSelected(s.progress,s.trigger,offset,dp(panel.getContext(),64),axis))){
    log("release bail=outside_entry axis="+axis+" offset="+offset+" progress="+s.progress+" trigger="+s.trigger);return;
   }
   SwipeCandidate.Match candidate=CandidateProbe.match(handler);
@@ -80,7 +90,7 @@ final class SwipeReleaseHandoff {
   }catch(Throwable e){Log.w(TAG,"swipe_source_geometry_unavailable",e);}
   final RectF releaseRect=sourceRect;final float releaseRadius=sourceRadius;
   final float[] releaseCrop=sourceCrop,releaseMatrix=sourceMatrix;
-  final float[] releaseVelocity=s.source.motion().velocity(candidate.task,released);
+  final float[] releaseVelocity=corner?CornerSwipeHook.velocity(handler,released):s.source.motion().velocity(candidate.task,released);
   Log.i(TAG,"swipe_source_velocity task="+candidate.task+" measured="+(releaseVelocity!=null)+" edges_px_ms="+java.util.Arrays.toString(releaseVelocity));
   final boolean landscape=SwipePanelPolicy.landscapeStack(rotation);
   final boolean deferPortrait=landscape&&candidate.container<0;
@@ -100,7 +110,8 @@ final class SwipeReleaseHandoff {
   }
   final SwipeSourceFrame.Capture capture=capturedSource;
   final boolean portraitPixels=capture!=null&&!deferPortrait;
-  final PortraitHandoffDeadline portraitWait=portraitPixels?new PortraitHandoffDeadline(candidate.task,released,MotionSpec.COVER_TIMEOUT_MS):null;
+  final long hostWait=landscape?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
+  final PortraitHandoffDeadline portraitWait=capture!=null||candidate.container>=0?new PortraitHandoffDeadline(candidate.task,released,hostWait):null;
   if(deferPortrait&&(sourceActivity==null||capture==null||releaseRect==null)){
    if(capture!=null){capture.leash.release();capture.closeVisibility();}
    Log.w(TAG,"swipe_add_degraded reason=release_source_unavailable native_release=true");return;
@@ -112,10 +123,15 @@ final class SwipeReleaseHandoff {
   final Bitmap taskFrame=s.source.takeFrame(candidate.task);
   final HandoffCover cover;
   try{
-   if(deferPortrait){HandoffCover.recycle(taskFrame);cover=HandoffCover.createSource(sourceActivity);}
+   if(deferPortrait){HandoffCover.recycle(taskFrame);cover=HandoffCover.createSource(sourceActivity,capture.width,capture.height,released);}
+   else if(portraitPixels){
+    HandoffCover.recycle(taskFrame);
+    cover=HandoffCover.createPortrait(panel.getContext(),candidate.task,capture.width,capture.height,
+      releaseCrop,releaseRect,releaseMatrix,releaseRadius,released,portraitWait);
+   }
    else cover=HandoffCover.create(panel.getContext(),landscape,taskFrame,false);
-   if(portraitPixels&&!cover.preparePortraitSource(candidate.task,capture.width,capture.height,releaseCrop,releaseRect,releaseMatrix,released))
-    cover.close("portrait_source_geometry_unavailable");
+   if(candidate.container>=0)cover.awaitRail();
+   if(corner)cover.cornerEntrance();
   }catch(Throwable e){if(capture!=null)capture.closeVisibility();Log.w(TAG,"swipe_add_degraded reason=source_window_unavailable native_release=true",e);return;}
   sourceCover[0]=cover;
   if(portraitWait!=null)cover.portraitDeadline(portraitWait);
@@ -123,6 +139,7 @@ final class SwipeReleaseHandoff {
    if(capture!=null)capture.closeVisibility();
    Log.w(TAG,"swipe_add_degraded reason=cover_unavailable native_release=true");return;
   }
+  if(corner){CornerSwipeHook.handedOff(handler,portraitWait!=null?portraitWait.limit():released+hostWait);p.setResult(null);}
   if(deferPortrait)keepSourceVisible(gestureController);
   Log.i(TAG,"swipe_handoff_claimed task="+candidate.task+" handler="+System.identityHashCode(handler));
   final View underlayRoot=panel.getRootView();
@@ -155,7 +172,9 @@ final class SwipeReleaseHandoff {
    android.os.ResultReceiver ack=completion[0];completion[0]=null;
    underlayStop.set(true);SwipeLauncherVeil.restore(underlayRoot);
    if(capture!=null)capture.closeVisibility();
-   endRecents.run();cover.close("handoff_finished");
+   // Before source release, a failed capture can still rebound the original corner pose.
+   if(recentsEnded.get()||!corner||!CornerSwipeHook.cancelHandoff(handler))endRecents.run();
+   cover.close("handoff_finished");
    if(ack!=null)ack.send(outcome[0],Bundle.EMPTY);
    Log.i(TAG,"swipe_handoff_result result="+outcome[0]+" task="+candidate.task);
    Log.i(TAG,"swipe_handoff_finish ms="+(SystemClock.uptimeMillis()-released));
@@ -169,11 +188,6 @@ final class SwipeReleaseHandoff {
   });
   android.os.ResultReceiver localReady=new android.os.ResultReceiver(main){
    @Override protected void onReceiveResult(int code,Bundle data){
-    if(code==HandoffProtocol.EXISTING_ACCEPTED){
-     outcome[0]=HandoffProtocol.READY;
-     Log.i(TAG,"swipe_existing_handoff accepted=true task="+candidate.task+" container="+candidate.container);
-     finish.run();return;
-    }
     if(code==HandoffProtocol.HOST_STARTED){
      if(finished.get()||portraitWait==null)return;
      if(data==null||!portraitWait.hostStarted(data.getInt(HandoffProtocol.TASK,-1),data.getInt(HandoffProtocol.CONTAINER,-1),
@@ -237,6 +251,9 @@ final class SwipeReleaseHandoff {
      outcome[0]=HandoffProtocol.READY;finish.run();return;
     }
     int[] proposed=data.getIntArray(HandoffProtocol.TARGET);
+    if(!cover.prepareRail(data.getParcelable(HandoffProtocol.RAIL,Bitmap.class),data.getIntArray(HandoffProtocol.RAIL_GEOMETRY))){
+     Log.w(TAG,"swipe_rail_geometry_failed");finish.run();return;
+    }
     RectF proposedRect=proposed!=null&&proposed.length==4?new RectF(proposed[0],proposed[1],proposed[2],proposed[3]):null;
     if(!cover.alignPortraitTarget(data.getInt(HandoffProtocol.ROTATION),data.getIntArray(HandoffProtocol.CONTENT_SIZE),
       data.getFloatArray(HandoffProtocol.CONTENT_CROP),data.getFloatArray(HandoffProtocol.CONTENT_QUAD),proposedRect)){
@@ -282,7 +299,6 @@ final class SwipeReleaseHandoff {
   android.os.ResultReceiver ready=HandoffProtocol.transport(localReady);
   // The first landscape cover belongs to the source application's native handoff.
   // This is a failure watchdog, not a normal-path animation/settle timer.
-  long hostWait=landscape?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
   if(portraitWait==null)main.postDelayed(()->{if(!finished.get()){Log.w(TAG,"swipe_host_ready_timeout");finish.run();}},hostWait);
   else{
    Runnable timeout=new Runnable(){public void run(){
@@ -337,7 +353,8 @@ final class SwipeReleaseHandoff {
    }else releaseSource[0].run();
   });
   Log.i(TAG,"swipe_add_requested task="+candidate.task+" container="+candidate.container);
-  s.motion.resetExpansion();s.zone().setVisibility(View.GONE);s.candidate=null;LauncherSwipeHook.deactivateMid();p.setResult(null);
+  s.motion.resetExpansion();if(s.zone()!=null)s.zone().setVisibility(View.GONE);s.candidate=null;LauncherSwipeHook.deactivateMid();
+  p.setResult(null);
  }
 
  private static boolean sameHandoffGeometry(Bundle first,Bundle next){
@@ -348,6 +365,7 @@ final class SwipeReleaseHandoff {
    &&java.util.Arrays.equals(first.getIntArray(HandoffProtocol.TARGET),next.getIntArray(HandoffProtocol.TARGET))
    &&java.util.Arrays.equals(first.getIntArray(HandoffProtocol.CONTENT_SIZE),next.getIntArray(HandoffProtocol.CONTENT_SIZE))
    &&java.util.Arrays.equals(first.getFloatArray(HandoffProtocol.CONTENT_CROP),next.getFloatArray(HandoffProtocol.CONTENT_CROP))
+   &&java.util.Arrays.equals(first.getIntArray(HandoffProtocol.RAIL_GEOMETRY),next.getIntArray(HandoffProtocol.RAIL_GEOMETRY))
    &&java.util.Arrays.equals(first.getFloatArray(HandoffProtocol.CONTENT_QUAD),next.getFloatArray(HandoffProtocol.CONTENT_QUAD));
  }
 
@@ -396,6 +414,8 @@ final class SwipeReleaseHandoff {
    add.putExtra("windowdeck_add_user_id",0);
    add.putExtra("windowdeck_container_task_id",candidate.container);
    add.putExtra("windowdeck_handoff_ready",ready);
+   add.putExtra("windowdeck_source_rotation",sourceRotation);
+   if(portraitWait!=null)add.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
    android.app.BroadcastOptions options=android.app.BroadcastOptions.makeBasic();
    options.setShareIdentityEnabled(true);
    context.sendOrderedBroadcast(add,null,options.toBundle(),new android.content.BroadcastReceiver(){
@@ -411,10 +431,17 @@ final class SwipeReleaseHandoff {
       catch(Throwable e){Log.w(TAG,"swipe_prepared_front_failed",e);finish.run();}
      }
      else if(result==4){
-      try{TaskFrontBinder.moveToFront(context,candidate.container);ready.send(HandoffProtocol.EXISTING_ACCEPTED,Bundle.EMPTY);}
+      try{TaskFrontBinder.moveToFront(context,candidate.container);}
       catch(Throwable e){Log.w(TAG,"swipe_existing_front_failed",e);finish.run();}
      }
-     else if(result==3)finish.run();
+     else if(result==3){
+      // The host refused this source task, but the selected workbench still exists.
+      // Return to that container instead of leaving the gesture on the source app.
+      try{TaskFrontBinder.moveToFront(context,candidate.container);
+       Log.i(TAG,"swipe_rejected_front task="+candidate.task+" container="+candidate.container);}
+      catch(Throwable e){Log.w(TAG,"swipe_rejected_front_failed",e);}
+      finish.run();
+     }
      else if(result==0){finish.run();dispatchRootHandoff(context,candidate);}
      else if(result!=1)finish.run();
     }

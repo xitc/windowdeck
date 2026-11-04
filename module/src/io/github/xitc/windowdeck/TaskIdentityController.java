@@ -95,13 +95,25 @@ final class TaskIdentityController {
  }
 
 
- WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception {
+ WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing) throws Exception {return validate(c,replacing,-1);}
+ WorkbenchSlot validate(ComponentName c,WorkbenchSlot replacing,int user) throws Exception {
   if(c==null||c.getPackageName().equals(host.packageName())||ModulePackages.isModule(c.getPackageName()))throw new IllegalArgumentException("应用参数无效");
-  for(WorkbenchSlot s:session.slots)if(s!=replacing&&s.component.getPackageName().equals(c.getPackageName()))throw new IllegalArgumentException("该应用已在工作台中");
+  // A cloned app shares its package with the owner-user install, so identity is package *and*
+  // user: the main app and its 分身 are two different tasks and both belong in the workbench.
+  int self=android.os.Process.myUid()/100000,requested=user>=0?user:self;
+  for(WorkbenchSlot s:session.slots){
+   if(s==replacing||!s.component.getPackageName().equals(c.getPackageName()))continue;
+   int existing=s.sourceUserId>=0?s.sourceUserId:self;
+   if(existing==requested)throw new IllegalArgumentException("该应用已在工作台中");
+  }
   ActivityInfo ai=host.packageManager().getActivityInfo(c,0);
   Intent intent=new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(c);
   if(!Boolean.TRUE.equals(rom.canvas.managerMethod("isAppSupportPocketStudio").invoke(rom.manager,intent,-1)))throw new IllegalArgumentException(ai.loadLabel(host.packageManager())+" 不支持此窗口模式");
-  WorkbenchSlot slot=new WorkbenchSlot(session.nextId++, c,ai.loadLabel(host.packageManager()).toString());slot.activeComponent=c;slot.orientationAxis=OrientationPolicy.axis(ai.screenOrientation);Log.i(TAG,"app_orientation component="+c.flattenToShortString()+" requested="+ai.screenOrientation+" axis="+slot.orientationAxis);return slot;
+  String name=ai.loadLabel(host.packageManager()).toString();
+  // A clone renders under the same label as the owner install; tag it so the two cards
+  // in one workbench can be told apart.
+  if(requested!=self)name=name+" · 分身";
+  WorkbenchSlot slot=new WorkbenchSlot(session.nextId++, c,name);slot.activeComponent=c;slot.orientationAxis=OrientationPolicy.axis(ai.screenOrientation);Log.i(TAG,"app_orientation component="+c.flattenToShortString()+" requested="+ai.screenOrientation+" axis="+slot.orientationAxis);return slot;
  }
  ActivityManager.RunningTaskInfo runningTask(int id) throws Exception {
   java.util.List<?> tasks=rom.canvas.tasks();
@@ -111,7 +123,7 @@ final class TaskIdentityController {
  WorkbenchSlot validateSourceTask(int id,int user) throws Exception {
    ActivityManager.RunningTaskInfo task=runningTask(id);
    int taskUser=task==null?-1:task.getClass().getField("userId").getInt(task);
-   if(task==null||taskUser!=user||taskUser!=android.os.Process.myUid()/100000||task.baseActivity==null)throw new IllegalArgumentException("任务身份或用户不匹配");
+   if(task==null||taskUser!=user||taskUser<0||task.baseActivity==null)throw new IllegalArgumentException("任务身份或用户不匹配");
    RotationIdentity identity=readIdentity(task);
    if("cross_package".equals(identity.unavailable)){Log.i(TAG,"slot=- task="+id+" "+identity.record());throw new IllegalArgumentException("任务身份或用户不匹配");}
    if(((Integer)task.getClass().getMethod("getWindowingMode").invoke(task))!=1)throw new IllegalArgumentException("仅接收全屏任务");
@@ -119,7 +131,9 @@ final class TaskIdentityController {
    Intent launcher=host.packageManager().getLaunchIntentForPackage(pkg);
    if(launcher==null||launcher.getComponent()==null)throw new IllegalArgumentException("任务应用没有桌面入口");
    if(!Boolean.TRUE.equals(rom.canvas.managerMethod("isAppSupportPocketStudio").invoke(rom.manager,launcher,id)))throw new IllegalArgumentException("任务不支持嵌入");
-   WorkbenchSlot fresh=validate(launcher.getComponent(),null);fresh.sourceTaskId=id;fresh.sourceUserId=user;
+   // Identity must be resolved against the task's own user, not the owner: otherwise the
+   // clone is compared against the main app's slot and rejected as "already in the workbench".
+   WorkbenchSlot fresh=validate(launcher.getComponent(),null,user);fresh.sourceTaskId=id;fresh.sourceUserId=user;
    ResolvedRotation resolved=resolveRotation(identity);
    if(resolved.identity.rotationClass==null){fresh.activeComponent=null;fresh.orientationAxis=0;}
    else{

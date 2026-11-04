@@ -16,6 +16,9 @@ final class SnapshotMotionView extends View {
  private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
  private final Path outline=new Path(),sourceOutline=new Path();
  private Drawable wallpaper;
+ private Bitmap rail;
+ private int[] railGeometry;
+ private long railElapsed;
  private final int width,height;
  private int turns;
  private float progress,backgroundProgress;private boolean moving;
@@ -61,6 +64,13 @@ final class SnapshotMotionView extends View {
   progress=0;moving=true;invalidate();
  }
  void wallpaper(Drawable value){wallpaper=value;invalidate();}
+ void rail(Bitmap frame,int[] geometry){rail=frame;railGeometry=geometry.clone();}
+ void railTime(long elapsed){railElapsed=elapsed;}
+ private void drawRail(Canvas canvas){
+  if(rail==null||rail.isRecycled()||railGeometry==null)return;
+  float offset=RailEntrance.offset(railGeometry[3],railElapsed);paint.setAlpha(255);
+  canvas.drawBitmap(rail,railGeometry[2]==PaneLayout.LEFT_RIGHT?offset:0,railGeometry[2]==PaneLayout.TOP_BOTTOM?offset:0,paint);
+ }
  void progress(float value,float backgroundValue){progress=value;backgroundProgress=backgroundValue;invalidate();}
  /** Screen-space card corners, LT RT RB LB. The stage matrix is already the one this view draws with. */
  float[] sampleCorners(){
@@ -123,6 +133,7 @@ final class SnapshotMotionView extends View {
   // hole exposes destination wallpaper there before the rounded card has moved.
   int saved=canvas.save();canvas.clipOutPath(sourceOutline);paint.setAlpha(Math.round(255*(1-backgroundProgress)));
   canvas.drawBitmap(release,displayMap,paint);canvas.restoreToCount(saved);
+  drawRail(canvas);
   current.set(MotionSpec.lerp(source.left,target.left,progress),MotionSpec.lerp(source.top,target.top,progress),
    MotionSpec.lerp(source.right,target.right,progress),MotionSpec.lerp(source.bottom,target.bottom,progress));
   float radius=MotionSpec.lerp(fromRadius,toRadius,progress);
@@ -152,6 +163,7 @@ final class SnapshotMotionView extends View {
    wallpaper.setAlpha(Math.round(255*Math.max(0f,Math.min(1f,backgroundProgress))));
    wallpaper.setBounds(0,0,spaceW,spaceH);wallpaper.draw(canvas);
   }
+  if(moving)drawRail(canvas);
   // Quarter-turns permute the corners; both ends and every interpolated frame
   // are axis-aligned rectangles. Use the same screen-space rounding as live.
   float[] box=DisplayGeometry.quadBounds(quad);

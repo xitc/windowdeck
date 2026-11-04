@@ -96,13 +96,6 @@ final class WorkbenchMenuController {
  Runnable recoveryFinish;
 
 
- void menu(WorkbenchSlot s){
-  if(host.sideSortActive()||host.closing()||s.released||recovering||dragging!=null)return;
-  showWorkbenchDialog(new AlertDialog.Builder(host.context()).setTitle(s.label).setItems(new String[]{"切换为主应用",s.pinned?"取消固定":"固定此应用","替换应用","从工作台移出"},(d,which)->{
-   if(s.released||recovering||dragging!=null)return;
-   if(which==0)host.promote(session.slots.indexOf(s));else if(which==1)togglePin(s);else if(which==2)host.chooseApp(s);else removeSlot(s);
-  }).setNegativeButton("取消",null).create());
- }
  void togglePin(WorkbenchSlot s){
   if(!s.pinned)for(WorkbenchSlot other:session.slots)if(other.pinned){Toast.makeText(host.context(),"请先取消固定 "+other.label,Toast.LENGTH_SHORT).show();return;}
   host.cancelAnimation();s.pinned=!s.pinned;host.layoutCards(false);Log.i(TAG,"pin slot="+s.id+" pinned="+s.pinned);

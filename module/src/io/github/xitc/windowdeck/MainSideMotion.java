@@ -41,9 +41,11 @@ final class MainSideMotion {
    float[] p=point(from.quad[i]+originX,from.quad[i+1]+originY,to.quad[i]+originX,to.quad[i+1]+originY,fraction);
    corners[i]=p[0]-originX;corners[i+1]=p[1]-originY;
   }
-  float sourceRadius=CardMotion.sourceRadius(from)+(CardMotion.sourceRadius(to)-CardMotion.sourceRadius(from))*fraction;
-  float scale=Math.min(mixed.box[2]/mixed.crop[2],mixed.box[3]/mixed.crop[3]);
-  return new CardMotion.Pose(mixed.box,corners,mixed.crop,sourceRadius*scale);
+  // The host also animates card scale. Interpolating task-space radius and
+  // multiplying by that changing scale makes a shrinking corner bulge first.
+  // Keep the display radius bounded; the renderer converts it once for both
+  // the task leash and host aperture, including an interrupted reversal.
+  return new CardMotion.Pose(mixed.box,corners,mixed.crop,mixed.radius);
  }
  private MainSideMotion(){}
 }

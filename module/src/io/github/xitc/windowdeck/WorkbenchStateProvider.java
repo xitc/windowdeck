@@ -43,6 +43,10 @@ public final class WorkbenchStateProvider extends ContentProvider {
    if(!host&&!launcher)return null;
    Bundle answer=new Bundle();answer.putInt(MainWindowSettings.PREF,MainWindowSettings.local(getContext()));return answer;
   }
+  if(CornerEntrySettings.PREF.equals(method)){
+   if(!launcher)return null;
+   Bundle answer=new Bundle();answer.putBoolean(CornerEntrySettings.PREF,CornerEntrySettings.local(getContext()));return answer;
+  }
   if(!launcher)return null;
   if("add_task".equals(method)){
    if(extras==null)return null;

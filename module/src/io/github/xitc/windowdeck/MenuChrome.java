@@ -26,7 +26,7 @@ import java.util.function.Consumer;
 
 /** Native COUI popup owns motion and live material; styled local popup is the fallback. */
 final class MenuChrome {
- static final int FULLSCREEN=0,LAYOUT=1,REPLACE=2,CLOSE=3,KEYBOARD=4;
+ static final int FULLSCREEN=0,LAYOUT=1,REPLACE=2,CLOSE=3,KEYBOARD=4,PIN=5,UNPIN=6;
  private MenuChrome(){}
  private static int resource(Context c,String type,String name){
   return c.getResources().getIdentifier(name,type,"com.oplus.pscanvas");
@@ -212,7 +212,7 @@ final class MenuChrome {
   row.setOnClickListener(click);
  }
  private static Drawable glyph(Context c,int kind,int color,boolean topBottom){
-  if(kind==KEYBOARD)return new Glyph(kind,color);
+  if(kind==KEYBOARD||kind==PIN||kind==UNPIN)return new Glyph(kind,color);
   String name=kind==FULLSCREEN?"full_button_bg":kind==REPLACE?"app_list_button_bg":kind==CLOSE?"close_button_bg":
    topBottom?"split_screen_switch_orientation_horizontal":"split_screen_switch_orientation_vertical";
   Drawable icon=drawable(c,name);
@@ -341,6 +341,11 @@ final class MenuChrome {
    else if(kind==REPLACE){
     canvas.drawRoundRect(3,3,10,10,1.3f,1.3f,paint);canvas.drawRoundRect(14,3,21,10,1.3f,1.3f,paint);
     canvas.drawRoundRect(3,14,10,21,1.3f,1.3f,paint);canvas.drawRoundRect(14,14,21,21,1.3f,1.3f,paint);
+   }else if(kind==PIN||kind==UNPIN){
+    path.rewind();path.moveTo(8,3);path.lineTo(16,3);path.lineTo(15,10);
+    path.lineTo(19,14);path.lineTo(5,14);path.lineTo(9,10);path.close();
+    canvas.drawPath(path,paint);canvas.drawLine(12,14,12,22,paint);
+    if(kind==UNPIN)canvas.drawLine(3,3,21,21,paint);
    }else if(kind==KEYBOARD){
     canvas.drawRoundRect(2,5,22,19,2,2,paint);
     for(int y=9;y<=12;y+=3)for(int x=6;x<=18;x+=4)canvas.drawPoint(x,y,paint);

@@ -57,6 +57,12 @@ public final class MainActivity extends Activity {
   SettingsRow size=SettingsRow.action(this,SettingsGlyph.SIZE,SettingsTheme.blue(this),"主窗口大小","按比例缩放主窗，侧窗自动让位",MainWindowSettings.local(this)+"%");
   size.view.setOnClickListener(v->MainWindowSettings.show(this,size.value));
   card.addView(size.view);
+  SettingsRow corner=SettingsRow.switchRow(this,SettingsGlyph.RESUME,SettingsTheme.purple(this),"右下角斜滑启动",
+   "横竖屏应用均可从右下角向左上滑进入；关闭后使用桌面上滑入口",CornerEntrySettings.local(this),wanted->{
+   if(!CornerEntrySettings.save(this,wanted)){status.setText("启动方式保存失败，请重试。");return false;}
+   return true;
+  });
+  card.addView(corner.view);
   SettingsRow resume=SettingsRow.action(this,SettingsGlyph.RESUME,SettingsTheme.blue(this),"打开 / 恢复当前工作台","回到已保存的窗口组合",null);
   resume.view.setOnClickListener(v->launch(true));
   card.addView(resume.view);
@@ -119,14 +125,24 @@ public final class MainActivity extends Activity {
   }else selectApp(slot);
  }
  private void selectApp(int slot){
-  Set<String> excluded=new HashSet<>();for(int i=0;i<SLOTS;i++)if(i!=slot&&!components[i].isEmpty()){ComponentName c=ComponentName.unflattenFromString(components[i]);if(c!=null)excluded.add(c.getPackageName());}
-  AppPicker.show(this,excluded,(c,label)->savePick(slot,c.flattenToString(),label));
+  Set<String> excluded=new HashSet<>();for(int i=0;i<SLOTS;i++)if(i!=slot&&!components[i].isEmpty()){ComponentName c=ComponentName.unflattenFromString(userPart(components[i])[0]);if(c!=null)excluded.add(c.getPackageName()+"/"+userPart(components[i])[1]);}
+  AppPicker.show(this,excluded,(c,label,user)->savePick(slot,componentWithUser(c,user),label));
  }
+ /** Slot components carry an optional "|<user>" suffix for clones; split it off here. */
+ static String[] userPart(String flat){
+  if(flat==null)return new String[]{"",String.valueOf(0)};
+  int bar=flat.lastIndexOf('|');
+  if(bar>=0){try{int u=Integer.parseInt(flat.substring(bar+1));if(u>=0)return new String[]{flat.substring(0,bar),String.valueOf(u)};}catch(Throwable ignored){}}
+  return new String[]{flat,String.valueOf(0)};
+ }
+ static String componentWithUser(ComponentName component,int user){return component.flattenToString()+(user>0?"|"+user:"");}
  private void savePick(int slot,String component,String label){components[slot]=component;labels[slot]=label;picks[slot].setValue(label);getPreferences(0).edit().putString("component"+slot,component).putString("label"+slot,label).apply();}
  private static String quote(String s){return "'"+s.replace("'","'\\''")+"'";}
  private void launch(boolean resume){
-  ComponentName first=ComponentName.unflattenFromString(components[0]),second=ComponentName.unflattenFromString(components[1]);
-  if(first==null||second==null||first.getPackageName().equals(second.getPackageName())){status.setText("请选择两个不同的应用。");return;}
+  ComponentName first=ComponentName.unflattenFromString(userPart(components[0])[0]),second=ComponentName.unflattenFromString(userPart(components[1])[0]);
+  // Same package in a different Android user is allowed: that is the 应用分身 twin.
+  if(first==null||second==null||(first.getPackageName().equals(second.getPackageName())
+    &&userPart(components[0])[1].equals(userPart(components[1])[1]))){status.setText("请选择两个不同的应用。");return;}
   start.setEnabled(false);status.setText("正在请求 Root 并启动…");
   String[] extra={"c","d","e"};
   StringBuilder cmd=new StringBuilder("am start --user 0 -f ").append(resume?"0x30020000":"0x10008000")
