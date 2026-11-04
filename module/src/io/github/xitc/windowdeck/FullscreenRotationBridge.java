@@ -28,6 +28,7 @@ final class FullscreenRotationBridge {
  private final Runnable timeout=()->finish(false,"timeout");
  private volatile boolean closed;
  private boolean sourceCommitted,targetPending,finished;
+ private android.os.IBinder cutLease;
  private Bitmap bitmap;
  private Picture picture;
 
@@ -63,12 +64,21 @@ final class FullscreenRotationBridge {
     if(closed||finished||sourceCommitted)return;
     sourceCommitted=true;
     Log.i("WindowDeck","fullscreen_rotation_source_committed task="+task);
-    try{activity.setRequestedOrientation(orientation);requestTargetFrame();}
-    catch(Throwable e){Log.w("WindowDeck","fullscreen_rotation_request_failed task="+task,e);finish(false,"orientation_failed");}
+    try{FullscreenRotationCut.arm(activity,activity.getTaskId(),lease->{
+     if(closed||finished){FullscreenRotationCut.release(lease);return;}
+     cutLease=lease;
+     Log.i("WindowDeck","fullscreen_rotation_cut_request task="+task+" armed="+(lease!=null));
+     requestOrientation();
+    });}catch(Throwable e){Log.w("WindowDeck","fullscreen_rotation_cut_request_failed task="+task,e);requestOrientation();}
    }));
    picture.invalidate();
   }catch(Throwable e){Log.w("WindowDeck","fullscreen_rotation_attach_failed task="+task,e);finish(false,"attach_failed");}
  }
+ private void requestOrientation(){
+  try{activity.setRequestedOrientation(orientation);requestTargetFrame();}
+  catch(Throwable e){Log.w("WindowDeck","fullscreen_rotation_request_failed task="+task,e);finish(false,"orientation_failed");}
+ }
+ private void releaseCut(){FullscreenRotationCut.release(cutLease);cutLease=null;}
  private boolean destinationReady(){
   if(picture==null||picture.getWidth()<=picture.getHeight()||activity.getResources().getConfiguration().orientation!=Configuration.ORIENTATION_LANDSCAPE)return false;
   int rotation=picture.getDisplay()==null?-1:picture.getDisplay().getRotation();
@@ -86,13 +96,13 @@ final class FullscreenRotationBridge {
  }
  private void finish(boolean ready,String reason){
   if(closed||finished)return;
-  finished=true;main.removeCallbacks(timeout);
+  finished=true;main.removeCallbacks(timeout);releaseCut();
   Log.i("WindowDeck","fullscreen_rotation_result task="+task+" result="+(ready?"frame_committed":"degraded")+" reason="+reason+" elapsed_ms="+(SystemClock.uptimeMillis()-started));
   listener.complete(this,ready,reason);
  }
  void close(){
   if(closed)return;
-  closed=true;main.removeCallbacks(timeout);
+  closed=true;main.removeCallbacks(timeout);releaseCut();
   if(picture!=null&&picture.getParent() instanceof ViewGroup)((ViewGroup)picture.getParent()).removeView(picture);
   if(bitmap!=null){bitmap.recycle();bitmap=null;}
  }

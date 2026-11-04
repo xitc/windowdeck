@@ -10,7 +10,7 @@ public final class TaskIngress {
  public static void main(String[] args) throws Exception {
   if(android.os.Process.myUid()!=0||args.length!=2)throw new SecurityException("root task/user required");
   int source=Integer.parseInt(args[0]),user=Integer.parseInt(args[1]);
-  if(source<0||user!=0)throw new IllegalArgumentException("invalid source");
+  if(source<0||user<0)throw new IllegalArgumentException("invalid source");
   Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
   List<?> tasks=(List<?>)Class.forName("android.app.IActivityTaskManager").getMethod("getTasks",int.class,boolean.class,boolean.class,int.class).invoke(service,100,false,true,0);
   ActivityManager.RunningTaskInfo sourceInfo=null;

@@ -67,6 +67,8 @@ final class LauncherSwipeHook {
   int gestureTask=-1;
   float progress,trigger,startShow;
   boolean tracedProgress,tracedZone;
+  boolean legacyEntry=true;
+  long entryRevision;
   View zone(){return chrome==null?null:chrome.zone();}
  }
  private static final GestureHandoffOwners HANDOFF_OWNERS=new GestureHandoffOwners();
@@ -92,6 +94,7 @@ final class LauncherSwipeHook {
   // the rest of the symbol report, instead of after a swipe that already looked wrong.
   try{SwipeCentreClaim.problem(RomSymbols.field(panel,RomSymbols.PANEL_CONTROLLER).getType());}catch(Throwable ignored){}
   installHooks(panel,bridge,initAnimation);
+  CornerSwipeHook.install(loader,handler);
   return true;
  }
  private static void installHooks(Class<?> panel,Method bridge,Method initAnimation){
@@ -99,6 +102,7 @@ final class LauncherSwipeHook {
   XposedHelpers.findAndHookMethod(bridge.getParameterTypes()[0],RomSymbols.HANDLER_END_TARGET,
     float.class,boolean.class,PointF.class,boolean.class,boolean.class,boolean.class,boolean.class,new XC_MethodHook(){
    @Override protected void beforeHookedMethod(MethodHookParam p){
+    if(CornerSwipeHook.endTarget(p.thisObject)){p.setResult(null);return;}
     if(!HANDOFF_OWNERS.owns(p.thisObject)){
      // Read existing gesture geometry only; do not query tasks or capture pixels on release.
      int handles=-1;RectF rect=null;
@@ -121,6 +125,7 @@ final class LauncherSwipeHook {
    }
   });
   XposedHelpers.findAndHookMethod(panel,RomSymbols.PANEL_UPDATE_PROGRESS,float.class,new XC_MethodHook(){
+   @Override protected void beforeHookedMethod(MethodHookParam p){if(CornerSwipeHook.hidePanel((View)p.thisObject))p.setResult(null);}
    @Override protected void afterHookedMethod(MethodHookParam p){try{progress((View)p.thisObject,(Float)p.args[0]);}catch(Throwable e){Log.w(TAG,"swipe_panel_update_failed",e);XposedBridge.log(e);}}
   });
   XposedHelpers.findAndHookMethod(panel,RomSymbols.PANEL_ON_LAYOUT,boolean.class,int.class,int.class,int.class,int.class,new XC_MethodHook(){
@@ -134,7 +139,7 @@ final class LauncherSwipeHook {
   });
   // The bridge is static: the handler is args[0], not thisObject.
   XposedBridge.hookMethod(bridge,new XC_MethodHook(){
-   @Override protected void beforeHookedMethod(MethodHookParam p){try{SwipeReleaseHandoff.release(p);}catch(Throwable e){Log.w(TAG,"swipe_release_failed",e);}}
+   @Override protected void beforeHookedMethod(MethodHookParam p){try{SwipeReleaseHandoff.release(p);}catch(Throwable e){Log.w(TAG,"swipe_release_failed",e);}finally{CornerSwipeHook.afterRelease(p);}}
    @Override protected void afterHookedMethod(MethodHookParam p){try{onGestureEnd((View)XposedHelpers.getObjectField(p.args[0],RomSymbols.HANDLER_TRIGGER_PANEL));}catch(Throwable e){XposedBridge.log(e);}}
   });
   Log.i(TAG,"launcher_swipe_hook_ready");
@@ -169,6 +174,12 @@ final class LauncherSwipeHook {
  static boolean midActive(){return MID_ACTIVE;}
  static void deactivateMid(){MID_ACTIVE=false;}
  static boolean claimHandoff(Object handler,boolean coverUsable){return HANDOFF_OWNERS.claim(handler,coverUsable);}
+ /** A completed live-leash rebound also owns delayed end-target callbacks for this handler. */
+ static void claimCornerReturn(Object handler){HANDOFF_OWNERS.claim(handler,true);}
+ static void entrySettingChanged(){
+  MID_ACTIVE=false;ELIGIBLE_PARAMS.clear();SwipeCentreClaim.clearShown();
+  for(State state:STATES.values())if(state.chrome!=null)state.chrome.zone().setVisibility(View.GONE);
+ }
  // ------------------------------------------------------------------ gesture lifecycle
 private static void onGestureStart(View panel) throws Exception {
  // This runs inside the panel's own initAnimation, before its first frame. The task list was
@@ -176,6 +187,7 @@ private static void onGestureStart(View panel) throws Exception {
  long began=SystemClock.uptimeMillis();
  LiveWorkbenchState.register(panel.getContext());
  State state=state(panel);
+ state.entryRevision=CornerSwipeHook.revision();state.legacyEntry=!CornerSwipeHook.mode(panel.getContext(),rotation(panel));
  state.tracedProgress=false;state.tracedZone=false;state.motion.clearWindowFade();TRACED_MID=false;state.motion.resetExpansion();
  state.candidate=null;state.source.resetMotion();SwipeCentreClaim.clearShown();
  // Two things fade the card to alpha 0 -- the exit animation when the window opens, and the retire
@@ -190,7 +202,7 @@ private static void onGestureStart(View panel) throws Exception {
  state.gestureTask=CandidateProbe.runningTask(swipe);
  SwipeCandidate.Match candidate=swipe==null?null:CandidateProbe.match(swipe);
  boolean room=centreFree(panel);
- boolean offered=CandidateProbe.showEntry(swipe);
+ boolean offered=state.legacyEntry&&CandidateProbe.showEntry(swipe);
  if(params!=null)ELIGIBLE_PARAMS.put(params,offered&&room);
  // The ROM recomputes every capsule rectangle further down this very call, so arming the layout
  // here is what makes the middle gap appear together with the panel instead of one frame later.
@@ -203,7 +215,7 @@ private static void onGestureStart(View panel) throws Exception {
  // HOME/RECENTS/cancel still belong to Launcher. Never cover the finger-driven
  // task with a display snapshot before release selects a workbench handoff.
  final int sourceGeneration=state.source.openGeneration();
- if(MID_ACTIVE&&candidate!=null&&candidate.container>=0&&SwipePanelPolicy.landscapeStack(rotation(panel)))
+ if((MID_ACTIVE||CornerSwipeHook.tracking(swipe))&&candidate!=null&&candidate.container>=0&&SwipePanelPolicy.landscapeStack(rotation(panel)))
   state.source.schedule(panel,swipe,candidate.task,sourceGeneration);
 }
  private static void onGestureEnd(View panel){
@@ -265,6 +277,7 @@ private static void onGestureStart(View panel) throws Exception {
  private static State state(View panel){State s=STATES.get(panel);if(s==null){s=new State();STATES.put(panel,s);}return s;}
  private static void progress(View panel,float value){
   State s=state(panel);s.progress=value;
+  if(!s.legacyEntry||s.entryRevision!=CornerSwipeHook.revision())return;
   try{
    Object gate=params(panel);
    if(gate!=null)s.startShow=XposedHelpers.getFloatField(gate,RomSymbols.PARAMS_START_SHOW);

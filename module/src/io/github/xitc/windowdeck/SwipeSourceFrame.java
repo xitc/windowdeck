@@ -207,7 +207,10 @@ final class SwipeSourceFrame {
    final long capturedAt=SystemClock.uptimeMillis();
    main.post(()->{
     HandoffCover current=cover[0];
-    if(current==null||current.isClosed()) { HandoffCover.recycle(shot); return; }
+    if(current==null||current.isClosed()) {
+     Log.i(TAG,"swipe_release_pixels_discarded task="+source.task+" layer="+source.layer+" reason=cover_closed ms="+(SystemClock.uptimeMillis()-began));
+     HandoffCover.recycle(shot);return;
+    }
     try {
      if(XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_CONTROLLER)!=controller) {
       HandoffCover.recycle(shot);

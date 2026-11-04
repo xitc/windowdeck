@@ -62,7 +62,6 @@ final class TaskSurfaceRenderer {
   LayoutSwitchVisuals layoutSwitchVisuals();
   int mainWindowPercent();
   void maybeAnimateAddedCard();
-  void menu(WorkbenchSlot s);
   void onEmbeddedTaskVanished(WorkbenchSlot s,int task);
   PackageManager packageManager();
   WorkbenchSlot pendingEntrance();
@@ -368,7 +367,11 @@ final class TaskSurfaceRenderer {
    config.putBoolean("zorder_on_top",false);
    if(slot.sourceTaskId>=0)config.putInt("taskId",slot.sourceTaskId);
    else config.putParcelable("intent",slot.launchIntent!=null?new Intent(slot.launchIntent):new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setComponent(slot.component).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-   config.putInt("userId",slot.sourceTaskId>=0?slot.sourceUserId:android.os.Process.myUid()/100000);config.putFloat("cornerRadius",cardRadius(session.slots.indexOf(slot)==session.primary));config.putInt("reparent_align",session.slots.indexOf(slot)==session.primary?0:2);
+   // A cloned app lives in another Android user. The picker records that user on the slot,
+   // and the ROM resolves the launch against it: leaving this at the owner user makes the
+   // system match whatever instance is already running instead of the selected clone.
+   int launchUser=slot.sourceUserId>=0?slot.sourceUserId:android.os.Process.myUid()/100000;
+   config.putInt("userId",launchUser);config.putFloat("cornerRadius",cardRadius(session.slots.indexOf(slot)==session.primary));config.putInt("reparent_align",session.slots.indexOf(slot)==session.primary?0:2);
    config.putBoolean("intercept_input_event",true);config.putBoolean("allow_task_detach_from_embedding",true);config.putBoolean("key_intercept_back_key",true);config.putBoolean("flexible_key_remove_task_detach",false);config.putInt("use_view_snapshot",1);
    rom.canvas.viewMethod("init").invoke(slot.surface,config);rom.canvas.viewMethod("setEnforceStart").invoke(slot.surface,true);
    if(rom.viewTransaction!=null){

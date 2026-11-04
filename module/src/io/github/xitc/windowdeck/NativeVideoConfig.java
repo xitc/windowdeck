@@ -16,16 +16,21 @@ import org.xmlpull.v1.XmlPullParser;
 final class NativeVideoConfig {
  static final String PATH="/data/oplus/os/config/sys_wms_split_app.xml";
  static final class Snapshot {
-  final String xml;final long loaded;final Set<String> managed,all;
-  Snapshot(String xml,long loaded){this.xml=xml;this.loaded=loaded;managed=NativeVideoConfigPlan.managed(xml);all=NativeVideoConfigPlan.entries(xml);}
+  final String xml;final long loaded;final Set<String> managed,all;final boolean biliUnresizable;
+  Snapshot(String xml,long loaded){this.xml=xml;this.loaded=loaded;managed=NativeVideoConfigPlan.managed(xml);all=NativeVideoConfigPlan.entries(xml);biliUnresizable=xml.contains(NativeVideoConfigPlan.BILI_BEGIN);}
  }
  static synchronized Snapshot read()throws Exception{
   if(!Build.DISPLAY.startsWith("PJZ110_17."))throw new IOException("当前仅验证了 PJZ110 的 ColorOS 17，未修改系统配置");
   String xml=root("cat "+quote(PATH));validate(xml);return new Snapshot(xml,loaded());
  }
  static synchronized Snapshot apply(Context context,Collection<String> requested)throws Exception{
-  Snapshot before=read();NativeVideoConfigPlan plan=NativeVideoConfigPlan.edit(before.xml,requested,before.loaded);
-  if(!plan.changed){Log.i("WindowDeck","native_video_config unchanged count="+requested.size());return before;}
+  Snapshot before=read();NativeVideoConfigPlan plan=NativeVideoConfigPlan.edit(before.xml,requested,before.loaded);return applyPlan(context,before,plan);
+ }
+ static synchronized Snapshot applyBiliUnresizable(Context context,boolean enabled)throws Exception{
+  Snapshot before=read();NativeVideoConfigPlan plan=NativeVideoConfigPlan.editBiliUnresizable(before.xml,enabled,before.loaded);return applyPlan(context,before,plan);
+ }
+ private static Snapshot applyPlan(Context context,Snapshot before,NativeVideoConfigPlan plan)throws Exception{
+  if(!plan.changed){Log.i("WindowDeck","native_video_config unchanged count="+plan.managed.size());return before;}
   validate(plan.xml);
   File backups=new File(context.getFilesDir(),"native-video-config");
   File run=new File(backups,Long.toString(System.currentTimeMillis()));

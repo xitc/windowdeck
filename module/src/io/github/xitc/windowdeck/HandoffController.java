@@ -80,6 +80,9 @@ final class HandoffController {
   void setRequestedOrientation(int orientation);
   SourceRelease sourceRelease();
   CanvasStage stage();
+  View addCard();
+  int effectiveMode();
+  Handler contentWorker();
   void supersedeHangEntrance();
   boolean stopped();
   int[] surfacePlate(WorkbenchSlot s);
@@ -109,6 +112,10 @@ final class HandoffController {
  android.os.ResultReceiver handoffReady;
  long handoffDeadline;
  long portraitHandoffLimit;
+ long existingReadyBudget;
+ boolean existingHostStarted;
+ int existingSourceTask=-1;
+ boolean restoringHandoff;
  boolean handoffPresentation;
  int presentationGeneration;
  android.os.ResultReceiver presentationReply;
@@ -119,13 +126,19 @@ final class HandoffController {
  WorkbenchSlot entranceSlot;
  WorkbenchSlot existingSwipeSlot;
  int existingSwipeTask=-1;
+ HandoffRail rail;
 
 
  /** 0 is a new app, 4 is a validated reuse, 3 is a rejected reuse request. */
+ private int rejectExistingTask(int source,String reason){
+  Log.i(TAG,"swipe_existing_rejected source="+source+" container="+host.taskId()+" reason="+reason);
+  return 3;
+ }
  int restoreExistingTask(Intent request){
   int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
-  if(id<0||user!=android.os.Process.myUid()/100000||request.getIntExtra("windowdeck_container_task_id",-1)!=host.taskId()
-    ||host.closing()||host.recovering()||!host.initialized()||host.pendingPickerLaunch()!=null)return 3;
+  if(id<0||user<0||request.getIntExtra("windowdeck_container_task_id",-1)!=host.taskId()
+    ||host.closing()||host.recovering()||!host.initialized()||host.pendingPickerLaunch()!=null)
+   return rejectExistingTask(id,"host_unavailable_or_identity");
   try{
    ActivityManager.RunningTaskInfo source=null;
    java.util.List<?> tasks=rom.canvas.tasks();
@@ -133,17 +146,25 @@ final class HandoffController {
    if(source==null||source.baseActivity==null||source.topActivity==null
      ||source.getClass().getField("userId").getInt(source)!=user
      ||((Number)source.getClass().getMethod("getWindowingMode").invoke(source)).intValue()!=1
-     ||!source.baseActivity.getPackageName().equals(source.topActivity.getPackageName()))return 3;
+     ||!source.baseActivity.getPackageName().equals(source.topActivity.getPackageName()))
+    return rejectExistingTask(id,"source_not_fullscreen_or_identity");
    String pkg=source.baseActivity.getPackageName();
    for(WorkbenchSlot slot:session.slots){
     if(slot.released||!slot.component.getPackageName().equals(pkg))continue;
-    if(entrance.pending()!=null||host.addAnimation()!=null)return 3;
+    if(slot.sourceUserId>=0&&slot.sourceUserId!=user)continue;
+    if(entrance.pending()!=null||host.addAnimation()!=null||handoffPresentation||rail!=null)
+     return rejectExistingTask(id,"member_transition_busy");
     ActivityManager.RunningTaskInfo held=null;
     for(Object value:tasks){ActivityManager.RunningTaskInfo task=(ActivityManager.RunningTaskInfo)value;if(task.taskId==slot.taskId)held=task;}
-    if(held==null||held.baseActivity==null||!pkg.equals(held.baseActivity.getPackageName())
-      ||held.getClass().getField("userId").getInt(held)!=user)return 3;
+    if(held==null||held.baseActivity==null||!pkg.equals(held.baseActivity.getPackageName()))
+     return rejectExistingTask(id,"member_task_stale");
+    if(held.getClass().getField("userId").getInt(held)!=user)continue;
     // onResume restores the original task with the existing embedding options.
-    // Do not create a second Slot or send this through the add entrance watchdog.
+    // Reuse that Slot, but retain the source cover until the entire group is ready.
+    if(request.hasExtra("windowdeck_handoff_ready")){
+     configureExistingHandoff(request);
+     adoptPendingEntrance(slot,true);restoringHandoff=true;watchHandoffDeadline(slot);
+    }
     host.abortSideSort("existing_restore");
     if(slot.taskId==id||!slot.embedded)slot.pendingTask=slot.taskId;
     existingSwipeSlot=slot;existingSwipeTask=slot.taskId;
@@ -152,7 +173,7 @@ final class HandoffController {
     return 4;
    }
    return 0;
-  }catch(Throwable e){Log.w(TAG,"swipe_existing_restore_failed task="+id,e);return 3;}
+  }catch(Throwable e){Log.w(TAG,"swipe_existing_restore_failed task="+id,e);return rejectExistingTask(id,"exception");}
  }
  boolean addExistingTask(Intent request){
   int id=request.getIntExtra("windowdeck_add_task_id",-1),user=request.getIntExtra("windowdeck_add_user_id",-1);
@@ -168,6 +189,9 @@ final class HandoffController {
   }catch(Throwable e){Log.w(TAG,"add_existing_failed task="+id,e);if(!host.hangQuiet())Toast.makeText(host.context(),"未能加入："+(e.getMessage()==null?"原应用保持不变":e.getMessage()),Toast.LENGTH_LONG).show();return false;}
  }
  boolean attachTaskEntrance(WorkbenchSlot fresh,boolean replace,boolean hang,Intent request) throws Exception {
+   cancelRail();
+   restoringHandoff=false;
+   if(!hang&&!replace)configureExistingHandoff(request);
    host.abortSideSort("task_entrance");
    if(replace){
     WorkbenchSlot old=session.slots.get(session.primary);if(old.pinned)throw new IllegalArgumentException("请先取消固定");
@@ -185,9 +209,7 @@ final class HandoffController {
     originalPlus=host.readOriginalPlus();session.primary=HangPlace.place(session.slots,session.primary,fresh,false,true,originalPlus);
    }else{originalPlus=false;session.primary=HangPlace.place(session.slots,session.primary,fresh,false,false,false);}
    adoptPendingEntrance(fresh,!hang&&!replace);
-   handoffReady=gestureHandoff?request.getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class):null;
-   portraitHandoffLimit=0;
-   handoffDeadline=SystemClock.uptimeMillis()+2000;
+   if(!gestureHandoff){handoffReady=null;portraitHandoffLimit=0;existingReadyBudget=0;existingSourceTask=-1;handoffDeadline=SystemClock.uptimeMillis()+MotionSpec.COVER_TIMEOUT_MS;}
    if(gestureHandoff)watchHandoffDeadline(fresh);
    host.publishState(session.slots.size());host.updateNaturalBounds();host.createWindow(fresh);host.refreshStatus();
    if(replaced!=null){replaced.quietDetach=true;host.releaseSlot(replaced);}
@@ -202,6 +224,7 @@ final class HandoffController {
      if(!host.poseScreenArrival(arriving,edge,hungMain,originalPlus)){Log.w(TAG,"arrive_pose_unavailable slot="+arriving.id);abandonEntrance(arriving);}
     });
    }
+   notifyExistingHostStart();
    return originalPlus;
  }
  void revealAddedCard(Intent request){
@@ -236,6 +259,10 @@ void requestEntranceFrame(){
   if(host.deferPortrait())return; // The live-pose path owns layout until rotation/final fit commit.
   sendHandoffBackground();
   if(entrance.pending()==null||!entrance.frontReady()||host.stopped()||host.backgrounded()||host.closing()||host.stage().getWidth()==0||entrance.framePending())return;
+  // Side pixels do not depend on the new primary's task/fit. Prepare them while
+  // it binds, keeping the final all-task live/frame barrier below unchanged.
+  if(gestureHandoff&&!handoffPresentation&&handoffReady!=null)prepareHandoffRail(entrance.pending(),false);
+  if(entrance.pending()==null)return;
   // A measured whole-group target can start the opaque snapshot before live
   // content and wallpaper finish. The launcher only accepts a hole-free expansion.
   if(gestureHandoff&&HandoffPreparation.measuredLayout(session.slots.size(),entrance.pending().taskId,entrance.pending().sourceTaskId,
@@ -258,24 +285,27 @@ void requestEntranceFrame(){
    entrance.markFrameReady();host.unlockEntranceInput();maybeAnimateAddedCard();
   }));host.stage().invalidate();
 }
- String handoffGeometryKey(){return handoffLayoutKey(false);}
- String handoffLayoutKey(){return handoffLayoutKey(true);}
- String handoffLayoutKey(boolean requireLive){
+ String handoffGeometryKey(){return handoffLayoutKey(false,false);}
+ String handoffLayoutKey(){return handoffLayoutKey(true,false);}
+ String handoffLayoutKey(boolean requireLive){return handoffLayoutKey(requireLive,false);}
+ String handoffRailKey(){return handoffLayoutKey(true,true);}
+ String handoffLayoutKey(boolean requireLive,boolean sidesOnly){
   if(host.layoutPosted()||host.stage().isLayoutRequested()||host.animation()!=null||host.addAnimation()!=null||host.stage().getWidth()>=host.stage().getHeight()||host.resources().getConfiguration().orientation!=Configuration.ORIENTATION_PORTRAIT)return null;
   int[][] target=host.cardGeometry().cards;
   if(target.length!=session.slots.size())return null;
   int[] origin=new int[2];host.stage().getLocationOnScreen(origin);
   StringBuilder key=new StringBuilder().append(Arrays.toString(origin)).append(':').append(host.display().getRotation()).append(':').append(host.cardRadius(true)).append(':').append(session.primary).append(':').append(host.stage().getWidth()).append('x').append(host.stage().getHeight())
-   .append(':').append(requireLive&&host.backdrop()!=null?host.backdrop().visualGeneration():0);
+   .append(':').append(requireLive&&!sidesOnly&&host.backdrop()!=null?host.backdrop().visualGeneration():0);
   for(int i=0;i<session.slots.size();i++){
    WorkbenchSlot s=session.slots.get(i);int[] r=target[i];
-   if(s.released||s.taskId<0||s.card==null||s.surface==null||s.card.isLayoutRequested()||s.surface.isLayoutRequested()
+   boolean sourceOnly=sidesOnly&&i==session.primary;
+   if(s.released||(!sourceOnly&&s.taskId<0)||s.card==null||s.surface==null||s.card.isLayoutRequested()||s.surface.isLayoutRequested()
     ||s.card.getLeft()!=r[0]||s.card.getTop()!=r[1]||s.card.getWidth()!=r[2]||s.card.getHeight()!=r[3])return null;
    int[] plate=host.surfacePlate(s);
    if(s.surface.getWidth()!=plate[0]||s.surface.getHeight()!=plate[1])return null;
-   key.append('|').append(s.id).append(':').append(s.taskId).append(':').append(Arrays.toString(r))
+   key.append('|').append(s.id).append(':').append(sourceOnly?handoffTask(s):s.taskId).append(':').append(Arrays.toString(r))
     .append(':').append(s.orientationAxis).append(':').append(s.renderBounds).append(':').append(Arrays.toString(plate));
-   if(!requireLive)continue;
+   if(!requireLive||sourceOnly)continue;
    try{
     SurfaceControl leash=(SurfaceControl)rom.taskLeash.get(s.surface),surface=((SurfaceView)s.surface).getSurfaceControl();
     int state=host.taskDrawState(s);
@@ -338,6 +368,7 @@ void requestEntranceFrame(){
    if(!slot.entranceWaitScheduled){slot.entranceWaitScheduled=true;handler.postDelayed(()->{if(entrance.pending()==slot){slot.entranceDrawTimedOut=true;maybeAnimateAddedCard();}},120);}
    return;
   }
+  if(gestureHandoff&&!handoffPresentation&&handoffReady!=null&&!prepareHandoffRail(slot,true))return;
   consumePendingForMotion();
   if(gestureHandoff){
    gestureHandoff=false;entrance.clearGestureReveal();
@@ -404,7 +435,7 @@ void requestEntranceFrame(){
 void beginHandoffPresentation(WorkbenchSlot slot,boolean liveReady){
  if(handoffPresentation){
   if(!liveReady)return;
-  if(presentationGeometry==null||presentationGeometry.getInt(HandoffProtocol.TASK,-1)!=slot.sourceTaskId
+  if(presentationGeometry==null||presentationGeometry.getInt(HandoffProtocol.TASK,-1)!=handoffTask(slot)
     ||!Objects.equals(presentationLayoutKey,handoffGeometryKey())||handoffLayoutKey()==null||host.stopped()||host.backgrounded()||host.closing()
     ||!sameHandoffContentGeometry(slot,presentationGeometry)){
    cancelHandoffPresentation();return;
@@ -415,9 +446,11 @@ void beginHandoffPresentation(WorkbenchSlot slot,boolean liveReady){
   presentationReply.send(HandoffProtocol.READY,presentationGeometry);
   Log.i(TAG,"handoff_live_ready task="+slot.taskId+" overlapped=true");return;
  }
+ if(handoffReady==null)return;
  final int generation=++presentationGeneration;
  final String key=handoffGeometryKey();
  if(key==null||(liveReady&&handoffLayoutKey()==null))return;
+ if(!prepareHandoffRail(slot,liveReady))return;
  presentationLayoutKey=key;presentationLiveReady=liveReady;presentationLiveKey=liveReady?handoffLayoutKey():null;
  handoffPresentation=true;presentationReply=handoffReady;handoffReady=null;
  android.os.ResultReceiver done=new android.os.ResultReceiver(handler){
@@ -426,6 +459,7 @@ void beginHandoffPresentation(WorkbenchSlot slot,boolean liveReady){
    String finalKey=handoffLayoutKey();
    boolean valid=code==HandoffProtocol.READY&&presentationLiveReady&&!slot.released&&!host.closing()&&!host.stopped()&&!host.backgrounded()&&key.equals(handoffGeometryKey())&&Objects.equals(presentationLiveKey,finalKey)&&finalKey!=null&&sameHandoffContentGeometry(slot,presentationGeometry);
    handoffPresentation=false;presentationReply=null;presentationGeometry=null;presentationLayoutKey=null;presentationLiveKey=null;presentationLiveReady=false;
+   cancelRail();
    if(entrance.pending()==slot&&gestureHandoff){gestureHandoff=false;abandonEntrance(slot);}
    entrance.clearInputBlock();
    Log.i(TAG,"handoff_presentation_result result="+(valid?"completed":"degraded")+" code="+code+" task="+slot.taskId+" stable_start="+(key!=null)+" stable_end="+(finalKey!=null)+" stable_same="+valid);
@@ -435,12 +469,13 @@ void beginHandoffPresentation(WorkbenchSlot slot,boolean liveReady){
   }
  };
  Rect target=host.screenRect(slot.card);
- Bundle data=new Bundle();data.putInt(HandoffProtocol.TASK,slot.sourceTaskId);data.putInt(HandoffProtocol.CONTAINER,host.taskId());
+ Bundle data=new Bundle();data.putInt(HandoffProtocol.TASK,handoffTask(slot));data.putInt(HandoffProtocol.CONTAINER,host.taskId());
  data.putInt(HandoffProtocol.ROTATION,host.display().getRotation());
  data.putIntArray(HandoffProtocol.TARGET,new int[]{target.left,target.top,target.right,target.bottom});
  data.putFloat(HandoffProtocol.RADIUS,host.cardRadius(true));data.putParcelable(HandoffProtocol.COMPLETE,HandoffProtocol.transport(done));
  if(!putHandoffContentGeometry(slot,data)){cancelHandoffPresentation();return;}
  if(!putHandoffBackdrop(data)){cancelHandoffPresentation();return;}
+ if(rail!=null&&rail.frame!=null){data.putParcelable(HandoffProtocol.RAIL,rail.frame);data.putIntArray(HandoffProtocol.RAIL_GEOMETRY,rail.geometry);}
  presentationGeometry=data;
  presentationReply.send(liveReady?HandoffProtocol.READY:HandoffProtocol.PREPARED,data);
  Log.i(TAG,"handoff_geometry_prepared task="+slot.taskId+" live_ready="+liveReady+" backdrop_ready="+(host.backdrop()==null||host.backdrop().ready));
@@ -476,8 +511,11 @@ long handoffHoldMs(){
 }
 boolean putHandoffBackdrop(Bundle data){
  try{if(host.backdrop()!=null&&host.backdrop().ready&&host.backdrop().currentBitmap()!=null){
+  Bitmap prepared=data.getParcelable(HandoffProtocol.BACKDROP,Bitmap.class);
+  int generation=host.backdrop().visualGeneration();
+  if(prepared!=null&&!prepared.isRecycled()&&data.getInt("backdrop_generation",-1)==generation)return true;
   Bitmap background=host.backdrop().currentBitmap().copy(Bitmap.Config.HARDWARE,false);
-  if(background!=null){data.putParcelable(HandoffProtocol.BACKDROP,background);handler.postDelayed(background::recycle,handoffHoldMs());}
+  if(background!=null){data.putParcelable(HandoffProtocol.BACKDROP,background);data.putInt("backdrop_generation",generation);handler.postDelayed(background::recycle,handoffHoldMs());}
  }return true;}catch(Throwable e){Log.w(TAG,"handoff_backdrop_transport_failed",e);return false;}
 }
 void sendHandoffBackground(){
@@ -491,7 +529,12 @@ void sendHandoffBackground(){
  Log.i(TAG,"handoff_background_prepared task="+presentationGeometry.getInt(HandoffProtocol.TASK));
 }
 void cancelHandoffPresentation(){
- if(!handoffPresentation)return;
+ boolean preparing=rail!=null;
+ cancelRail();
+ if(!handoffPresentation){
+  if(preparing&&handoffReady!=null){android.os.ResultReceiver reply=handoffReady;handoffReady=null;entrance.clearInputBlock();reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);}
+  return;
+ }
  handoffPresentation=false;presentationGeneration++;entrance.clearInputBlock();
  android.os.ResultReceiver reply=presentationReply;presentationReply=null;
  presentationGeometry=null;presentationLayoutKey=null;presentationLiveKey=null;presentationLiveReady=false;
@@ -499,25 +542,88 @@ void cancelHandoffPresentation(){
  for(int i=0;i<session.slots.size();i++)if(session.slots.get(i).card!=null)host.inputRole(session.slots.get(i),i==session.primary);
  Log.i(TAG,"handoff_presentation_result result=cancelled");
 }
+ private boolean prepareHandoffRail(WorkbenchSlot slot,boolean liveReady){
+  if(session.slots.size()<2&&existingSourceTask<0)return true;
+  String key=handoffRailKey();if(key==null)return false;
+  if(rail!=null){
+   rail.liveReady|=liveReady;
+   if(!rail.key.equals(key)){rejectRail(slot,"identity_changed");return false;}
+   return rail.frame!=null;
+  }
+  try{
+   HandoffRail preparing=new HandoffRail(key,host,session,rom);rail=preparing;preparing.liveReady=liveReady;
+   long began=SystemClock.uptimeMillis();
+   Log.i(TAG,"handoff_rail_prepare task="+slot.sourceTaskId+" sides="+preparing.slots.size());
+   preparing.capture(host.contentWorker(),handler,handoffDeadline,ready->{
+    if(rail!=ready||ready.cancelled)return;
+    if(handoffReady==null||ready.frame==null||slot.released||SystemClock.uptimeMillis()>=handoffDeadline||host.stopped()||host.backgrounded()||host.closing()||!ready.key.equals(handoffRailKey())){
+     rejectRail(slot,"capture_or_identity");return;
+    }
+    Log.i(TAG,"handoff_rail_prepared task="+slot.sourceTaskId+" ms="+(SystemClock.uptimeMillis()-began)+" geometry="+Arrays.toString(ready.geometry));
+    if(entrance.pending()==slot&&entrance.frameReady())maybeAnimateAddedCard();
+    else beginHandoffPresentation(slot,ready.liveReady);
+   });
+   handler.postAtTime(()->{if(rail==preparing&&preparing.frame==null)rejectRail(slot,"deadline");},handoffDeadline);
+  }catch(Throwable e){Log.w(TAG,"handoff_rail_unavailable",e);rejectRail(slot,"unavailable");}
+  return false;
+ }
+ private void rejectRail(WorkbenchSlot slot,String reason){
+  Log.w(TAG,"handoff_rail_rejected task="+slot.sourceTaskId+" reason="+reason);
+  android.os.ResultReceiver reply=handoffReady;handoffReady=null;
+  cancelHandoffPresentation();
+  if(entrance.pending()==slot&&gestureHandoff){gestureHandoff=false;abandonEntrance(slot);}
+  entrance.clearInputBlock();
+  if(reply!=null)reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
+ }
+ void cancelRail(){if(rail!=null){rail.cancel();rail=null;}}
+ private int handoffTask(WorkbenchSlot slot){return existingSourceTask>=0?existingSourceTask:slot.sourceTaskId;}
+ private void configureExistingHandoff(Intent request){
+  android.os.ResultReceiver reply=request.getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
+  long limit=request.getLongExtra(HandoffProtocol.PORTRAIT_LIMIT,0),now=SystemClock.uptimeMillis();
+  long budget=SwipePanelPolicy.landscapeStack(request.getIntExtra("windowdeck_source_rotation",0))?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
+  if(limit>0&&(reply==null||limit<=now||limit-now>2*budget))throw new IllegalArgumentException("existing handoff deadline");
+  handoffReady=reply;portraitHandoffLimit=limit;existingReadyBudget=budget;existingHostStarted=false;
+  existingSourceTask=request.getIntExtra("windowdeck_add_task_id",-1);
+  handoffDeadline=limit>0?Math.min(now+budget,limit):now+budget;
+ }
  void acceptGestureSource(WorkbenchSlot fresh){entrance.acceptGestureSource(fresh);gestureHandoff=true;}
- void noteGestureFront(){entrance.noteGestureFront();resumeExistingSwipe();}
+ void noteGestureFront(){entrance.noteGestureFront();notifyExistingHostStart();resumeExistingSwipe();}
+ private void notifyExistingHostStart(){
+  WorkbenchSlot slot=entrance.pending();
+  if(!gestureHandoff||slot==null||handoffReady==null||portraitHandoffLimit<=0||existingReadyBudget<=0
+    ||existingHostStarted||host.stopped()||host.backgrounded()||host.closing())return;
+  long now=SystemClock.uptimeMillis();if(now>=handoffDeadline)return;
+  existingHostStarted=true;handoffDeadline=Math.min(now+existingReadyBudget,portraitHandoffLimit);
+  Bundle started=new Bundle();started.putInt(HandoffProtocol.TASK,handoffTask(slot));started.putInt(HandoffProtocol.CONTAINER,host.taskId());
+  started.putLong(HandoffProtocol.READY_DEADLINE,handoffDeadline);
+  handoffReady.send(HandoffProtocol.HOST_STARTED,started);watchHandoffDeadline(slot);
+  Log.i(TAG,"handoff_existing_host_started task="+slot.sourceTaskId+" deadline="+handoffDeadline+" limit="+portraitHandoffLimit);
+ }
  void resumeExistingSwipe(){
   if(existingSwipeSlot==null)return;
   WorkbenchSlot selected=existingSwipeSlot;int task=existingSwipeTask;
   // Start restoration readiness at foreground resume, not while the ordered
   // broadcast is still raising a stopped host. A rebind may briefly publish -1.
-  handler.post(()->awaitExistingSwipe(selected,task,SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS));
+  long deadline=restoringHandoff?handoffDeadline:SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS;
+  handler.post(()->awaitExistingSwipe(selected,task,deadline));
  }
  void awaitExistingSwipe(WorkbenchSlot selected,int task,long deadline){
   if(existingSwipeSlot!=selected||existingSwipeTask!=task)return;
   if(host.closing()||selected.released||!session.slots.contains(selected)||(selected.taskId>=0&&selected.taskId!=task)){
-   existingSwipeSlot=null;existingSwipeTask=-1;Log.w(TAG,"swipe_existing_failed reason=identity_changed task="+task);return;
+   existingSwipeSlot=null;existingSwipeTask=-1;if(restoringHandoff)failHandoff(selected,"restore_identity_changed");restoringHandoff=false;Log.w(TAG,"swipe_existing_failed reason=identity_changed task="+task);return;
   }
   if(host.stopped()||host.backgrounded())return;
   boolean bound=selected.taskId==task&&selected.pendingTask<0;
   for(WorkbenchSlot slot:session.slots)bound&=slot.taskId>=0;
   if(bound){
    existingSwipeSlot=null;existingSwipeTask=-1;
+   if(restoringHandoff){
+    restoringHandoff=false;
+    CardOrder.promote(session.slots,session.primary,session.slots.indexOf(selected));
+    selected.windowDrawn=false;host.layoutCards(false);host.publishState(session.slots.size());host.refreshStatus();
+    entrance.markFrontReady();notifyExistingHostStart();requestEntranceFrame();maybeAnimateAddedCard();
+    Log.i(TAG,"swipe_existing_group_wait task="+task+" source="+handoffTask(selected)+" count="+session.slots.size());return;
+   }
    if(session.slots.indexOf(selected)==session.primary){
     // Already-main restoration has no role exchange. Do not enter a preparation
     // barrier whose promote(primary) would return without restoring input roles.
@@ -527,7 +633,7 @@ void cancelHandoffPresentation(){
    }else host.queueExistingSwitch(selected,SystemClock.uptimeMillis());
    return;
   }
-  if(SystemClock.uptimeMillis()>=deadline){existingSwipeSlot=null;existingSwipeTask=-1;Log.w(TAG,"swipe_existing_failed reason=rebind_timeout task="+task);return;}
+  if(SystemClock.uptimeMillis()>=deadline){existingSwipeSlot=null;existingSwipeTask=-1;if(restoringHandoff)failHandoff(selected,"restore_rebind_timeout");restoringHandoff=false;Log.w(TAG,"swipe_existing_failed reason=rebind_timeout task="+task);return;}
   handler.postDelayed(()->awaitExistingSwipe(selected,task,deadline),MotionSpec.SURFACE_RETRY_MS);
  }
  void adoptPendingEntrance(WorkbenchSlot fresh,boolean gesture){entrance.adoptPending(fresh);gestureHandoff=gesture;}

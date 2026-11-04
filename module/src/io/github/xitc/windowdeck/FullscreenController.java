@@ -149,7 +149,9 @@ final class FullscreenController {
   host.stage().invalidate();
  }
  void fitFullscreenFrame(FullscreenRun run){
-  if(fullscreenRun!=run||run.lifecycle.closed()||host.stopped()||host.finishing())return;
+  // The final transaction is a drain barrier. A fit queued while waiting for
+  // it could reparent the task to the old plate after WM has taken it fullscreen.
+  if(fullscreenRun!=run||!run.lifecycle.acceptsFit()||host.stopped()||host.finishing())return;
   if(run.main.surface.getWidth()!=Math.round(run.motion.to.box[2])||run.main.surface.getHeight()!=Math.round(run.motion.to.box[3]))return;
   try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
    if(!host.writeLeashFit(run.main,fit)){run.fitFailures++;return;}

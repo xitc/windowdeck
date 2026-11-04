@@ -35,9 +35,10 @@ final class LiveWorkbenchState {
  static SwipeMembership swipeMembership(){
   Bundle state=latest;
   if(state==null||state.getInt("count",0)<=0)return null;
-  return new SwipeMembership(state.getInt("containerTaskId",-1),state.getInt("userId",-1),state.getStringArray("packages"),state.getIntArray("tasks"));
+  return new SwipeMembership(state.getInt("containerTaskId",-1),state.getInt("userId",-1),state.getStringArray("packages"),state.getIntArray("users"),state.getIntArray("tasks"));
  }
  static void register(Context context){
+  if(context!=null)try{CornerEntrySettings.register(context);}catch(Exception e){Log.w("WindowDeck","corner_entry_observer_failed",e);}
   if(context!=null)CandidateProbe.warm(context);
   if(registered)return;
   Context app=context.getApplicationContext();if(app==null)app=context;
@@ -59,17 +60,20 @@ final class LiveWorkbenchState {
  }
  static Bundle existing(String pkg,int user){
   Bundle state=latest;if(state==null)return null;
-  int task=ExistingAppPolicy.task(state.getBoolean("hanging"),state.getInt("userId",-1),user,pkg,state.getStringArray("packages"),state.getIntArray("tasks"));
+  int task=ExistingAppPolicy.taskForInstance(state.getBoolean("hanging"),state.getInt("userId",-1),user,pkg,
+    state.getStringArray("packages"),state.getIntArray("users"),state.getIntArray("tasks"));
   if(task<0)return null;
   Bundle result=new Bundle(state);result.putInt("selectedTask",task);result.putString("selectedPackage",pkg);return result;
  }
  static Bundle launch(String pkg,int user){
-  Bundle state=latest;if(state==null||!PickerLaunchPolicy.newApp(state.getBoolean("hanging"),state.getInt("userId",-1),user,
-    state.getInt("count",0),state.getBoolean("replacing"),pkg,state.getStringArray("packages")))return null;
+  Bundle state=latest;if(state==null||!PickerLaunchPolicy.newAppForInstance(state.getBoolean("hanging"),state.getInt("userId",-1),user,
+    state.getInt("count",0),state.getBoolean("replacing"),pkg,state.getStringArray("packages"),state.getIntArray("users")))return null;
   if(!state.getBoolean(PickerLaunchPolicy.EMBED_BEFORE_LAUNCH,false)){
    Log.i("WindowDeck","picker_launch_fullscreen package="+pkg+" session="+state.getLong("selectionSession"));return null;
   }
-  Bundle result=new Bundle(state);result.putString("selectedPackage",pkg);return result;
+  // The workbench state already carries a "userId" of its own; the selected app's user must
+  // replace it, or every pick is resolved against the owner install.
+  Bundle result=new Bundle(state);result.putString("selectedPackage",pkg);result.putInt("userId",user);return result;
  }
  static void publish(Context context,Bundle state){
   BroadcastOptions options=BroadcastOptions.makeBasic();options.setShareIdentityEnabled(true);

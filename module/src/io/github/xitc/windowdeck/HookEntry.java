@@ -13,10 +13,11 @@ public final class HookEntry implements IXposedHookLoadPackage {
    android.util.Log.i("WindowDeck","launcher_load_package version="+Version.NAME+" process="+p.processName);
    boolean state=false,existing=false,swipe=false,rotation=false;
    try{LiveWorkbenchState.installLauncher();state=true;}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_state_hook_failed",e);XposedBridge.log(e);}
+   try{FullscreenRotationCut.installLauncher(p.classLoader);}catch(Throwable e){android.util.Log.w("WindowDeck","fullscreen_rotation_cut_hook_unavailable",e);}
    try{RotationTransactions.installLauncher();rotation=true;}catch(Throwable e){android.util.Log.e("WindowDeck","rotation_submitter_hook_failed",e);XposedBridge.log(e);}
    try{LauncherExistingAppHook.install();existing=true;}catch(Throwable e){android.util.Log.e("WindowDeck","existing_launch_hook_failed",e);XposedBridge.log(e);}
    try{swipe=LauncherSwipeHook.install(p.classLoader);}catch(Throwable e){android.util.Log.e("WindowDeck","launcher_swipe_hook_failed",e);XposedBridge.log(e);}
-   android.util.Log.i("WindowDeck","launcher_hook_ready version="+Version.NAME+" state="+state+" existing="+existing+" swipe="+swipe+" rotation="+rotation+" process="+p.processName);
+   android.util.Log.i("WindowDeck","launcher_hook_ready version="+Version.NAME+" state="+state+" existing="+existing+" swipe="+swipe+" corner="+CornerSwipeHook.available()+" rotation="+rotation+" process="+p.processName);
    return;
   }
   if (!"com.oplus.pscanvas".equals(p.packageName)) return;

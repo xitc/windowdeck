@@ -303,34 +303,55 @@ final class SideSortController {
  }
  private void showMenu(WorkbenchSlot s,int task){
   dismissMenu();
-  LinearLayout content=new LinearLayout(host);content.setOrientation(LinearLayout.VERTICAL);content.setPadding(12,12,12,12);content.setBackground(Ui.bg(0xff252833,Ui.dp(host,14)));
-  String[] labels={"切换为主应用",s.pinned?"取消固定":"固定此应用","替换应用","从工作台移出"};
-  final int width=Ui.dp(host,200);PopupWindow window=new PopupWindow(content,width,-2,false);popup=window;
+  boolean night=MenuChrome.night(host);
+  android.content.res.Configuration config=new android.content.res.Configuration();
+  android.util.DisplayMetrics display=host.getResources().getDisplayMetrics();
+  config.densityDpi=SideSortMenuPolicy.densityDpi(Math.min(display.widthPixels,display.heightPixels));
+  config.screenWidthDp=Math.round(display.widthPixels*160f/config.densityDpi);
+  config.screenHeightDp=Math.round(display.heightPixels*160f/config.densityDpi);
+  config.smallestScreenWidthDp=Math.min(config.screenWidthDp,config.screenHeightDp);
+  android.content.Context menuContext=MenuChrome.themed(host.createConfigurationContext(config),night);
+  LinearLayout rows=new LinearLayout(menuContext);rows.setOrientation(LinearLayout.VERTICAL);
+  String[] labels={s.pinned?"取消固定":"固定应用","关闭应用"};
+  int[] glyphs={s.pinned?MenuChrome.UNPIN:MenuChrome.PIN,MenuChrome.CLOSE};
+  int color=night?ControlBarMetrics.MENU_TEXT_NIGHT:ControlBarMetrics.MENU_TEXT;
+  android.graphics.Paint text=new android.graphics.Paint();
+  text.setTextSize(android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,16,menuContext.getResources().getDisplayMetrics()));
+  float labelWidth=0;for(String label:labels)labelWidth=Math.max(labelWidth,text.measureText(label));
+  // Native vivo title minimum 100 dp + icon/start/gap 44 dp. Expand for COUI text accessibility.
+  final int width=Math.min(display.widthPixels,Math.max(Ui.dp(menuContext,144),(int)Math.ceil(labelWidth)+Ui.dp(menuContext,72)));
+  final int shadow=Ui.dp(menuContext,12);
+  FrameLayout root=new FrameLayout(menuContext);root.setClipChildren(false);root.setClipToPadding(false);root.setPadding(shadow,shadow,shadow,shadow);
+  PopupWindow window=new PopupWindow(root,width+shadow*2,-2,false);popup=window;
   final long token=menuPolicy.open();
-  // C17 keeps the held pointer in the card window; visibility and actions have separate gates.
+  // Keep the held pointer in the card window. Only the panel uses shared COUI chrome.
   window.setAnimationStyle(0);window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
-  window.setOutsideTouchable(true);window.setFocusable(false);window.setTouchable(true);window.setTouchModal(false);window.setElevation(Ui.dp(host,12));
-  window.setIsLaidOutInScreen(true);window.setIsClippedToScreen(true);
+  window.setOutsideTouchable(true);window.setFocusable(false);window.setTouchable(true);window.setTouchModal(false);window.setElevation(0);
+  window.setClippingEnabled(false);window.setIsLaidOutInScreen(true);window.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
   window.setOnDismissListener(()->{if(popup==window){popup=null;menuPolicy.dismiss();cancelMenuAnimation();}});
   for(int i=0;i<labels.length;i++){
-   final int action=i;Button button=new Button(host);button.setText(labels[i]);content.addView(button);
-   button.setOnClickListener(v->{
+   final int action=i;
+   rows.addView(MenuChrome.row(menuContext,labels[i],glyphs[i],color,host.effectiveMode()==PaneLayout.TOP_BOTTOM,v->{
     if(popup!=window||host.closing||host.backgrounded||s.released||s.taskId!=task||!host.session.slots.contains(s))return;
     boolean busy=active()||host.menu.recovering||host.switching()||host.layout.addAnimation!=null||host.identity.taskRotationRun!=null||host.replacements.current()!=null;
     if(!menuPolicy.takeAction(token,busy)){Log.i("WindowDeck","side_sort_menu result=ignored slot="+s.id+" busy="+busy);return;}
-    // A menu item must never cancel a held sort or its recovery to make itself executable.
     dismissMenu();
-    if(action==0)host.promote(host.session.slots.indexOf(s));else if(action==1)host.menu.togglePin(s);else if(action==2)host.chooseApp(s);else host.menu.removeSlot(s);
-   });
+    if(action==0)host.menu.togglePin(s);else host.menu.removeSlot(s);
+   }),new LinearLayout.LayoutParams(-1,-2));
   }
+  View content=MenuChrome.panel(rows,night);content.setElevation(shadow);
+  root.addView(content,new FrameLayout.LayoutParams(width,-2));
   int index=host.session.slots.indexOf(s),sidePosition=index<host.session.primary?index+1:index;
-  boolean leftOpening=mode==PaneLayout.TOP_BOTTOM&&sidePosition==4;
+  boolean leftOpening=host.effectiveMode()==PaneLayout.TOP_BOTTOM&&sidePosition==4;
   CardSpace current=host.stage.cardSpace();
   int[] position=SideSortMenuPolicy.position(current.x+s.card.getLeft(),current.y+s.card.getTop(),current.x+s.card.getRight(),
-    s.card.getPaddingLeft(),s.card.getPaddingTop(),menuDownX,menuDownY,width,Ui.dp(host,20),leftOpening);
+    s.card.getPaddingLeft(),s.card.getPaddingTop(),menuDownX,menuDownY,width,Ui.dp(menuContext,20),leftOpening);
+  content.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+  position=SideSortMenuPolicy.fit(position[0],position[1],width,content.getMeasuredHeight(),display.widthPixels,display.heightPixels);
   content.setPivotX(leftOpening?width:0);content.setPivotY(0);content.setScaleX(.3f);content.setScaleY(.3f);content.setAlpha(0);
-  window.showAtLocation(host.stage,Gravity.TOP|Gravity.LEFT,position[0],position[1]);
-  Log.i("WindowDeck","side_sort_menu result=opening slot="+s.id+" task="+task);
+  try{window.showAtLocation(host.stage,Gravity.TOP|Gravity.LEFT,position[0]-shadow,position[1]-shadow);}
+  catch(Throwable e){dismissMenu();Log.w("WindowDeck","side_sort_menu_show_failed",e);return;}
+  Log.i("WindowDeck","side_sort_menu result=opening slot="+s.id+" task="+task+" width="+width+" density="+config.densityDpi+" night="+night);
   ObjectAnimator growX=ObjectAnimator.ofFloat(content,"scaleX",.3f,1.02f),growY=ObjectAnimator.ofFloat(content,"scaleY",.3f,1.02f);
   android.view.animation.PathInterpolator growCurve=new android.view.animation.PathInterpolator(.37f,.75f,.46f,1);
   growX.setInterpolator(growCurve);growY.setInterpolator(growCurve);

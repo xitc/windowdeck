@@ -59,7 +59,7 @@ final class NativeAppPicker {
    try{
     Object entry=list.get(position);int type=(Integer)call(entry,"e");if(type!=3&&type!=4)return;
     String pkg=(String)call(entry,"d");int user=(Integer)call(entry,"f");
-    if(user!=android.os.Process.myUid()/100000)throw new IllegalArgumentException("不支持的用户");
+    if(user<0)throw new IllegalArgumentException("应用用户无效");
     Intent launch=(Intent)staticCall(activity.getClassLoader(),UTIL,"b0",activity,pkg,user);
     if(launch==null||launch.getComponent()==null||!pkg.equals(launch.getComponent().getPackageName()))throw new IllegalArgumentException("应用启动入口已变化");
     launch=new Intent(launch).addFlags(262144).putExtra("androidx.flexible.userId",user);
@@ -128,21 +128,24 @@ final class NativeAppPicker {
    Object directory=Class.forName("i2.b",false,loader).getConstructor(Context.class).newInstance(activity);
    call(directory,"m");Map<?,?> apps=(Map<?,?>)call(directory,"o");
    Map<?,?> hidden=(Map<?,?>)call(control,"E0");
-   int user=android.os.Process.myUid()/100000;
+   int owner=android.os.Process.myUid()/100000;
    Class<?> entryType=Class.forName("c2.a$b",false,loader);
    Constructor<?> entry=entryType.getConstructor(String.class,String.class,Bitmap.class,int.class,int.class);
    Map<String,String> labels=new HashMap<>();
    for(Map.Entry<?,?> app:apps.entrySet()){
     Pair<?,?> identity=(Pair<?,?>)staticCall(loader,UTIL,"P1",app.getKey());
     String pkg=(String)identity.first;int profile=(Integer)identity.second;
-    if(profile!=user||excluded.contains(pkg)||ModulePackages.isModule(pkg)||"com.oplus.pscanvas".equals(pkg)||(hidden!=null&&hidden.containsKey(pkg)))continue;
-    labels.put(pkg,(String)app.getValue());entries.add(entry.newInstance(app.getValue(),pkg,null,4,profile));
+    if(profile<0||excluded.contains(pkg+"/"+profile)||ModulePackages.isModule(pkg)||"com.oplus.pscanvas".equals(pkg)||(hidden!=null&&hidden.containsKey(pkg)))continue;
+    String key=pkg+"/"+profile;
+    String label=(String)app.getValue()+(profile==owner?"":" · 分身");
+    labels.put(key,label);entries.add(entry.newInstance(label,pkg,null,4,profile));
    }
    @SuppressWarnings("unchecked") Comparator<Object> order=(Comparator<Object>)Class.forName("l2.a",false,loader).getConstructor().newInstance();entries.sort(order);
    List<Object> recent=new ArrayList<>();Set<String> seen=new HashSet<>();
    for(Object key:(List<?>)call(control,"u1")){
-    Pair<?,?> identity=(Pair<?,?>)staticCall(loader,UTIL,"P1",key);String pkg=(String)identity.first;
-    if((Integer)identity.second==user&&labels.containsKey(pkg)&&seen.add(pkg))recent.add(entry.newInstance(labels.get(pkg),pkg,null,3,user));
+    Pair<?,?> identity=(Pair<?,?>)staticCall(loader,UTIL,"P1",key);String pkg=(String)identity.first;int profile=(Integer)identity.second;
+    String instance=pkg+"/"+profile;
+    if(labels.containsKey(instance)&&seen.add(instance))recent.add(entry.newInstance(labels.get(instance),pkg,null,3,profile));
    }
    Constructor<?> title=entryType.getConstructor(String.class,int.class);
    entries.add(0,title.newInstance(text(activity,loader,"U"),2));

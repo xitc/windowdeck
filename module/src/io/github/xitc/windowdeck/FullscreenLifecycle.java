@@ -11,6 +11,7 @@ final class FullscreenLifecycle {
  Phase phase(){return phase;}
  boolean closed(){return phase==Phase.FINISHED_STARTED||phase==Phase.FINISHED_UNSTARTED||phase==Phase.CANCELLED;}
  boolean open(){return !closed();}
+ boolean acceptsFit(){return !closed()&&phase!=Phase.COMMIT_PENDING&&phase!=Phase.FRAME_PENDING;}
  boolean started(){
   return phase==Phase.RUNNING||phase==Phase.SETTLING||phase==Phase.COMMIT_PENDING
    ||phase==Phase.FRAME_PENDING||phase==Phase.FINISHED_STARTED;

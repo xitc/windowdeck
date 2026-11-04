@@ -75,8 +75,9 @@ final class WorkbenchStatePublisher {
   state.putBinder(VideoWindowCompat.HOST_BINDER,videoCompatHost);
   state.putBoolean("hanging",host.hanging()&&count>0);state.putBoolean("replacing",host.hanging()&&host.hangReplace());state.putLong("selectionSession",host.hangStarted());state.putInt("userId",android.os.Process.myUid()/100000);
   state.putBoolean(PickerLaunchPolicy.EMBED_BEFORE_LAUNCH,host.hanging()&&count>0&&PickerLaunchPolicy.embedBeforeLaunch(host.hangReplace(),host.readOriginalPlus()));
-  String[] packages=new String[session.slots.size()];int[] tasks=new int[session.slots.size()];
-  for(int i=0;i<session.slots.size();i++){packages[i]=session.slots.get(i).component.getPackageName();tasks[i]=session.slots.get(i).taskId;}
-  state.putStringArray("packages",packages);state.putIntArray("tasks",tasks);return state;
+  String[] packages=new String[session.slots.size()];int[] tasks=new int[session.slots.size()],users=new int[session.slots.size()];
+  int owner=android.os.Process.myUid()/100000;
+  for(int i=0;i<session.slots.size();i++){WorkbenchSlot slot=session.slots.get(i);packages[i]=slot.component.getPackageName();tasks[i]=slot.taskId;users[i]=slot.sourceUserId>=0?slot.sourceUserId:owner;}
+  state.putStringArray("packages",packages);state.putIntArray("tasks",tasks);state.putIntArray("users",users);return state;
  }
 }

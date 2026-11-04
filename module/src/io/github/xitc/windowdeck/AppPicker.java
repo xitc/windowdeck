@@ -10,10 +10,11 @@ import android.view.*;
 import android.widget.*;
 import java.util.*;
 final class AppPicker {
- interface Selection { void select(ComponentName component,String label); }
+ interface Selection { void select(ComponentName component,String label,int user); }
  static final class Entry {
-  final ComponentName component; final String label,haystack; Drawable icon;
-  Entry(ComponentName c,String l){component=c;label=l;haystack=(l+" "+c.getPackageName()).toLowerCase(Locale.ROOT);}
+  final ComponentName component; final String label,haystack; final int user; Drawable icon;
+  Entry(ComponentName c,String l){this(c,l,0);}
+  Entry(ComponentName c,String l,int u){component=c;label=l;user=u;haystack=(l+" "+c.getPackageName()).toLowerCase(Locale.ROOT);}
  }
  private static final Handler MAIN=new Handler(Looper.getMainLooper());
  private static List<Entry> catalog=Collections.emptyList();
@@ -61,7 +62,7 @@ final class AppPicker {
   list.setAdapter(adapter);
   Runnable bind=()->{
    String q=search.getText().toString().trim().toLowerCase(Locale.ROOT);shown.clear();
-   for(Entry e:catalog)if(!excluded.contains(e.component.getPackageName())&&(q.isEmpty()||e.haystack.contains(q)))shown.add(e);
+   for(Entry e:catalog)if(!excluded.contains(e.component.getPackageName())&&!excluded.contains(e.component.getPackageName()+"/"+e.user)&&(q.isEmpty()||e.haystack.contains(q)))shown.add(e);
    adapter.notifyDataSetChanged();
    boolean idle=catalog.isEmpty()&&loading;
    empty.setText(idle?"正在加载应用…":shown.isEmpty()?"没有匹配的应用":"");
@@ -71,7 +72,7 @@ final class AppPicker {
   search.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}public void onTextChanged(CharSequence s,int a,int b,int c){bind.run();}public void afterTextChanged(Editable e){}});
   AlertDialog dialog=new AlertDialog.Builder(activity).setView(body).create();
   dialog.setCanceledOnTouchOutside(true);
-  list.setOnItemClickListener((p,v,pos,id)->{if(pos<0||pos>=shown.size())return;Entry e=shown.get(pos);dialog.dismiss();callback.select(e.component,e.label);});
+  list.setOnItemClickListener((p,v,pos,id)->{if(pos<0||pos>=shown.size())return;Entry e=shown.get(pos);dialog.dismiss();callback.select(e.component,e.label,e.user);});
   cancel.setOnClickListener(v->dialog.dismiss());
   dialog.setOnShowListener(d->{
    android.view.Window w=dialog.getWindow();if(w==null)return;
@@ -85,7 +86,8 @@ final class AppPicker {
   if(activity instanceof WorkbenchActivity)((WorkbenchActivity)activity).showWorkbenchDialog(dialog);else dialog.show();
  }
  private static void refresh(Activity activity,Runnable bind){
-  if(!catalog.isEmpty())bind.run();
+  // Rescan on every open: clones are installed per user and appear or disappear
+  // without this process noticing, so a cached catalog goes stale silently.
   if(loading){pendingBind=bind;return;}
   loading=true;PackageManager pm=activity.getPackageManager();
   new Thread(()->{
@@ -97,6 +99,30 @@ final class AppPicker {
     if("com.oplus.pscanvas".equals(pkg)||ModulePackages.isModule(pkg)||!seen.add(pkg))continue;
     CharSequence label=r.loadLabel(pm);next.add(new Entry(new ComponentName(pkg,r.activityInfo.name),label==null?pkg:label.toString()));
    }
+   // Cloned apps (ColorOS 应用分身, user 999) keep the owner's package: a plain
+   // PackageManager query only ever reports the owner install. Scan the other
+   // profiles through LauncherApps and add one entry per cloned launcher activity.
+   int self=android.os.Process.myUid()/100000;
+   try{
+    android.content.pm.LauncherApps launcherApps=(android.content.pm.LauncherApps)activity.getSystemService(Context.LAUNCHER_APPS_SERVICE);
+    StringBuilder dump=new StringBuilder();
+    for(android.os.UserHandle profile:launcherApps.getProfiles()){
+     int identifier;
+     try{identifier=(Integer)android.os.UserHandle.class.getMethod("getIdentifier").invoke(profile);}
+     catch(Throwable e){continue;}
+     dump.append(identifier).append(' ');
+     if(identifier==self)continue;
+     for(android.content.pm.LauncherActivityInfo info:launcherApps.getActivityList(null,profile)){
+      ComponentName part=info.getComponentName();
+      if(part==null)continue;String pkg=part.getPackageName();
+      if(pkg==null||ModulePackages.isModule(pkg)||"com.oplus.pscanvas".equals(pkg))continue;
+      CharSequence label=info.getLabel();
+      String name=(label==null||label.length()==0?pkg:label.toString())+" · 分身";
+      next.add(new Entry(part,name,identifier));
+     }
+    }
+    android.util.Log.i("AppPicker","profile_scan self="+self+" profiles="+dump+" clones="+(next.size()));
+   }catch(Throwable t){android.util.Log.w("AppPicker","profile_scan_failed",t);}
    next.sort((a,b)->a.label.compareToIgnoreCase(b.label));
    MAIN.post(()->{
     catalog=next;loading=false;
