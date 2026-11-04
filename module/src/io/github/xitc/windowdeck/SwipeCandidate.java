@@ -11,9 +11,8 @@ final class SwipeCandidate {
   boolean topCanvas(){return "com.oplus.pscanvas".equals(topPackage);}
  }
  static final class Match {
-  final int task,container,existingTask;
-  Match(int task,int container){this(task,container,-1);}
-  Match(int task,int container,int existingTask){this.task=task;this.container=container;this.existingTask=existingTask;}
+  final int task,user,container,existingTask;
+  Match(int task,int user,int container,int existingTask){this.task=task;this.user=user;this.container=container;this.existingTask=existingTask;}
  }
  private SwipeCandidate(){}
  /**
@@ -30,7 +29,7 @@ final class SwipeCandidate {
   for(Task info:tasks){
    if(info==null)continue;
    if(info.id==source){
-    if(info.userId!=0||info.baseCanvas()||info.topCanvas()
+    if(info.userId<0||info.baseCanvas()||info.topCanvas()
       ||"com.android.launcher".equals(info.topPackage)||ModulePackages.isModule(info.topPackage))return false;
    }
    if(info.workbench&&info.topCanvas()&&stateKnown&&info.id==stateContainer&&stateCount>=Caps.MAX_TASKS
@@ -62,11 +61,11 @@ final class SwipeCandidate {
   if(!stateKnown){if(live>=0)return null;}
   else if(!IngressPolicy.canEnter(live,stateContainer,stateCount,existing>=0))return null;
   if(!sourceInfo.basePackage.equals(sourceInfo.topPackage))return null;
-  if(sourceInfo.userId!=0||(containerInfo!=null&&containerInfo.userId!=0))return null;
+  if(sourceInfo.userId<0||(containerInfo!=null&&containerInfo.userId!=0))return null;
   if(sourceInfo.windowMode!=1)return null;
   String pkg=sourceInfo.topPackage;
   if("com.oplus.pscanvas".equals(pkg)||"com.android.launcher".equals(pkg)||ModulePackages.isModule(pkg))return null;
-  return new Match(source,live,existing);
+  return new Match(source,sourceInfo.userId,live,existing);
  }
  private static int existing(int source,Task[] tasks,SwipeMembership members,int container){
   if(members==null||tasks==null)return -1;

@@ -30,7 +30,7 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
   if(!ACTION.equals(intent.getAction()))return;
   if(!launcher){Log.w("WindowDeck","launcher_ingress_denied uid="+uid);return;}
   int task=intent.getIntExtra("taskId",-1),user=intent.getIntExtra("userId",-1),container=intent.getIntExtra("containerTaskId",-1);
-  if(task<0||user!=0||container < -1||task==container)return;
+  if(task<0||user<0||container < -1||task==container)return;
   final PendingResult pending=goAsync();startTask(context,task,user,container,pending::finish);
  }
  private static void createWorkbench(Context context,int task,int user) throws Exception {

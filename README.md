@@ -1,6 +1,6 @@
 # 多窗工作台 · WindowDeck
 
-**当前源码：v0.6.2-dev.634 · 开发测试版**
+**当前源码：v0.6.2-dev.635 · 开发测试版**
 
 面向 **C17（ColorOS 17 / Android 17）** 的 LSPosed 多应用工作台，基于系统实时任务嵌入能力，让最多五个应用同时出现在主窗和侧窗中。应用包名：`io.github.xitc.windowdeck`。
 
@@ -10,7 +10,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `v0.6.2-dev.634`，下载包以实际 Release 为准；源码更新不表示新版 APK 已发布。当前源码包含右下角入口与主窗放大、横屏交接改进，以及按 Android 用户区分主应用和应用分身。本地离线检查及双身份编译 30/30 PASS，公开快照单独编译通过；本轮未安装此版本，分身真机、视觉和性能验收均为 **UNVERIFIED**。此前 dev.148 的 YouTube 全屏方向兼容失败没有在本轮关闭。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `v0.6.2-dev.635`，下载包以实际 Release 为准；源码更新不表示新版 APK 已发布。当前源码包含右下角入口与主窗放大、横屏交接改进，以及按 Android 用户区分主应用和应用分身。此版还把分身用户号传入上滑工作台入口。本地离线检查及双身份编译 30/30 PASS；此版运行、视觉和性能验收均为 **UNVERIFIED**。此前 dev.148 的 YouTube 全屏方向兼容失败没有在本轮关闭。
 
 ## 环境与验收范围
 

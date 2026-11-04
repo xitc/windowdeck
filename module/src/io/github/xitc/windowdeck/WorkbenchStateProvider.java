@@ -51,7 +51,7 @@ public final class WorkbenchStateProvider extends ContentProvider {
   if("add_task".equals(method)){
    if(extras==null)return null;
    int task=extras.getInt("taskId",-1),user=extras.getInt("userId",-1),container=extras.getInt("containerTaskId",-1);
-   if(task<0||user!=0||container < -1||task==container||(container>=0&&(prefs.getInt("container",-1)!=container||prefs.getInt("count",0)<1||prefs.getInt("count",0)>=Caps.MAX_TASKS)))return null;
+   if(task<0||user<0||container < -1||task==container||(container>=0&&(prefs.getInt("container",-1)!=container||prefs.getInt("count",0)<1||prefs.getInt("count",0)>=Caps.MAX_TASKS)))return null;
    LauncherIngressReceiver.startTask(getContext(),task,user,container,null);return Bundle.EMPTY;
   }
   if(!"state".equals(method))return null;

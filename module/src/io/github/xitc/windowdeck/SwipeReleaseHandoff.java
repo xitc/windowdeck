@@ -64,7 +64,7 @@ final class SwipeReleaseHandoff {
    log("release bail=outside_entry axis="+axis+" offset="+offset+" progress="+s.progress+" trigger="+s.trigger);return;
   }
   SwipeCandidate.Match candidate=CandidateProbe.match(handler);
-  if(candidate==null||candidate.task!=s.gestureTask||(s.candidate!=null&&(candidate.task!=s.candidate.task||candidate.container!=s.candidate.container))){
+  if(candidate==null||candidate.task!=s.gestureTask||(s.candidate!=null&&(candidate.task!=s.candidate.task||candidate.user!=s.candidate.user||candidate.container!=s.candidate.container))){
    log("release bail=candidate fresh="+(candidate==null?"null":candidate.task+"/"+candidate.container)+" cached="+(s.candidate==null?"null":s.candidate.task+"/"+s.candidate.container));return;
   }
   Object manager=XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TASK_ANIM);
@@ -399,7 +399,7 @@ final class SwipeReleaseHandoff {
     create.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION);
     create.putExtra("windowdeck_workbench_v1",true);
     create.putExtra("windowdeck_create_source_task",candidate.task);
-    create.putExtra("windowdeck_create_source_user",0);
+    create.putExtra("windowdeck_create_source_user",candidate.user);
     create.putExtra("windowdeck_handoff_ready",ready);
     if(portraitWait!=null)create.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
     if(deferPortrait){create.putExtra("windowdeck_defer_portrait",true);create.putExtra("windowdeck_defer_rotation",sourceRotation);create.putExtra("windowdeck_wait_source_release",true);}
@@ -411,7 +411,7 @@ final class SwipeReleaseHandoff {
    Intent add=new Intent((BuildIdentity.APPLICATION_ID+".LAUNCHER_ADD_TO_WORKBENCH")).setPackage("com.oplus.pscanvas");
    add.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
    add.putExtra("windowdeck_add_task_id",candidate.task);
-   add.putExtra("windowdeck_add_user_id",0);
+   add.putExtra("windowdeck_add_user_id",candidate.user);
    add.putExtra("windowdeck_container_task_id",candidate.container);
    add.putExtra("windowdeck_handoff_ready",ready);
    add.putExtra("windowdeck_source_rotation",sourceRotation);
@@ -451,7 +451,7 @@ final class SwipeReleaseHandoff {
   finish.run();dispatchRootHandoff(context,candidate);
  }
  private static void dispatchRootHandoff(Context context,SwipeCandidate.Match candidate){
-  Bundle message=new Bundle();message.putInt("taskId",candidate.task);message.putInt("userId",0);message.putInt("containerTaskId",candidate.container);
+  Bundle message=new Bundle();message.putInt("taskId",candidate.task);message.putInt("userId",candidate.user);message.putInt("containerTaskId",candidate.container);
   try{if(context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),"add_task",null,message)!=null)return;}
   catch(Throwable e){Log.w(TAG,"swipe_provider_fallback",e);}
   try{

@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="634" android:versionName="0.6.2-dev.634">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.xitc.windowdeck" android:versionCode="635" android:versionName="0.6.2-dev.635">
  <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35"/>
  <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
  <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent><package android:name="com.android.launcher"/><package android:name="com.oplus.pscanvas"/><package android:name="tv.acfundanmaku.video"/><package android:name="com.google.android.youtube"/></queries>
