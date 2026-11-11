@@ -42,25 +42,36 @@ final class CandidateProbe {
  /** Wakes the refresher without waiting. Gesture boundaries never make binder calls themselves. */
  static void kick(){synchronized(LOCK){refreshRequested=true;LOCK.notifyAll();}}
  static boolean ready(){return snapshot!=null;}
- static boolean showEntry(Object handler){
+ static boolean showEntry(Object handler){return showEntry(handler,false);}
+ static boolean showEntry(Object handler,boolean rendered){
   if(handler==null)return false;
+  int reported=runningTask(handler),retiredSource=LiveWorkbenchState.retiredSource(reported);
+  if(rendered&&retiredSource>=0&&!retiredTargetReady(handler,reported,retiredSource))return false;
   Snapshot shot=snapshot;
   int[] published=LiveWorkbenchState.published();
   boolean known=published!=null||(shot!=null&&shot.providerKnown);
   int container=published!=null?published[0]:shot!=null?shot.providerContainer:-1;
   int count=published!=null?published[1]:shot!=null?shot.providerCount:0;
-  return SwipeCandidate.showEntry(runningTask(handler),shot==null?null:shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
+  return SwipeCandidate.showEntry(retiredSource>=0?retiredSource:reported,shot==null?null:shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
  }
  static SwipeCandidate.Match match(Object handler){
   Snapshot shot=snapshot;
   if(shot==null||handler==null)return null;
-  int source=runningTask(handler);
+  int reported=runningTask(handler);
+  int retiredSource=LiveWorkbenchState.retiredSource(reported);
+  int source=retiredSource>=0?retiredSource:reported;
+  if(retiredSource>=0&&!retiredTargetReady(handler,reported,source))return null;
   int[] published=LiveWorkbenchState.published();
   boolean known;int container,count;
   if(published!=null){known=true;container=published[0];count=published[1];}
   else if(shot.providerKnown){known=true;container=shot.providerContainer;count=shot.providerCount;}
   else{known=false;container=-1;count=0;}
-  return SwipeCandidate.match(source,shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
+  int retired=retiredSource>=0?reported:-1;
+  // The gesture can already report the application while the task cache
+  // still contains the outgoing host. Use the same live-target check here.
+  if(retired<0&&source>=0&&count==0&&LiveWorkbenchState.retiredSource(container)==source
+    &&retiredTargetReady(handler,container,source))retired=container;
+  return SwipeCandidate.match(source,shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership(),retired);
  }
  private static void loop(){
   while(true){
@@ -76,6 +87,13 @@ final class CandidateProbe {
    // instead of losing its notify and sleeping for a full refresh interval after a stale load.
    synchronized(LOCK){try{if(!refreshRequested)LOCK.wait(REFRESH_MS);}catch(InterruptedException e){return;}}
   }
+ }
+ private static boolean retiredTargetReady(Object handler,int container,int source){
+  return SwipeSourceFrame.hasTaskTarget(handler,source)&&!SwipeSourceFrame.hasTaskTarget(handler,container);
+ }
+ static int gestureTask(Object handler){
+  int reported=runningTask(handler),retiredSource=LiveWorkbenchState.retiredSource(reported);
+  return retiredSource>=0?retiredSource:reported;
  }
  static int runningTask(Object handler){
   try{

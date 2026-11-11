@@ -2,10 +2,10 @@ package io.github.xitc.windowdeck;
 
 import android.app.Activity;
 import android.content.Context;
-import android.content.res.ColorStateList;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.view.Window;
 import android.view.WindowInsetsController;
 import android.widget.TextView;
@@ -18,7 +18,7 @@ final class SettingsTheme {
  static boolean night(Context c){return (c.getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;}
  static int background(Context c){return night(c)?0xff000000:0xfff0f1f2;}
  static int cardColor(Context c){return night(c)?0xff1a1a1a:0xffffffff;}
- static int press(Context c){return night(c)?0x33ffffff:0x1a000000;}
+ static int press(Context c){return night(c)?0xff333333:0xffe5e5e5;}
  static int text(Context c){return night(c)?0xe6ffffff:0xe6000000;}
  static int secondary(Context c){return night(c)?0x8affffff:0x8a000000;}
  static int accent(Context c){return blue(c);}
@@ -50,7 +50,15 @@ final class SettingsTheme {
  static GradientDrawable pill(Context c,int color,int radius){
   GradientDrawable d=new GradientDrawable();d.setColor(color);d.setCornerRadius(Ui.dp(c,radius));return d;
  }
- static RippleDrawable ripple(Context c){return new RippleDrawable(ColorStateList.valueOf(press(c)),null,null);}
+ static StateListDrawable rowBackground(Context c){
+  StateListDrawable background=new StateListDrawable();
+  int pressedColor=press(c);
+  background.addState(new int[]{android.R.attr.state_enabled,android.R.attr.state_pressed},new ColorDrawable(pressedColor));
+  background.addState(new int[]{android.R.attr.state_enabled,android.R.attr.state_focused},new ColorDrawable(pressedColor));
+  background.addState(new int[0],new ColorDrawable(0));
+  background.setExitFadeDuration(160);
+  return background;
+ }
  /** 页面与系统栏同色，浅色页面使用深色系统栏图标。 */
  static void systemBars(Activity a){
   Window w=a.getWindow();

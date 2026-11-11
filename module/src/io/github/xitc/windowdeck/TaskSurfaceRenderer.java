@@ -142,11 +142,14 @@ final class TaskSurfaceRenderer {
   return CardLayout.scaleMain(result,session.primary,host.stage().getWidth(),host.stage().getHeight(),layoutGap(),effectiveMode(),Ui.dp(host.context(),48),host.mainWindowPercent());
  }
  void layoutAddCard(int[] box){
-  host.addCard().setVisibility(box==null?View.GONE:View.VISIBLE);
+  Button add=host.addCard();
+  add.setVisibility(box==null?View.GONE:View.VISIBLE);
   if(box!=null){
-   FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];host.addCard().setLayoutParams(lp);
-   clipSide(host.addCard(),box[2],box[3],true);
-  }
+   FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3]);lp.leftMargin=box[0];lp.topMargin=box[1];add.setLayoutParams(lp);
+   clipSide(add,box[2],box[3],true);
+   float[] quad=roleQuad(box[2],box[3],box[0],box[1],true,true);
+   host.stage().setAddProjection(add,box[2],box[3],quad);
+  }else host.stage().setAddProjection(add,0,0,null);
   host.layoutCaption();
  }
  void inputRole(WorkbenchSlot s,boolean isPrimary){
@@ -596,7 +599,9 @@ final class TaskSurfaceRenderer {
   boolean lifted=host.sideSortLifted(s);
   ((SurfaceView)s.surface).setZOrderMediaOverlay(!preview||lifted);
   if(surfaceRelativeLayer==null)surfaceRelativeLayer=SurfaceControl.Transaction.class.getMethod("setRelativeLayer",SurfaceControl.class,SurfaceControl.class,int.class);
-  surfaceRelativeLayer.invoke(t,plate,viewRootSurface,lifted?-1:preview?-2:-1);
+  PreviewCard retiring=host.stage().retiringCard;
+  int layer=!preview||lifted?-1:retiring!=null&&retiring!=s.card?-3:-2;
+  surfaceRelativeLayer.invoke(t,plate,viewRootSurface,layer);
  }
  void apply(WorkbenchSlot s,int[] r){
   if(s.card==null)return;

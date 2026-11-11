@@ -10,6 +10,7 @@ final class HandoffProtocol {
  static final String SNAPSHOT="pose_snapshot",SNAPSHOT_CROP="pose_snapshot_crop",SNAPSHOT_COLOR_SPACE="pose_snapshot_color_space";
  /** Actual live fit: task bitmap size, task-space L/T/R/B crop and screen-space LT/RT/RB/LB quad. */
  static final String CONTENT_SIZE="content_size",CONTENT_CROP="content_crop",CONTENT_QUAD="content_quad";
+ static final String LIVE_RECENTS="windowdeck_live_recents";
  static final String PORTRAIT_LIMIT="windowdeck_portrait_limit",READY_DEADLINE="ready_deadline";
  static final String RAIL="entrance_rail",RAIL_GEOMETRY="entrance_rail_geometry";
  static ResultReceiver transport(ResultReceiver receiver){

@@ -160,23 +160,33 @@ final class SwipeSourceFrame {
   }
  }
 
+ static boolean hasTaskTarget(Object handler,int task){
+  try{
+   Object target=taskTarget(handler,task);
+   SurfaceControl leash=target==null?null:(SurfaceControl)XposedHelpers.getObjectField(target,RomSymbols.SOURCE_LEASH);
+   return leash!=null&&leash.isValid();
+  }catch(Throwable ignored){return false;}
+ }
+
+ private static Object taskTarget(Object handler,int task){
+  Object[] handles=(Object[])XposedHelpers.getObjectField(handler,RomSymbols.SOURCE_HANDLES);
+  if(handles==null||handles.length!=1)return null;
+  Object params=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_PARAMS);
+  Object targets=params==null?null:XposedHelpers.callMethod(params,RomSymbols.SOURCE_TARGETS);
+  Object[] apps=targets==null?null:(Object[])XposedHelpers.getObjectField(targets,RomSymbols.SOURCE_APPS);
+  Object match=null;
+  if(apps!=null)for(Object app:apps){
+   if(XposedHelpers.getIntField(app,RomSymbols.SOURCE_TASK)!=task)continue;
+   if(match!=null)return null;
+   match=app;
+  }
+  return match;
+ }
+
  static Capture capture(Object handler,int task) {
   SurfaceControl copied=null,visibility=null;
   try {
-   Object[] handles=(Object[])XposedHelpers.getObjectField(handler,RomSymbols.SOURCE_HANDLES);
-   if(handles==null||handles.length!=1)return null;
-   Object params=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_PARAMS);
-   Object targets=params==null?null:XposedHelpers.callMethod(params,RomSymbols.SOURCE_TARGETS);
-   Object[] apps=targets==null?null:(Object[])XposedHelpers.getObjectField(targets,RomSymbols.SOURCE_APPS);
-   Object match=null;
-   if(apps!=null) {
-    for(Object app:apps) {
-     if(XposedHelpers.getIntField(app,RomSymbols.SOURCE_TASK)==task) {
-      if(match!=null)return null;
-      match=app;
-     }
-    }
-   }
+   Object match=taskTarget(handler,task);
    if(match==null)return null;
    SurfaceControl leash=(SurfaceControl)XposedHelpers.getObjectField(match,RomSymbols.SOURCE_LEASH);
    Rect bounds=(Rect)XposedHelpers.getObjectField(match,RomSymbols.SOURCE_BOUNDS);

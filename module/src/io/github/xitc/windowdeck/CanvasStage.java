@@ -2,6 +2,7 @@ package io.github.xitc.windowdeck;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.util.Log;
 import android.view.View;
 import android.widget.FrameLayout;
@@ -9,7 +10,11 @@ import android.widget.FrameLayout;
 /** Bounded diagnostics for a canvas that requests layout but never traverses it. */
 final class CanvasStage extends FrameLayout {
  private final SurfaceAperture aperture=new SurfaceAperture();
+ private final Matrix addProjection=new Matrix();
+ private View projectedAdd;
+ private int[] projectedAddBounds;
  PreviewCard mainCard;
+ PreviewCard retiringCard;
  final boolean ownsSurfaceAperture=SurfaceApertureHook.install();
  CardSpace cardSpace(){
   android.util.DisplayMetrics dm=getResources().getDisplayMetrics();
@@ -22,6 +27,25 @@ final class CanvasStage extends FrameLayout {
  }
  void surfaceAperture(PreviewCard card,float[] quad){
   surfaceAperture(card,quad,0,0,0);
+ }
+ void setAddProjection(View add,int width,int height,float[] quad){
+  projectedAdd=null;projectedAddBounds=null;
+  if(quad!=null&&CardMotion.projective(quad,width,height)&&
+    addProjection.setPolyToPoly(new float[]{0,0,width,0,width,height,0,height},0,quad,0,4)){
+   projectedAdd=add;
+   projectedAddBounds=CardPerspective.bounds(width,height,quad);
+  }
+  invalidate();
+ }
+ int[] chromeBounds(View view){
+  return view==projectedAdd?projectedAddBounds:new int[]{0,0,view.getWidth(),view.getHeight()};
+ }
+ void drawChrome(Canvas canvas,View view){
+  int save=canvas.save();
+  try{
+   if(view==projectedAdd)canvas.concat(addProjection);
+   view.draw(canvas);
+  }finally{canvas.restoreToCount(save);}
  }
  void surfaceAperture(PreviewCard card,float[] quad,float width,float height,float radius){
   if(java.util.Arrays.equals(card.surfaceAperture,quad)&&card.apertureWidth==width&&card.apertureHeight==height&&card.apertureRadius==radius)return;
@@ -45,15 +69,29 @@ final class CanvasStage extends FrameLayout {
   PreviewCard main=mainCard;
   // Live task surfaces are below the host window: drawing the main View later
   // cannot erase side chrome already painted over its transparent aperture.
-  if(main==null||main.getVisibility()!=View.VISIBLE||main.getAlpha()<=0||
-    indexOfChild(child)>=indexOfChild(main))return super.drawChild(canvas,child,drawingTime);
+  boolean belowMain=main!=null&&indexOfChild(child)<indexOfChild(main);
+  PreviewCard retiring=retiringCard;
+  boolean belowRetiring=retiring!=null&&child!=main&&child!=retiring;
+  boolean project=child==projectedAdd;
+  if(!belowMain&&!belowRetiring&&!project)return super.drawChild(canvas,child,drawingTime);
   int save=canvas.save();
   try{
-   float sx=main.getScaleX(),sy=main.getScaleY();
-   aperture.clipOutside(canvas,main.surfaceAperture,main.apertureWidth,main.apertureHeight,main.apertureRadius,
-     main.getX()+main.getPivotX()*(1-sx),main.getY()+main.getPivotY()*(1-sy),sx,sy);
+   if(belowMain)clipOutside(canvas,main);
+   if(belowRetiring)clipOutside(canvas,retiring);
+   if(project){
+    // Transform outside the child's RenderNode so the original rectangular
+    // bounds do not clip corners that project past the unwarped card.
+    float x=child.getX(),y=child.getY();
+    canvas.translate(x,y);canvas.concat(addProjection);canvas.translate(-x,-y);
+   }
    return super.drawChild(canvas,child,drawingTime);
   }finally{canvas.restoreToCount(save);}
+ }
+ private void clipOutside(Canvas canvas,PreviewCard card){
+  if(card.getVisibility()!=View.VISIBLE||card.getAlpha()<=0)return;
+  float sx=card.getScaleX(),sy=card.getScaleY();
+  aperture.clipOutside(canvas,card.surfaceAperture,card.apertureWidth,card.apertureHeight,card.apertureRadius,
+    card.getX()+card.getPivotX()*(1-sx),card.getY()+card.getPivotY()*(1-sy),sx,sy);
  }
  private String transition;
  private int requests,measures,layouts,frames;

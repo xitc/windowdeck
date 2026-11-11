@@ -5,6 +5,8 @@ import android.animation.ValueAnimator;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Matrix;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -14,9 +16,12 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.ContextThemeWrapper;
 import android.view.Gravity;
 import android.view.SurfaceControl;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import java.util.function.Consumer;
 import de.robv.android.xposed.XposedHelpers;
@@ -52,6 +57,7 @@ final class HandoffCover {
  private WindowManager windows;
  private FrameLayout view;
  private SnapshotMotionView scene;
+ private AddPreview addPreview;
  private Bitmap bitmap;
  private boolean bitmapHasContent;
  private Bitmap sourceFrame;
@@ -195,10 +201,76 @@ final class HandoffCover {
   return create(context,reason,fallback,false,taskFrame,null);
  }
 
+ /** One chrome-only layer, with no capture or input ownership. */
+ static HandoffCover createAddPreview(Context context,int[] box,float[] quad,float progress){
+  HandoffCover cover=new HandoffCover("recents_add_preview");
+  try{
+   cover.windows=context.getSystemService(WindowManager.class);
+   cover.view=new FrameLayout(context);
+   cover.drawAddPreview(context,box,quad,progress);
+   cover.attach(context);
+  }catch(Throwable e){
+   Log.w(TAG,"handoff_add_preview_unavailable",e);cover.close("unavailable");
+  }
+  return cover;
+ }
+
+ void drawAddPreview(Context context,int[] box,float[] quad,float progress){
+  if(closed||view==null)return;
+  addPreview=new AddPreview(context,box,quad);
+  addPreview.progress(progress);
+  view.addView(addPreview,new FrameLayout.LayoutParams(-1,-1));
+ }
+
+ SurfaceControl previewLayer(){
+  if(closed||view==null||addPreview==null)return null;
+  try{
+   Object root=XposedHelpers.callMethod(view,"getViewRootImpl");
+   SurfaceControl layer=root==null?null:(SurfaceControl)XposedHelpers.callMethod(root,"getSurfaceControl");
+   return layer!=null&&layer.isValid()?layer:null;
+  }catch(Throwable e){Log.w(TAG,"handoff_add_preview_layer_unavailable",e);return null;}
+ }
+
+ void updateAddPreview(float progress){
+  if(addPreview!=null)addPreview.progress(progress);
+ }
+
+ private static final class AddPreview extends View {
+  private final Button add;
+  private final Matrix projection=new Matrix();
+  private final int x,y,right;
+  private float fraction;
+  AddPreview(Context context,int[] box,float[] quad){
+   super(context);
+   add=Ui.addCard(new ContextThemeWrapper(context,android.R.style.Theme_Material_NoActionBar));
+   setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+   x=box[0];y=box[1];right=box[2];
+   int w=right-x,h=box[3]-y;
+   add.measure(MeasureSpec.makeMeasureSpec(w,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(h,MeasureSpec.EXACTLY));
+   add.layout(0,0,w,h);
+   projection.setPolyToPoly(new float[]{0,0,w,0,w,h,0,h},0,quad,0,4);
+  }
+  void progress(float value){fraction=value;invalidate();}
+  @Override protected void onDraw(Canvas canvas){
+   int save=canvas.save();
+   canvas.translate(x-right*(1-fraction),y);
+   canvas.concat(projection);add.draw(canvas);
+   canvas.restoreToCount(save);
+  }
+ }
+
+ /** This display frame is captured after the Recents leash's terminal transaction. */
+ static HandoffCover createTerminal(Context context,Bitmap frame){
+  return create(context,"recents_terminal",null,true,null,null,null,frame);
+ }
+
  private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap taskFrame,IBinder sourceToken){
   return create(context,reason,fallback,holdBleed,taskFrame,sourceToken,null);
  }
  private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap taskFrame,IBinder sourceToken,ReleaseFrameGate releaseFrame){
+  return create(context,reason,fallback,holdBleed,taskFrame,sourceToken,releaseFrame,null);
+ }
+ private static HandoffCover create(Context context,String reason,Snapshot fallback,boolean holdBleed,Bitmap taskFrame,IBinder sourceToken,ReleaseFrameGate releaseFrame,Bitmap terminal){
   if(active!=null)active.close("superseded");
   HandoffCover cover=new HandoffCover(reason);
   cover.sourceToken=sourceToken;cover.releaseFrame=releaseFrame;
@@ -211,13 +283,16 @@ final class HandoffCover {
    // rotation (portrait), even while captureDisplay returns the landscape
    // display. Read the compositor display's WM rotation instead.
    int captureRotation=captureRotation(context);
-   Bitmap captured=captureNow(context);
+   Bitmap captured=terminal!=null?terminal:captureNow(context);
+   if(terminal!=null&&(captureRotation!=0||terminal.getWidth()!=bounds.width()||terminal.getHeight()!=bounds.height())){
+    recycle(terminal);throw new IllegalStateException("Terminal display geometry changed");
+   }
    if(captureRotation!=captureRotation(context)){
     Log.w(TAG,"handoff_capture_rotation_changed");recycle(captured);captured=null;
    }
    // This owned release bitmap is immutable. Validate it once; hardware-to-CPU
    // readback for the nine-pixel probe must not repeat along the release path.
-   boolean capturedHasContent=coverFrame(captured);
+   boolean capturedHasContent=terminal!=null||coverFrame(captured);
    if(usable(captured)&&!capturedHasContent&&taskFrame(taskFrame)
      &&DisplayGeometry.sameAspect(taskFrame.getWidth(),taskFrame.getHeight(),captured.getWidth(),captured.getHeight())){
     Bitmap copy=taskFrame.copy(Bitmap.Config.ARGB_8888,false);
@@ -247,7 +322,7 @@ final class HandoffCover {
    if(holdBleed){
     // Stay out of composition until the release bitmap is in a buffer. An opaque
     // window with no buffer is what the compositor draws as a full white frame.
-    cover.conceal=true;cover.view.setBackgroundColor(0);cover.scene.holdBleed();
+    cover.conceal=true;cover.view.setBackgroundColor(0);if(terminal==null)cover.scene.holdBleed();
     cover.scene.whenReleasePainted(cover::showRelease);
    }else cover.view.setBackgroundColor(Ui.CHROME);
    cover.view.addView(cover.scene,new FrameLayout.LayoutParams(-1,-1));
@@ -304,10 +379,15 @@ final class HandoffCover {
  /** The display id is resolved on the main thread. The capture itself can run in the background. */
  static Bitmap captureNow(int displayId){return captureDisplay(displayId);}
 
- private static Bitmap captureDisplay(int displayId){
+ static Bitmap captureNow(int displayId,SurfaceControl exclude){return captureDisplay(displayId,exclude);}
+
+ private static Bitmap captureDisplay(int displayId){return captureDisplay(displayId,null);}
+
+ private static Bitmap captureDisplay(int displayId,SurfaceControl exclude){
   try{
    Class<?> capture=Class.forName("android.window.ScreenCaptureInternal");
    Object builder=XposedHelpers.newInstance(Class.forName("android.window.ScreenCaptureInternal$CaptureArgs$Builder"));
+   if(exclude!=null)XposedHelpers.callMethod(builder,"setExcludeLayers",(Object)new SurfaceControl[]{exclude});
    Object args=XposedHelpers.callMethod(builder,"build");
    Object listener=XposedHelpers.callStaticMethod(capture,"createSyncCaptureListener");
    Object wm=XposedHelpers.callStaticMethod(Class.forName("android.view.WindowManagerGlobal"),"getWindowManagerService");
@@ -349,7 +429,7 @@ final class HandoffCover {
    p.alpha=0f;
    p.rotationAnimation=WindowManager.LayoutParams.ROTATION_ANIMATION_SEAMLESS;
   }
-  p.gravity=Gravity.TOP|Gravity.LEFT;p.setTitle("WindowDeck handoff");
+  p.gravity=Gravity.TOP|Gravity.LEFT;p.setTitle(addPreview==null?"WindowDeck handoff":"WindowDeck add preview");
   p.layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
   p.setFitInsetsTypes(0);
   if(type==2015)try{XposedHelpers.callMethod(p,"setTrustedOverlay");}catch(Throwable ignored){}
@@ -449,7 +529,7 @@ final class HandoffCover {
    shown.alpha=1f;windows.updateViewLayout(view,shown);
   }catch(Throwable e){
    Log.w(TAG,"handoff_cover_show_failed",e);
-   if(sourceToken!=null||releaseFrame!=null){close("source_window_show_failed");return;}
+   if(sourceToken!=null||releaseFrame!=null||"recents_terminal".equals(reason)){close("source_window_show_failed");return;}
   }
   Log.i(TAG,"handoff_cover_opaque ms="+(SystemClock.uptimeMillis()-started));
   if(sourceToken!=null){
@@ -792,6 +872,20 @@ final class HandoffCover {
  private void maybeReveal(){if(!closed&&reveal.begin()){Log.i(TAG,"handoff_reveal_ready ms="+(SystemClock.uptimeMillis()-started));fadeToLive();}}
  private boolean valid(RectF rect,int w,int h){return rect!=null&&Float.isFinite(rect.left)&&Float.isFinite(rect.top)&&Float.isFinite(rect.right)&&Float.isFinite(rect.bottom)
   &&rect.width()>=1&&rect.height()>=1&&rect.left>=0&&rect.top>=0&&rect.right<=w&&rect.bottom<=h;}
+ void fadeTerminal(){
+  if(closed)return;
+  if(view==null||visualDetached){close("host_pose_committed");return;}
+  ValueAnimator fade=ValueAnimator.ofFloat(0,1);motion=fade;
+  fade.setDuration(MotionSpec.CROSS_FADE_MS);fade.setInterpolator(null);
+  fade.addUpdateListener(a->{
+   if(!closed&&motion==a)view.setAlpha(EntranceMotion.revealAlpha((Float)a.getAnimatedValue()));
+  });
+  fade.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
+   if(!closed&&motion==a){motion=null;close("host_pose_committed");}
+  }});
+  Log.i(TAG,"handoff_terminal_fade duration_ms="+MotionSpec.CROSS_FADE_MS);
+  fade.start();
+ }
  private void fadeToLive(){
   if(closed||view==null)return;
   hideUnderlay();
@@ -823,7 +917,7 @@ final class HandoffCover {
   hideUnderlay();
   if(view!=null){if(!visualDetached)try{windows.removeViewImmediate(view);}catch(Throwable e){Log.w(TAG,"handoff_cover_remove",e);}view.removeAllViews();view=null;}
   // Let RenderThread release its bitmap reference naturally after window teardown.
-  bitmap=null;sourceFrame=null;poseSnapshot=null;scene=null;if(active==this)active=null;
+  bitmap=null;sourceFrame=null;poseSnapshot=null;scene=null;addPreview=null;if(active==this)active=null;
   Log.i(TAG,"handoff_cover_removed reason="+reason+" why="+why+" ms="+(SystemClock.uptimeMillis()-started));
   Consumer<Boolean> result=motionResult;motionResult=null;if(result!=null)result.accept(false);
   if(closedListener!=null)closedListener.accept(why);

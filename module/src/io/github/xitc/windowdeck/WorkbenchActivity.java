@@ -169,9 +169,10 @@ public final class WorkbenchActivity extends Activity implements
   // Keep the host in its final orientation. The source task keeps its landscape buffer.
   portrait.deferPortrait=state==null&&getIntent().getBooleanExtra("windowdeck_defer_portrait",false);
   if(portrait.deferPortrait){
-   if(getIntent().getBooleanExtra("windowdeck_wait_source_release",false))portrait.sourceRelease=new SourceRelease();
+   portrait.liveRecents=getIntent().getBooleanExtra(HandoffProtocol.LIVE_RECENTS,false);
+   if(portrait.liveRecents||getIntent().getBooleanExtra("windowdeck_wait_source_release",false))portrait.sourceRelease=new SourceRelease();
    portrait.deferSourceRotation=getIntent().getIntExtra("windowdeck_defer_rotation",-1);
-   if(portrait.deferSourceRotation!=1&&portrait.deferSourceRotation!=3){
+   if(portrait.liveRecents?portrait.deferSourceRotation!=0:portrait.deferSourceRotation!=1&&portrait.deferSourceRotation!=3){
     Log.w(TAG,"defer_source_rotation_invalid rotation="+portrait.deferSourceRotation);
     android.os.ResultReceiver reply=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
     if(reply!=null)reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
@@ -182,7 +183,7 @@ public final class WorkbenchActivity extends Activity implements
    // Like its native small-window rotation layer, bridge pixels in the destination
    // window while the original task is embedded; never rotate the host to fit the task.
    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-   Log.i(TAG,"canvas_orientation requested=portrait source_rotation="+portrait.deferSourceRotation+" activity_rotation="+(getDisplay()==null?-1:getDisplay().getRotation())+" policy=snapshot_rotation_bridge");
+   Log.i(TAG,"canvas_orientation requested=portrait source_rotation="+portrait.deferSourceRotation+" activity_rotation="+(getDisplay()==null?-1:getDisplay().getRotation())+" policy="+(portrait.liveRecents?"live_recents_bridge":"snapshot_rotation_bridge"));
   }else{
    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
    Log.i(TAG,"canvas_orientation requested=portrait policy=independent_tasks");
@@ -236,7 +237,7 @@ public final class WorkbenchActivity extends Activity implements
    };
    stage.getViewTreeObserver().addOnPreDrawListener(portrait.poseBootstrapListener);
   }
-  addCard=Ui.button(this,"＋");addCard.setTextSize(28);addCard.setTextColor(Ui.FROST_PLUS);addCard.setGravity(Gravity.CENTER);addCard.setIncludeFontPadding(false);addCard.setPadding(0,0,0,0);addCard.setContentDescription("添加应用");addCard.setBackground(Ui.frost(Ui.dp(this,Ui.SIDE_RADIUS)));Ui.round(addCard,Ui.dp(this,Ui.SIDE_RADIUS));addCard.setOnClickListener(v->{hang.hangReplace=false;hang.hangForAdd();});stage.addView(addCard);
+  addCard=Ui.addCard(this);addCard.setOnClickListener(v->{hang.hangReplace=false;hang.hangForAdd();});stage.addView(addCard);
   more=Ui.more(this);more.setOnClickListener(v->menu.primaryMenu());more.setOnLongClickListener(v->{menu.primarySizeSlider();return true;});menu.registerControlBarLight();
   status=Ui.text(this,"正在准备窗口…",12,Ui.TEXT);status.setGravity(Gravity.CENTER);status.setBackground(Ui.bg(0x99000000,Ui.dp(this,8)));status.setPadding(Ui.dp(this,12),Ui.dp(this,6),Ui.dp(this,12),Ui.dp(this,6));status.setVisibility(View.GONE);
   FrameLayout.LayoutParams statusLp=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);statusLp.bottomMargin=Ui.dp(this,16);stage.addView(status,statusLp);
@@ -262,12 +263,13 @@ public final class WorkbenchActivity extends Activity implements
     WorkbenchSlot fresh=identity.validateSourceTask(initialSource,getIntent().getIntExtra("windowdeck_create_source_user",-1));
     session.slots.add(fresh);handoff.acceptGestureSource(fresh);
     handoff.handoffReady=getIntent().getParcelableExtra("windowdeck_handoff_ready",android.os.ResultReceiver.class);
-    long readyBudget=portrait.deferPortrait||fresh.orientationAxis==2?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
+    boolean rotationBridge=portrait.deferPortrait&&!portrait.liveRecents;
+    long readyBudget=rotationBridge||fresh.orientationAxis==2?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
     handoff.handoffDeadline=SystemClock.uptimeMillis()+readyBudget;
     handoff.portraitHandoffLimit=getIntent().getLongExtra(HandoffProtocol.PORTRAIT_LIMIT,0);
     if(handoff.portraitHandoffLimit>0){
      long now=SystemClock.uptimeMillis();
-     if(!PortraitHandoffDeadline.validHostStart(portrait.deferPortrait,fresh.orientationAxis,handoff.handoffReady!=null,
+     if(!PortraitHandoffDeadline.validHostStart(rotationBridge,fresh.orientationAxis,handoff.handoffReady!=null,
        handoff.portraitHandoffLimit,now,readyBudget))throw new IllegalArgumentException(
          "portrait handoff deadline axis="+fresh.orientationAxis+" defer="+portrait.deferPortrait
          +" reply="+(handoff.handoffReady!=null)+" remaining_ms="+(handoff.portraitHandoffLimit-now));
@@ -411,6 +413,22 @@ private void seamlessRotation(){
  public void clearHeldPose(){portrait.clearHeldPose();}
  public void closeEntranceCover(String why){cover.closeEntranceCover(why);}
  public void createWindow(WorkbenchSlot slot){surfaces.createWindow(slot);}
+ public boolean liveRecentsTargetMatches(WorkbenchSlot slot,float[] quad,int[] size,float radius){
+  if(getDisplay()==null||getDisplay().getRotation()!=0||slot.orientationAxis==2||session.slots.size()!=1
+    ||slot.renderBounds.width()!=size[0]||slot.renderBounds.height()!=size[1]||radius!=cardRadius(true))return false;
+  View decor=getWindow().getDecorView();
+  if(decor.getWidth()!=size[0]||decor.getHeight()!=size[1])return false;
+  if(portrait.poseSettling&&!portrait.poseHeld){
+   Bundle actual=new Bundle();
+   return handoff.putHandoffContentGeometry(slot,actual)
+     &&Arrays.equals(quad,actual.getFloatArray(HandoffProtocol.CONTENT_QUAD))
+     &&Arrays.equals(new float[]{0,0,size[0],size[1]},actual.getFloatArray(HandoffProtocol.CONTENT_CROP));
+  }
+  int[] card=surfaces.cardGeometry().cards[0],location=new int[2];stage.getLocationOnScreen(location);
+  float l=location[0]+card[0],t=location[1]+card[1],r=l+card[2],b=t+card[3];
+  return Arrays.equals(quad,new float[]{l,t,r,t,r,b,l,b});
+ }
+ public boolean liveRecentsBootstrap(){return portrait.liveRecents&&portrait.waitingForSourceRelease();}
  public boolean deferPortrait(){return portrait.deferPortrait;}
  public Display display(){return getDisplay();}
  public boolean focusPrimary(String reason){return back.focusPrimary(reason);}

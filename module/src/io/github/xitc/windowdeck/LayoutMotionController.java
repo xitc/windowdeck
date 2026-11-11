@@ -111,6 +111,8 @@ final class LayoutMotionController {
  int switchOriginPrepareToken;
  long switchStarted,lastAnimationFrame,maxFrameGap;
  CardSpace switchSpace;
+ WorkbenchSlot retiringSlot;
+ IdentityHashMap<WorkbenchSlot,TopSwapSpring> topSwap;
  int animationFrames,motionFitFailures;
  final ResizeStats resizeStats=new ResizeStats();
  ValueAnimator animation,addAnimation;
@@ -265,9 +267,9 @@ final class LayoutMotionController {
  }
  void layoutCards(boolean animate){layoutCards(animate,null);}
  void layoutCards(boolean animate,SwitchMotion<WorkbenchSlot> source){
-  layoutCards(animate,source,false);
+  layoutCards(animate,source,null,null);
  }
- void layoutCards(boolean animate,SwitchMotion<WorkbenchSlot> source,boolean ordinarySwap){
+ void layoutCards(boolean animate,SwitchMotion<WorkbenchSlot> source,WorkbenchSlot oldMain,IdentityHashMap<WorkbenchSlot,TopSwapSpring> previousTopSwap){
   if(host.sideSortActive())host.abortSideSort("layout_cards");
   cancelLayoutPreparation("layout_changed");
   if(session.slots.isEmpty()||host.closing())return;
@@ -288,13 +290,29 @@ final class LayoutMotionController {
   final int mode=host.effectiveMode();
   final float railExtent=LayoutSwitchMotion.extent(to,session.primary,mode,geometry.add);
   if(rail)for(int i=0;i<current.size();i++)if(i!=session.primary)from[i]=LayoutSwitchMotion.incoming(to[i],mode,railExtent,0);
-  final boolean mainSide=ordinarySwap&&!layoutFlip;
-  final long duration=layoutFlip?LayoutSwitchMotion.DURATION_MS:mainSide?MainSideMotion.DURATION_MS:MotionSpec.SWITCH_MS;
+  final boolean mainSide=oldMain!=null&&!layoutFlip;
+  final boolean springY=mainSide&&mode==PaneLayout.TOP_BOTTOM;
+  final long duration=springY?TopSwapSpring.WATCHDOG_MS:layoutFlip?LayoutSwitchMotion.DURATION_MS:mainSide?MainSideMotion.DURATION_MS:MotionSpec.SWITCH_MS;
   final int generation=++switchGeneration;
   switchSpace=space;
   switchStarted=SystemClock.uptimeMillis();lastAnimationFrame=0;maxFrameGap=0;animationFrames=0;resizeStats.reset();motionFitFailures=0;
+  final int retiringIndex=springY?current.indexOf(oldMain):-1;
+  if(retiringIndex>=0){
+   retiringSlot=oldMain;host.stage().retiringCard=oldMain.card;
+   updateRetirement(from[retiringIndex],to[retiringIndex]);
+  }
+  final TopSwapSpring[] tracks=springY?new TopSwapSpring[current.size()]:null;
+  if(springY){
+   topSwap=new IdentityHashMap<>();
+   for(int i=0;i<current.size();i++){
+    WorkbenchSlot slot=current.get(i);
+    TopSwapSpring track=new TopSwapSpring(from[i],to[i],previousTopSwap==null?null:previousTopSwap.get(slot));
+    tracks[i]=track;topSwap.put(slot,track);
+    if(!track.done)Log.i(TAG,"switch_spring_y generation="+generation+" task="+slot.taskId+" start="+track.start+" goal="+track.goal+" velocity="+track.velocity+" physical="+track.physical);
+   }
+  }
   MainSideMotion.Curve swapCurve=new MainSideMotion.Curve();
-  animation=ValueAnimator.ofFloat(0,1);animation.setDuration(duration);animation.setInterpolator(layoutFlip?t->t:mainSide?swapCurve::sample:MotionSpec::geometry);
+  animation=ValueAnimator.ofFloat(0,1);animation.setDuration(duration);animation.setInterpolator(layoutFlip||springY?t->t:mainSide?swapCurve::sample:MotionSpec::geometry);
   // All slots already own the captured source frame before target layout begins.
   // Keep render bounds fixed and interpolate crop, corners and screen box together.
   for(int i=0;i<current.size();i++){
@@ -305,6 +323,10 @@ final class LayoutMotionController {
   host.setMotionFitListener(()->{
    if(generation==switchGeneration&&!host.closing()&&!host.stopped()&&!host.backgrounded()){
     if(!retainSwitchSpace(generation))return true;
+    if(retiringSlot!=null){
+     anchorRetiringBadge(retiringSlot.card,retiringSlot.icon);
+     anchorRetiringBadge(retiringSlot.card,retiringSlot.pin);
+    }
     try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
      boolean ready=true;for(WorkbenchSlot s:current){host.fitRecoveryCover(s,s.surface.getWidth(),s.surface.getHeight());ready&=host.writeLeashFit(s,fit);}
      if(ready)host.submitMotionFit(fit);else motionFitFailures++;
@@ -315,20 +337,66 @@ final class LayoutMotionController {
   host.stage().getViewTreeObserver().addOnPreDrawListener(host.motionFitListener());
   animation.addUpdateListener(a->{
    if(!retainSwitchSpace(generation))return;
-   long now=SystemClock.uptimeMillis();if(lastAnimationFrame!=0)maxFrameGap=Math.max(maxFrameGap,now-lastAnimationFrame);lastAnimationFrame=now;animationFrames++;
+   long now=SystemClock.uptimeMillis(),delta=lastAnimationFrame==0?0:now-lastAnimationFrame;
+   maxFrameGap=Math.max(maxFrameGap,delta);lastAnimationFrame=now;animationFrames++;
    if(layoutFlip&&animationFrames==1)Log.i(TAG,"layout_switch_first_update generation="+generation+" since_request_ms="+(now-requestedAt)+" prepare_ms="+(switchStarted-requestedAt));
    float time=(Float)a.getAnimatedValue(),f=layoutFlip?LayoutSwitchMotion.progress(time):time;
-   for(int i=0;i<current.size();i++)host.poseCard(current.get(i),mainSide?MainSideMotion.between(from[i],to[i],f,space.x,space.y):CardMotion.between(from[i],to[i],f),to[i]);
+   boolean allStopped=springY;
+   for(int i=0;i<current.size();i++){
+    WorkbenchSlot slot=current.get(i);
+    CardMotion.Pose pose;
+    if(springY){
+     TopSwapSpring track=tracks[i];boolean wasDone=track.done;
+     pose=track.step(delta,time>=1,space.x,space.y);
+     allStopped&=track.done;
+     if(track.done&&!wasDone)Log.i(TAG,"switch_spring_y_stop generation="+generation+" task="+slot.taskId+" frame="+animationFrames+" watchdog="+(time>=1));
+    }else pose=mainSide?MainSideMotion.between(from[i],to[i],f,space.x,space.y):CardMotion.between(from[i],to[i],f);
+    host.poseCard(slot,pose,to[i]);
+   }
+   if(retiringIndex>=0)updateRetirement(oldMain.motionPose,to[retiringIndex]);
    if(layoutFlip&&layoutSwitchVisuals!=null){
     layoutSwitchVisuals.frame(time);
     if(rail){float offset=LayoutSwitchMotion.offset(railExtent,f,true);host.addCard().setTranslationX(mode==PaneLayout.LEFT_RIGHT?offset:0);host.addCard().setTranslationY(mode==PaneLayout.TOP_BOTTOM?offset:0);}
    }
    host.stage().invalidate();
+   if(allStopped&&time<1){finishSwitchAnimation(a,generation);a.cancel();}
   });
-  animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){if(animation!=a)return;
-   animation=null;settlingInput=true;host.removeMotionFitListener();
-   settleSwitch(generation,SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS);
-  }});Log.i(TAG,"switch_animation_start generation="+generation+" prepare_token="+switchOriginPrepareToken+" tasks="+taskIds()+" duration_ms="+duration+" layout_flip="+layoutFlip+" ordinary_swap="+mainSide+" geometry="+(mainSide?"vivo_corner_points":"quad_crop_radius")+" coordinates="+space);animation.start();
+  animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){finishSwitchAnimation(a,generation);}});
+  Log.i(TAG,"switch_animation_start generation="+generation+" prepare_token="+switchOriginPrepareToken+" tasks="+taskIds()+" duration_ms="+duration+" layout_flip="+layoutFlip+" ordinary_swap="+mainSide+" geometry="+(springY?"vivo_spring_y":mainSide?"vivo_corner_points":"quad_crop_radius")+" coordinates="+space);
+  animation.start();
+ }
+ private void finishSwitchAnimation(Animator owner,int generation){
+  if(animation!=owner)return;
+  animation=null;topSwap=null;settlingInput=true;host.removeMotionFitListener();
+  settleSwitch(generation,SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS);
+ }
+ void updateRetirement(CardMotion.Pose pose,CardMotion.Pose target){
+  float ratio=MainSideMotion.retirementRatio(pose,target);
+  if(host.stage().retiringCard!=null&&ratio<=MainSideMotion.RETIRE_HEIGHT_RATIO){
+   host.stage().retiringCard=null;
+   Log.i(TAG,"switch_retire_threshold generation="+switchGeneration+" task="+retiringSlot.taskId+" frame="+animationFrames+" ratio="+ratio);
+  }
+  float alpha=MainSideMotion.retirementAlpha(ratio);
+  if(alpha>0&&retiringSlot.icon.getAlpha()==0)
+   Log.i(TAG,"switch_retire_icon generation="+switchGeneration+" task="+retiringSlot.taskId+" frame="+animationFrames+" alpha="+alpha);
+  retiringSlot.icon.setAlpha(alpha);retiringSlot.pin.setAlpha(alpha);
+ }
+ private static void anchorRetiringBadge(PreviewCard card,View badge){
+  // poseCard scales around (0,0). Keep the badge at its laid-out side slot.
+  float sx=card.getScaleX(),sy=card.getScaleY();
+  badge.setPivotX(0);badge.setPivotY(0);
+  badge.setScaleX(1/sx);badge.setScaleY(1/sy);
+  badge.setTranslationX((badge.getLeft()-card.getTranslationX())/sx-badge.getLeft());
+  badge.setTranslationY((badge.getTop()-card.getTranslationY())/sy-badge.getTop());
+ }
+ void clearRetirement(){
+  if(retiringSlot==null)return;
+  host.stage().retiringCard=null;
+  resetRetiringBadge(retiringSlot.icon);resetRetiringBadge(retiringSlot.pin);retiringSlot=null;
+ }
+ private static void resetRetiringBadge(View badge){
+  badge.setTranslationX(0);badge.setTranslationY(0);badge.setScaleX(1);badge.setScaleY(1);
+  badge.resetPivot();badge.setAlpha(1);
  }
  boolean retainSwitchSpace(int generation){
   if(generation!=switchGeneration)return false;
@@ -366,7 +434,7 @@ final class LayoutMotionController {
      if(!retainSwitchSpace(generation))return;
      if(SystemClock.uptimeMillis()>=deadline){settleSwitch(generation,deadline);return;}
      if(!key.equals(switchSurfaceKey())){settleSwitch(generation,deadline);return;}
-     settlingInput=false;switchSpace=null;clearLayoutSwitch();
+     settlingInput=false;switchSpace=null;clearLayoutSwitch();clearRetirement();
      for(int i=0;i<session.slots.size();i++){WorkbenchSlot s=session.slots.get(i);s.motionPose=null;host.resetCardTransform(s);host.inputRole(s,i==session.primary);int[] plate=host.surfacePlate(s);host.fitRecoveryCover(s,plate[0],plate[1]);}
      host.layoutCaption();logSwitch(motionFitFailures==0?"settled":"failed_motion_fit");scheduleLayoutEvidence("switch");handler.post(()->host.focusPrimary("switch"));
     }));host.stage().invalidate();
@@ -419,8 +487,9 @@ final class LayoutMotionController {
   host.cancelHandoffPresentation();
   if(addAnimation!=null){ValueAnimator old=addAnimation;addAnimation=null;old.cancel();host.releaseEntrance();}
   if(switching())logSwitch("cancelled");switchGeneration++;host.removeMotionFitListener();
-  settlingInput=false;switchSpace=null;
+  settlingInput=false;switchSpace=null;topSwap=null;
   if(animation!=null){ValueAnimator old=animation;animation=null;old.cancel();}
+  clearRetirement();
   if(!preservePose)for(WorkbenchSlot s:session.slots)s.motionPose=null;
   host.cancelForLayout(preservePose);
  }
@@ -508,10 +577,12 @@ final class LayoutMotionController {
    return pose;
   });
   if(source==null){Toast.makeText(host.context(),"请等待应用窗口就绪",Toast.LENGTH_SHORT).show();return;}
+  IdentityHashMap<WorkbenchSlot,TopSwapSpring> previous=switchSpace!=null&&switchSpace.same(host.stage().cardSpace())?topSwap:null;
   cancelSwitchPreparation("direct_switch");cancelAnimation(true);
   // Claim the whole source frame before a role change can trigger a native fit.
   for(WorkbenchSlot s:session.slots)s.motionPose=source.source(s);
-  CardOrder.promote(session.slots,session.primary,index);layoutCards(true,source,true);
+  WorkbenchSlot oldMain=session.slots.get(session.primary);
+  CardOrder.promote(session.slots,session.primary,index);layoutCards(true,source,oldMain,previous);
   refreshStatus();Log.i(TAG,"switch primary="+session.primary+" tasks="+taskIds());
  }
  String taskIds(){StringBuilder b=new StringBuilder();for(WorkbenchSlot s:session.slots){if(b.length()>0)b.append(',');b.append(s.taskId);}return b.toString();}

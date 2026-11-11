@@ -19,12 +19,16 @@ final class MainWindowSettings {
  static int local(Context context){
   return CardLayout.mainPercent(context.getSharedPreferences(PREF_FILE,0).getInt(PREF,CardLayout.MAIN_DEFAULT_PERCENT));
  }
- static int read(Context context,int fallback){
+ static Bundle readLayout(Context context){
   try{
    Bundle answer=context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),PREF,null,null);
-   if(answer!=null&&answer.containsKey(PREF))return CardLayout.mainPercent(answer.getInt(PREF));
+   if(answer!=null)return answer;
   }catch(Exception e){Log.w("WindowDeck","main_window_size_unavailable",e);}
-  return CardLayout.mainPercent(fallback);
+  return Bundle.EMPTY;
+ }
+ static int read(Context context,int fallback){
+  Bundle answer=readLayout(context);
+  return answer.containsKey(PREF)?CardLayout.mainPercent(answer.getInt(PREF)):fallback;
  }
  static String label(int percent){return "主窗口大小："+percent+"%";}
  static boolean write(Context context,int percent){

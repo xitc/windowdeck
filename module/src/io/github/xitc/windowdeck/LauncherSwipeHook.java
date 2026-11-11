@@ -199,7 +199,7 @@ private static void onGestureStart(View panel) throws Exception {
  Object params=params(panel);
  if(params!=null)hookParamsOnce(params);
  Object swipe=swipeUpHandler(panel);
- state.gestureTask=CandidateProbe.runningTask(swipe);
+ state.gestureTask=CandidateProbe.gestureTask(swipe);
  SwipeCandidate.Match candidate=swipe==null?null:CandidateProbe.match(swipe);
  boolean room=centreFree(panel);
  boolean offered=state.legacyEntry&&CandidateProbe.showEntry(swipe);
@@ -209,7 +209,7 @@ private static void onGestureStart(View panel) throws Exception {
  // A panel that already has its own centre entrance must not have those rectangles rewritten.
  MID_ACTIVE=offered&&room&&canShowThird(panel.getContext(),rotation(panel));
  log("swipe_init version="+Version.NAME+" handler="+(swipe!=null)+" candidate="+(candidate!=null)+" room="+room
-     +" offered="+offered+" source="+CandidateProbe.runningTask(swipe)
+     +" offered="+offered+" source="+state.gestureTask+" reported="+CandidateProbe.runningTask(swipe)
      +" cache="+(CandidateProbe.ready()?"warm":"cold")+" total="+(SystemClock.uptimeMillis()-began)+"ms");
  CandidateProbe.kick();
  // HOME/RECENTS/cancel still belong to Launcher. Never cover the finger-driven
@@ -312,7 +312,7 @@ private static void onGestureStart(View panel) throws Exception {
   // The old probe against the ROM's interval field cannot be used any more: on C17 that field is
   // 8dp by design and would keep the card hidden forever.
   if(!MID_ACTIVE){if(!TRACED_MID){TRACED_MID=true;log("zone skipped: mid gap inactive (entry blocked, centre taken, or the tablet/rotation gate)");}hideCard(s);return;}
-  if(!CandidateProbe.showEntry(handler)){hideCard(s);return;}
+  if(!CandidateProbe.showEntry(handler,true)){hideCard(s);return;}
   s.trigger=XposedHelpers.getFloatField(params,RomSymbols.PARAMS_START_TRIGGER);
   s.startShow=XposedHelpers.getFloatField(params,RomSymbols.PARAMS_START_SHOW);
   // Two thresholds, not one. The launcher fades an option in from mStartShowP (0.95) and only lets

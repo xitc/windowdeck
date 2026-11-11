@@ -24,13 +24,21 @@ final class LiveWorkbenchState {
   int container=state.getInt("containerTaskId",-1),count=state.getInt("count",-1);
   if(container<0||count<0||count>Caps.MAX_TASKS)return;
   if(count==0&&(latest==null||latest.getInt("containerTaskId",-1)!=container||latest.getLong("instanceToken")!=state.getLong("instanceToken")))return;
-  latest=new Bundle(state);
+  Bundle received=new Bundle(state);received.putLong("receivedAt",android.os.SystemClock.uptimeMillis());latest=received;
   Log.i("WindowDeck","live_state_received container="+container+" count="+count);
  }
  /** Container and count already pushed by the host, or null when no broadcast has arrived. */
  static int[] published(){
   Bundle state=latest;if(state==null)return null;
   return new int[]{state.getInt("containerTaskId",-1),state.getInt("count",0)};
+ }
+ /** A retired single-window host can leave GestureState pointing at its old task. */
+ static int retiredSource(int container){
+  Bundle state=latest;
+  if(state==null||container<0||state.getInt("containerTaskId",-1)!=container||state.getInt("count",-1)!=0
+    ||android.os.SystemClock.uptimeMillis()-state.getLong("receivedAt")>=MotionSpec.COVER_TIMEOUT_MS*2)return -1;
+  int[] tasks=state.getIntArray("tasks");
+  return tasks!=null&&tasks.length==1&&tasks[0]!=container?tasks[0]:-1;
  }
  static SwipeMembership swipeMembership(){
   Bundle state=latest;

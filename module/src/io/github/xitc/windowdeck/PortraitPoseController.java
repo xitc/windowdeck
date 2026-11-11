@@ -26,6 +26,7 @@ import java.util.concurrent.Executor;
 /** Owns portrait state for the workbench. The activity is only the nested Host. */
 final class PortraitPoseController {
  interface Host {
+  Button addCard();
   void applyCardRadius(WorkbenchSlot s,boolean isPrimary);
   WorkbenchBackdrop backdrop();
   boolean backgrounded();
@@ -39,6 +40,7 @@ final class PortraitPoseController {
   String handoffLayoutKey(boolean requireLive);
   android.os.ResultReceiver handoffReady();
   boolean initialized();
+  boolean liveRecentsTargetMatches(WorkbenchSlot slot,float[] quad,int[] size,float radius);
   void layoutCards(boolean animate);
   void layoutCards(boolean animate,SwitchMotion<WorkbenchSlot> source);
   boolean layoutPosted();
@@ -54,6 +56,7 @@ final class PortraitPoseController {
   void submitMotionFit(SurfaceControl.Transaction fit);
   Rect taskBuffer(WorkbenchSlot slot);
   int taskDrawState(WorkbenchSlot s) throws Exception;
+  int taskId();
   Window window();
   boolean writeLeashFit(WorkbenchSlot s,SurfaceControl.Transaction t);
  }
@@ -68,7 +71,8 @@ final class PortraitPoseController {
 
  private static final String TAG="WindowDeck";
 
- boolean deferPortrait,poseHeld,poseQuerySent,portraitAfterPose;
+ boolean deferPortrait,poseHeld,poseQuerySent,portraitAfterPose,liveRecents;
+ ValueAnimator liveRecentsReveal;
  int deferSourceRotation=-1;
  float[] heldCorners,heldCrop;
  int[] heldStage;
@@ -112,6 +116,7 @@ final class PortraitPoseController {
     }
    };
    Bundle ask=new Bundle();ask.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+   if(liveRecents)ask.putInt(HandoffProtocol.CONTAINER,host.taskId());
    ask.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
    try{host.handoffReady().send(HandoffProtocol.POSE_QUERY,ask);}
    catch(Throwable e){Log.w(TAG,"defer_pose_query_failed",e);host.failHandoff(slot,"pose_query_failed");}
@@ -149,6 +154,7 @@ final class PortraitPoseController {
   poseHeld=true;poseSlot=slot;
   poseBridgeBitmap=snapshot;poseBridgeSource=snapshotSource;
   poseBridge=new RecoveryCover(host.context());poseBridge.setBitmap(snapshot);
+  if(liveRecents)poseBridge.setBackdropChrome(this::drawBootstrapAdd);
   ((ViewGroup)host.window().getDecorView()).getOverlay().add(poseBridge);
   fitPoseBridge();
   Log.i(TAG,"defer_snapshot_bridge task="+slot.sourceTaskId+" source=launcher_release live=false size="+snapshot.getWidth()+"x"+snapshot.getHeight());
@@ -182,14 +188,29 @@ final class PortraitPoseController {
    if(!poseBridgeFitted||poseBridge==null||!host.backdrop().ready||host.stage().isLayoutRequested()){
     awaitSourceBootstrap(slot);return;
    }
+   if(liveRecents&&!host.liveRecentsTargetMatches(slot,heldCorners,heldStage,heldRadius)){
+    host.failHandoff(slot,"live_recents_target_changed");return;
+   }
    if(!sourceRelease.commitBootstrap()||!sourceRelease.requestRelease())return;
    Bundle done=new Bundle();done.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+   if(liveRecents)done.putInt(HandoffProtocol.CONTAINER,host.taskId());
    done.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
    Log.i(TAG,"defer_bootstrap_committed task="+slot.sourceTaskId+" live=false embed_started=false");
    if(host.handoffReady()==null||poseReply==null){host.failHandoff(slot,"source_release_reply_missing");return;}
    host.handoffReady().send(HandoffProtocol.BOOTSTRAP_COMMITTED,done);
   }));host.window().getDecorView().invalidate();host.stage().invalidate();
  }
+ private void drawBootstrapAdd(Canvas canvas){
+  Button add=host.addCard();
+  if(add.getVisibility()!=View.VISIBLE||add.getWidth()<1||add.getHeight()<1)return;
+  int[] where=new int[2],decor=new int[2];
+  add.getLocationOnScreen(where);host.window().getDecorView().getLocationOnScreen(decor);
+  int save=canvas.save();
+  canvas.translate(where[0]-decor[0],where[1]-decor[1]);
+  host.stage().drawChrome(canvas,add);
+  canvas.restoreToCount(save);
+ }
+
  void fitPoseBridge(){
   poseBridgeFitted=false;
   if(poseBridge==null||poseBridgeBitmap==null||heldStage==null)return;
@@ -208,10 +229,11 @@ final class PortraitPoseController {
  }
  void clearPoseBridge(String reason){
   poseBridgeFitted=false;
+  if(liveRecentsReveal!=null){ValueAnimator fade=liveRecentsReveal;liveRecentsReveal=null;fade.cancel();}
   if(poseBootstrapListener!=null&&host.stage()!=null){host.stage().getViewTreeObserver().removeOnPreDrawListener(poseBootstrapListener);poseBootstrapListener=null;}
   if(poseBridge==null)return;
   RecoveryCover cover=poseBridge;poseBridge=null;
-  ((ViewGroup)host.window().getDecorView()).getOverlay().remove(cover);cover.setBitmap(null);
+  ((ViewGroup)host.window().getDecorView()).getOverlay().remove(cover);cover.setBitmap(null);cover.setBackdropChrome(null);
   Bitmap bitmap=poseBridgeBitmap;poseBridgeBitmap=null;poseBridgeSource=null;
   if(bitmap!=null)handler.postDelayed(()->{if(!bitmap.isRecycled())bitmap.recycle();},1000);
   Log.i(TAG,"defer_snapshot_reveal result="+reason+" task="+(poseSlot==null?-1:poseSlot.taskId));
@@ -244,8 +266,10 @@ final class PortraitPoseController {
   try{
    SurfaceControl leash=(SurfaceControl)rom.taskLeash.get(slot.surface),plate=((SurfaceView)slot.surface).getSurfaceControl();
    if(leash==null||!leash.isValid()||plate==null||!plate.isValid())return null;
-   host.taskDrawState(slot);
-   if(!slot.drawEvidence.hasContent()){host.probeLandscapePresented(slot,leash);return null;}
+   int drawState=host.taskDrawState(slot);
+   if(liveRecents){
+    if(!TaskSurfaceEvidence.ready(drawState))return null;
+   }else if(!slot.drawEvidence.hasContent()){host.probeLandscapePresented(slot,leash);return null;}
    View decor=host.window().getDecorView();int[] loc=new int[2];slot.surface.getLocationOnScreen(loc);
    return slot.taskId+":"+LiveTaskContent.layerId(leash)+":"+LiveTaskContent.layerId(plate)+":"+buffer
      +":"+slot.surface.getWidth()+"x"+slot.surface.getHeight()+":"+Arrays.toString(loc)
@@ -270,6 +294,7 @@ final class PortraitPoseController {
       if(!key.equals(poseSurfaceKey(slot))){awaitCoverPoseCommit(slot);return;}
       poseReported=true;logHeldLayer("defer_live_pose_committed");
       Bundle done=new Bundle();done.putInt(HandoffProtocol.TASK,slot.sourceTaskId);
+      if(liveRecents)done.putInt(HandoffProtocol.CONTAINER,host.taskId());
       done.putParcelable(HandoffProtocol.POSE_REPLY,HandoffProtocol.transport(poseReply));
       if(host.handoffReady()==null||poseReply==null){host.failHandoff(slot,"pose_reply_missing");return;}
       host.handoffReady().send(HandoffProtocol.POSE_COMMITTED,done);
@@ -323,11 +348,30 @@ final class PortraitPoseController {
  }
  void revealPortraitPose(WorkbenchSlot slot,String key){
   if(poseBridge==null){host.failHandoff(slot,"pose_bridge_missing");return;}
+  if(liveRecents){
+   if(!host.liveRecentsTargetMatches(slot,heldCorners,heldStage,heldRadius)){
+    host.failHandoff(slot,"live_recents_final_target_changed");return;
+   }
+   ValueAnimator fade=ValueAnimator.ofFloat(0,1);liveRecentsReveal=fade;
+   fade.setDuration(MotionSpec.CROSS_FADE_MS);fade.setInterpolator(null);
+   fade.addUpdateListener(a->poseBridge.setAlpha(EntranceMotion.revealAlpha((float)a.getAnimatedValue())));
+   fade.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
+    if(liveRecentsReveal!=a)return;
+    liveRecentsReveal=null;commitReveal(slot,key);
+   }});
+   Log.i(TAG,"handoff_reveal_alpha curve=smooth_alpha duration_ms="+MotionSpec.CROSS_FADE_MS);
+   fade.start();return;
+  }
+  commitReveal(slot,key);
+ }
+ private void commitReveal(WorkbenchSlot slot,String key){
+  if(poseBridge==null)return;
   poseBridge.setVisibility(View.INVISIBLE);
   host.stage().getViewTreeObserver().registerFrameCommitCallback(()->handler.post(()->{
    if(!deferPortrait||host.closing()||host.stopped()||slot.released)return;
-   if(!key.equals(host.handoffLayoutKey())||poseSurfaceKey(slot)==null){
-    if(poseBridge!=null)poseBridge.setVisibility(View.VISIBLE);
+   if(!key.equals(host.handoffLayoutKey())||poseSurfaceKey(slot)==null
+     ||(liveRecents&&!host.liveRecentsTargetMatches(slot,heldCorners,heldStage,heldRadius))){
+    if(poseBridge!=null){poseBridge.setAlpha(1f);poseBridge.setVisibility(View.VISIBLE);}
     commitPortraitPose(slot);return;
    }
    clearPoseBridge("live_frame_committed");deferPortrait=false;restorePoseClipping();logHeldLayer("defer_portrait_live_committed");

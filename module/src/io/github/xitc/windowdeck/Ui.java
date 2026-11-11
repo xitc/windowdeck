@@ -21,6 +21,14 @@ final class Ui {
  }
  static TextView text(Context c,String s,int size,int color){TextView v=new TextView(c);v.setText(s);v.setTextSize(size);v.setTextColor(color);return v;}
  static Button button(Context c,String s){Button b=new Button(c);b.setText(s);b.setAllCaps(false);b.setTextSize(14);b.setMinWidth(0);b.setMinimumWidth(0);b.setMinHeight(0);b.setMinimumHeight(0);b.setStateListAnimator(null);b.setElevation(0);return b;}
+ static Button addCard(Context context){
+  Button add=button(context,"＋");
+  add.setTextSize(28);add.setTextColor(FROST_PLUS);add.setGravity(Gravity.CENTER);
+  add.setIncludeFontPadding(false);add.setPadding(0,0,0,0);add.setContentDescription("添加应用");
+  int radius=dp(context,SIDE_RADIUS);
+  add.setBackground(frost(radius));round(add,radius);
+  return add;
+ }
  static void darkSystemBars(Activity a){
   Window w=a.getWindow();
   w.getDecorView();

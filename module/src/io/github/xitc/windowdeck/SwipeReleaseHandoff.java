@@ -108,6 +108,11 @@ final class SwipeReleaseHandoff {
    capturedSource.leash.release();capturedSource.closeVisibility();capturedSource=null;
    Log.i(TAG,"swipe_portrait_content skipped=unsupported_source_geometry");
   }
+  if(!corner&&rotation==0&&portraitRequested&&capturedSource!=null
+    &&PortraitRecentsHandoff.start(panel,handler,manager,gestureController,candidate,capturedSource,releaseRect,releaseCrop,releaseRadius,released)){
+   s.motion.resetExpansion();if(s.zone()!=null)s.zone().setVisibility(View.GONE);s.candidate=null;LauncherSwipeHook.deactivateMid();
+   p.setResult(null);return;
+  }
   final SwipeSourceFrame.Capture capture=capturedSource;
   final boolean portraitPixels=capture!=null&&!deferPortrait;
   final long hostWait=landscape?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
@@ -370,19 +375,19 @@ final class SwipeReleaseHandoff {
  }
 
  /** Clear {@code willFinishToHome} so finish(toHome=false) takes the return-to-app branch and shows the pausing task. */
- private static void keepSourceVisible(Object controller){
-  if(controller==null){Log.w(TAG,"swipe_keep_source skipped=no_controller");return;}
+ static boolean keepSourceVisible(Object controller){
+  if(controller==null){Log.w(TAG,"swipe_keep_source skipped=no_controller");return false;}
   try{
    XposedHelpers.callMethod(controller,RomSymbols.RECENTS_WILL_FINISH_TO_HOME,false);
    // JADX's f19633k/f19634l are reconstructed names, not runtime field contracts.
    // The Shell finish log is authoritative for the actual remote state.
-   Log.i(TAG,"swipe_keep_source requested=false remote_state=unverified");
-  }catch(Throwable e){Log.w(TAG,"swipe_keep_source_failed",e);}
+   Log.i(TAG,"swipe_keep_source requested=false remote_state=unverified");return true;
+  }catch(Throwable e){Log.w(TAG,"swipe_keep_source_failed",e);return false;}
  }
 
  /** C17 skips return-to-app when willFinishToHome is true. The finish request itself
   *  remains toHome=false, so Shell retains the opening host without reordering Home. */
- private static boolean commitDestination(Object controller){
+ static boolean commitDestination(Object controller){
   if(controller==null){Log.w(TAG,"swipe_commit_destination_failed reason=no_controller");return false;}
   try{
    XposedHelpers.callMethod(controller,RomSymbols.RECENTS_WILL_FINISH_TO_HOME,true);
@@ -395,16 +400,7 @@ final class SwipeReleaseHandoff {
   Log.i(TAG,"swipe_handoff_begin ms="+(SystemClock.uptimeMillis()-released));
   if(candidate.container<0){
    try{
-    Intent create=new Intent().setComponent(new ComponentName("com.oplus.pscanvas","com.oplus.pscanvas.canvasmode.canvas.ContainerActivity"));
-    create.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION);
-    create.putExtra("windowdeck_workbench_v1",true);
-    create.putExtra("windowdeck_create_source_task",candidate.task);
-    create.putExtra("windowdeck_create_source_user",candidate.user);
-    create.putExtra("windowdeck_handoff_ready",ready);
-    if(portraitWait!=null)create.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
-    if(deferPortrait){create.putExtra("windowdeck_defer_portrait",true);create.putExtra("windowdeck_defer_rotation",sourceRotation);create.putExtra("windowdeck_wait_source_release",true);}
-    context.startActivity(create,TaskFrontBinder.handoffOptions(context));
-    Log.i(TAG,"swipe_create_direct task="+candidate.task+" ms="+(SystemClock.uptimeMillis()-released));
+    launchContainer(context,candidate,released,ready,deferPortrait,sourceRotation,portraitWait,false);
     return;
    }catch(Throwable e){Log.w(TAG,"swipe_create_direct_failed",e);}
   }else try{
@@ -449,6 +445,20 @@ final class SwipeReleaseHandoff {
    return;
   }catch(Throwable e){Log.w(TAG,"swipe_front_or_add_direct_failed",e);}
   finish.run();dispatchRootHandoff(context,candidate);
+ }
+ static void launchContainer(Context context,SwipeCandidate.Match candidate,long released,android.os.ResultReceiver ready,
+   boolean deferPortrait,int sourceRotation,PortraitHandoffDeadline portraitWait,boolean liveRecents) throws Exception {
+  Intent create=new Intent().setComponent(new ComponentName("com.oplus.pscanvas","com.oplus.pscanvas.canvasmode.canvas.ContainerActivity"));
+  create.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION);
+  create.putExtra("windowdeck_workbench_v1",true);
+  create.putExtra("windowdeck_create_source_task",candidate.task);
+  create.putExtra("windowdeck_create_source_user",candidate.user);
+  create.putExtra("windowdeck_handoff_ready",ready);
+  if(portraitWait!=null)create.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
+  if(deferPortrait){create.putExtra("windowdeck_defer_portrait",true);create.putExtra("windowdeck_defer_rotation",sourceRotation);create.putExtra("windowdeck_wait_source_release",true);}
+  if(liveRecents)create.putExtra(HandoffProtocol.LIVE_RECENTS,true);
+  context.startActivity(create,TaskFrontBinder.handoffOptions(context));
+  Log.i(TAG,"swipe_create_direct task="+candidate.task+" ms="+(SystemClock.uptimeMillis()-released));
  }
  private static void dispatchRootHandoff(Context context,SwipeCandidate.Match candidate){
   Bundle message=new Bundle();message.putInt("taskId",candidate.task);message.putInt("userId",candidate.user);message.putInt("containerTaskId",candidate.container);

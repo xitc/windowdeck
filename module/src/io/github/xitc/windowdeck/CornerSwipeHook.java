@@ -74,7 +74,7 @@ final class CornerSwipeHook {
     @Override protected void afterHookedMethod(MethodHookParam p){try{if(current!=null&&current.consumer==p.thisObject)bind(current);}catch(Throwable e){fail("start",e);}}
    }));
    hooks.add(XposedBridge.hookMethod(contract.build,new XC_MethodHook(){
-    @Override protected void afterHookedMethod(MethodHookParam p){try{draw(p);}catch(Throwable e){fail("frame",e);}}
+    @Override protected void afterHookedMethod(MethodHookParam p){try{if(!PortraitRecentsHandoff.retainPose(p.thisObject,p.args[0],p.args[1],contract))draw(p);}catch(Throwable e){fail("frame",e);}}
    }));
    hooks.add(XposedBridge.hookMethod(contract.crop,new XC_MethodHook(){
     @Override protected void afterHookedMethod(MethodHookParam p){Session s=owner(p.thisObject);if(s!=null)p.setResult(new RectF(0,0,s.gesture.width,s.gesture.height));}

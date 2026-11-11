@@ -41,7 +41,10 @@ public final class WorkbenchStateProvider extends ContentProvider {
   }
   if(MainWindowSettings.PREF.equals(method)){
    if(!host&&!launcher)return null;
-   Bundle answer=new Bundle();answer.putInt(MainWindowSettings.PREF,MainWindowSettings.local(getContext()));return answer;
+   Bundle answer=new Bundle();
+   answer.putInt(MainWindowSettings.PREF,MainWindowSettings.local(getContext()));
+   answer.putBoolean(SideWindowSettings.PREF,SideWindowSettings.local(getContext()));
+   return answer;
   }
   if(CornerEntrySettings.PREF.equals(method)){
    if(!launcher)return null;

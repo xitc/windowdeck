@@ -88,7 +88,7 @@ final class HandoffRail {
  private void chrome(Canvas canvas,View view){
   if(view==null||view.getVisibility()!=View.VISIBLE)return;
   int[] where=new int[2];view.getLocationOnScreen(where);int save=canvas.save();
-  canvas.translate(where[0]-origin[0],where[1]-origin[1]);view.draw(canvas);canvas.restoreToCount(save);
+  canvas.translate(where[0]-origin[0],where[1]-origin[1]);stage.drawChrome(canvas,view);canvas.restoreToCount(save);
  }
  private void releaseCopies(){for(int i=0;i<copies.length;i++)if(copies[i]!=null){copies[i].release();copies[i]=null;}}
  void cancel(){cancelled=true;frame=null;}

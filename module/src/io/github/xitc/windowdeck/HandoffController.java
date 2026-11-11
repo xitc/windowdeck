@@ -44,6 +44,8 @@ final class HandoffController {
   Context context();
   void createWindow(WorkbenchSlot slot);
   boolean deferPortrait();
+  boolean liveRecentsBootstrap();
+  void closeWorkbench();
   Display display();
   boolean focusPrimary(String reason);
   boolean hangQuiet();
@@ -248,12 +250,14 @@ void watchHandoffDeadline(WorkbenchSlot expected){
  },Math.max(0L,deadline-SystemClock.uptimeMillis()));
 }
 void failHandoff(WorkbenchSlot expected,String reason){
+ boolean closeBootstrap=host.liveRecentsBootstrap();
  if(host.sourceRelease()!=null)host.sourceRelease().cancel();
  if(host.deferPortrait()){host.clearHeldPose();host.setDeferPortrait(false);host.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);}
  if(entrance.pending()!=expected||!gestureHandoff)return;
  Log.w(TAG,"handoff_result result="+reason+" task="+expected.sourceTaskId);
  android.os.ResultReceiver reply=handoffReady;handoffReady=null;gestureHandoff=false;
  abandonEntrance(expected);cancelHandoffPresentation();if(reply!=null)reply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
+ if(closeBootstrap&&!host.closing())host.closeWorkbench();
 }
 void requestEntranceFrame(){
   if(host.deferPortrait())return; // The live-pose path owns layout until rotation/final fit commit.

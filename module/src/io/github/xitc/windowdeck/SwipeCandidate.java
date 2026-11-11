@@ -45,13 +45,16 @@ final class SwipeCandidate {
   return match(source,tasks,stateKnown,stateContainer,stateCount,null);
  }
  static Match match(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount,SwipeMembership members){
+  return match(source,tasks,stateKnown,stateContainer,stateCount,members,-1);
+ }
+ static Match match(int source,Task[] tasks,boolean stateKnown,int stateContainer,int stateCount,SwipeMembership members,int retired){
   if(source<0||tasks==null)return null;
   Task sourceInfo=null,containerInfo=null;boolean otherCanvas=false;
   for(Task info:tasks){
    if(info==null)continue;
    if(info.id==source)sourceInfo=info;
    if(info.baseCanvas()&&!info.workbench)otherCanvas=true;
-   if(info.workbench&&info.topCanvas())containerInfo=info;
+   if(info.workbench&&info.topCanvas()&&!(info.id==retired&&stateKnown&&info.id==stateContainer&&stateCount==0))containerInfo=info;
   }
   if(containerInfo==null&&otherCanvas)return null;
   if(sourceInfo==null||sourceInfo.basePackage==null||sourceInfo.topPackage==null)return null;

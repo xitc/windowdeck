@@ -3,16 +3,19 @@ package io.github.xitc.windowdeck;
 import android.content.Context;
 import android.graphics.*;
 import android.view.View;
+import java.util.function.Consumer;
 
 /** Task snapshot drawn in exactly the same presentation coordinates as its leash. */
 final class RecoveryCover extends View {
  private Bitmap bitmap;
  private Bitmap backdrop;
  private boolean fullScene;
+ private Consumer<Canvas> backdropChrome;
  private final Matrix bitmapMap=new Matrix();
  private final Path outline=new Path();
  private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
  RecoveryCover(Context context){super(context);setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);}
+ void setBackdropChrome(Consumer<Canvas> draw){backdropChrome=draw;invalidate();}
  void setBitmap(Bitmap value){bitmap=value;invalidate();}
  void setBackdrop(Bitmap value){
   if(!fullScene||backdrop!=value){fullScene=true;backdrop=value;invalidate();}
@@ -44,6 +47,7 @@ final class RecoveryCover extends View {
    canvas.drawColor(Ui.CHROME);
    if(backdrop!=null&&!backdrop.isRecycled())canvas.drawBitmap(backdrop,null,new RectF(0,0,getWidth(),getHeight()),paint);
   }
+  if(backdropChrome!=null)backdropChrome.accept(canvas);
   int save=canvas.save();canvas.clipPath(outline);
   canvas.drawColor(Ui.CHROME);
   if(bitmap!=null&&!bitmap.isRecycled())canvas.drawBitmap(bitmap,bitmapMap,paint);

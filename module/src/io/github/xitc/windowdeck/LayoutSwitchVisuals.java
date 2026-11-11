@@ -13,7 +13,8 @@ import java.util.ArrayList;
 
 /** Owns only temporary old-rail pixels and a main-card background-blur effect layer. */
 final class LayoutSwitchVisuals implements AutoCloseable {
- private final FrameLayout stage,ghosts;
+ private final CanvasStage stage;
+ private final FrameLayout ghosts;
  private final ArrayList<Bitmap> owned=new ArrayList<>();
  private final int oldMode;
  private final float oldExtent;
@@ -21,7 +22,7 @@ final class LayoutSwitchVisuals implements AutoCloseable {
  private Method setBlur,setCorner;
  private boolean blurUnavailable,closed;
  private int radius=LayoutSwitchMotion.BLUR_RADIUS;
- LayoutSwitchVisuals(FrameLayout stage,int oldMode,float oldExtent){
+ LayoutSwitchVisuals(CanvasStage stage,int oldMode,float oldExtent){
   this.stage=stage;this.oldMode=oldMode;this.oldExtent=oldExtent;
   ghosts=new FrameLayout(stage.getContext());ghosts.setClipChildren(false);ghosts.setClipToPadding(false);
   ghosts.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
@@ -36,11 +37,13 @@ final class LayoutSwitchVisuals implements AutoCloseable {
  }
  void chrome(View source,int left,int top){
   if(source==null||source.getVisibility()!=View.VISIBLE||source.getWidth()<1||source.getHeight()<1)return;
-  Bitmap bitmap=Bitmap.createBitmap(source.getWidth(),source.getHeight(),Bitmap.Config.ARGB_8888);
-  owned.add(bitmap);source.draw(new Canvas(bitmap));
+  int[] bounds=stage.chromeBounds(source);
+  Bitmap bitmap=Bitmap.createBitmap(bounds[2]-bounds[0],bounds[3]-bounds[1],Bitmap.Config.ARGB_8888);
+  Canvas canvas=new Canvas(bitmap);canvas.translate(-bounds[0],-bounds[1]);
+  owned.add(bitmap);stage.drawChrome(canvas,source);
   ImageView copy=new ImageView(stage.getContext());copy.setImageBitmap(bitmap);
   FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(bitmap.getWidth(),bitmap.getHeight());
-  lp.leftMargin=left;lp.topMargin=top;ghosts.addView(copy,lp);
+  lp.leftMargin=left+bounds[0];lp.topMargin=top+bounds[1];ghosts.addView(copy,lp);
  }
  void attach(){
   stage.getOverlay().add(ghosts);
