@@ -10,10 +10,21 @@ import android.util.Log;
 
 /** Narrow cross-process state and handoff bridge for the host and launcher. */
 public final class WorkbenchStateProvider extends ContentProvider {
+ private final HandoffDiagnostics.Store diagnostics=new HandoffDiagnostics.Store();
  public boolean onCreate(){return true;}
  @Override public Bundle call(String method,String arg,Bundle extras){
   boolean launcher=false,host=false;String[] packages=getContext().getPackageManager().getPackagesForUid(Binder.getCallingUid());
   if(packages!=null)for(String pkg:packages){if("com.android.launcher".equals(pkg))launcher=true;if("com.oplus.pscanvas".equals(pkg))host=true;}
+  if(HandoffDiagnostics.EVENT.equals(method)||HandoffDiagnostics.PROBE_RESULT.equals(method)){
+   if(launcher!=host){
+    String role=launcher?"Launcher":"工作台宿主";
+    if(HandoffDiagnostics.EVENT.equals(method))diagnostics.add(role,extras);
+    else diagnostics.observe(role,extras);
+   }
+   return Bundle.EMPTY;
+  }
+  if(HandoffDiagnostics.START.equals(method)||HandoffDiagnostics.STATUS.equals(method)||HandoffDiagnostics.STOP.equals(method))
+   return Binder.getCallingUid()==android.os.Process.myUid()?diagnostics.control(method):null;
   android.content.SharedPreferences prefs=getContext().getSharedPreferences("workbench_state",0);
   if("publish".equals(method)){
    if(!host||extras==null)return null;
@@ -55,7 +66,7 @@ public final class WorkbenchStateProvider extends ContentProvider {
    if(extras==null)return null;
    int task=extras.getInt("taskId",-1),user=extras.getInt("userId",-1),container=extras.getInt("containerTaskId",-1);
    if(task<0||user<0||container < -1||task==container||(container>=0&&(prefs.getInt("container",-1)!=container||prefs.getInt("count",0)<1||prefs.getInt("count",0)>=Caps.MAX_TASKS)))return null;
-   LauncherIngressReceiver.startTask(getContext(),task,user,container,null);return Bundle.EMPTY;
+   LauncherIngressReceiver.startTask(getContext(),task,user,container,extras,null);return Bundle.EMPTY;
   }
   if(!"state".equals(method))return null;
   Bundle state=new Bundle();state.putInt("container",prefs.getInt("container",-1));state.putInt("count",prefs.getInt("count",0));return state;

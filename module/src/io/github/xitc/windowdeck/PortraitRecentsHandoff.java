@@ -26,47 +26,72 @@ import android.view.WindowManager;
 import de.robv.android.xposed.XposedHelpers;
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 
 /** Owns the matching Recents leash until the portrait host has committed its bootstrap frame. */
 final class PortraitRecentsHandoff {
  private static final String TAG="WindowDeck";
  private static volatile PortraitRecentsHandoff poseOwner;
 
+ interface Recents {
+  Object active() throws Exception;
+  boolean keepSourceVisible() throws Exception;
+  boolean commitDestination() throws Exception;
+  void finish(Runnable completed) throws Exception;
+ }
+
  private static final class SourcePose {
   final Matrix transform=new Matrix();
   final Rect crop;
-  final float radius;
-  SourcePose(Rect crop,float sx,float sy,float x,float y,float radius){
+  final float radius,progress;
+  SourcePose(Rect crop,float sx,float sy,float x,float y,float radius,float progress){
    transform.setScale(sx,sy);transform.postTranslate(x,y);
-   this.crop=crop;this.radius=radius;
+   this.crop=crop;this.radius=radius;this.progress=progress;
   }
+ }
+
+ static boolean ownsSimulator(Object simulator){
+  PortraitRecentsHandoff run=poseOwner;
+  return run!=null&&simulator==run.simulator;
  }
 
  /** Native simulator callbacks can still emit the last finger pose during the release. */
  static boolean retainPose(Object simulator,Object builder,Object target,CornerGestureContract contract) throws Exception {
   PortraitRecentsHandoff run=poseOwner;
-  if(run==null||simulator!=run.simulator||target==null||!run.ownsSource())return false;
-  SourcePose pose=run.ownedPose;
-  if(pose==null||XposedHelpers.getIntField(target,RomSymbols.SOURCE_TASK)!=run.candidate.task)return false;
+  if(run==null||simulator!=run.simulator||target==null)return false;
   SurfaceControl leash=(SurfaceControl)XposedHelpers.getObjectField(target,RomSymbols.SOURCE_LEASH);
-  if(LiveTaskContent.layerId(leash)!=run.source.layer)return false;
+  return retainPose(simulator,builder,XposedHelpers.getIntField(target,RomSymbols.SOURCE_TASK),leash,
+    contract.matrix,contract.clip,contract.corners);
+ }
+
+ static boolean retainPose(Object simulator,Object builder,int task,SurfaceControl leash,Method matrix,Method clip,Method corners) throws Exception {
+  PortraitRecentsHandoff run=poseOwner;
+  if(run==null||simulator!=run.simulator||task!=run.candidate.task||!run.ownsSource()
+    ||LiveTaskContent.layerId(leash)!=run.source.layer)return false;
+  SourcePose pose=run.ownedPose;
+  if(pose==null)return false;
   // Builder methods may retain their inputs until submission.
-  contract.matrix.invoke(builder,new Matrix(pose.transform));
-  contract.clip.invoke(builder,new Rect(pose.crop));
-  contract.corners.invoke(builder,pose.radius,2.7f);
+  matrix.invoke(builder,new Matrix(pose.transform));
+  clip.invoke(builder,new Rect(pose.crop));
+  corners.invoke(builder,pose.radius,2.7f);
   if(!run.nativePoseLogged){
    run.nativePoseLogged=true;
    Log.i(TAG,"portrait_recents_native_pose_retained task="+run.candidate.task+" ms="+run.elapsed());
   }
+  if(pose.progress>0&&pose.progress<1&&run.diagnosticNativePose.compareAndSet(false,true))
+   run.diagnostics.record(HandoffDiagnostics.Event.NATIVE_POSE_INTERCEPTED,"matching_simulator_during_motion");
   return true;
  }
 
+ private final java.util.concurrent.atomic.AtomicBoolean diagnosticNativePose=new java.util.concurrent.atomic.AtomicBoolean();
  private final Handler main=new Handler(Looper.getMainLooper());
  private final SourceRelease release=new SourceRelease();
  private final Runnable watchdog=this::watchDeadline;
  private final Context context;
  private final Display display;
- private final Object manager,controller,simulator;
+ private final Object controller,simulator;
+ private final Recents recents;
+ private final boolean launcher175;
  private volatile SourcePose ownedPose;
  private boolean nativePoseLogged;
  private final SwipeCandidate.Match candidate;
@@ -75,13 +100,16 @@ final class PortraitRecentsHandoff {
  private final Rect fromCrop;
  private final int[] target,addBox;
  private final float[] addQuad;
- private float progress;
+ private float progress,wallpaperStartTime;
  private final float fromRadius,toRadius;
  private final Method matrix,radius;
  private final long released;
+ private final HandoffDiagnostics diagnostics;
  private final PortraitHandoffDeadline deadline;
  private ValueAnimator motion;
- private Bitmap snapshot;
+ private Bitmap snapshot,wallpaper;
+ private CompletableFuture<Bitmap> wallpaperPreparation;
+ private boolean wallpaperDrawn,terminalWallpaper;
  private HandoffCover terminalCover,addPreview;
  private ResultReceiver hostReply;
  private int container=-1;
@@ -89,9 +117,31 @@ final class PortraitRecentsHandoff {
  private boolean hostLaunchPosted,terminalCommitted,terminalCaptureStarted,terminalCoverReady,poseSent,finishRequested,closed;
 
  static boolean start(View panel,Object handler,Object manager,Object controller,SwipeCandidate.Match candidate,
-   SwipeSourceFrame.Capture source,RectF from,float[] crop,float radius,long released){
+   SwipeSourceFrame.Capture source,RectF from,float[] crop,float radius,long released,HandoffDiagnostics diagnostics){
+  if(!CornerSwipeHook.available())return false;
+  try{
+   Object[] handles=(Object[])XposedHelpers.getObjectField(handler,RomSymbols.SOURCE_HANDLES);
+   if(handles==null||handles.length!=1)return false;
+   Object simulator=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_SIMULATOR);
+   LauncherSwipeHook.State gesture=LauncherSwipeHook.stateOf(panel);
+   return start(panel,simulator,controller,candidate,source,from,crop,radius,released,diagnostics,
+     gesture==null?null:gesture.portraitWallpaper,false,()->LauncherSwipeHook.claimHandoff(handler,true),new Recents(){
+      public Object active(){return XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_CONTROLLER);}
+      public boolean keepSourceVisible(){return SwipeReleaseHandoff.keepSourceVisible(controller);}
+      public boolean commitDestination(){return SwipeReleaseHandoff.commitDestination(controller);}
+      public void finish(Runnable completed){
+       XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_FINISH_RECENTS,false);
+       if(completed!=null)XposedHelpers.callMethod(controller,RomSymbols.RECENTS_FINISH_CALLBACK,false,completed,false,null,true);
+      }
+     });
+  }catch(Exception e){Log.w(TAG,"portrait_recents_contract_failed",e);return false;}
+ }
+
+ static boolean start(View panel,Object simulator,Object controller,SwipeCandidate.Match candidate,SwipeSourceFrame.Capture source,
+   RectF from,float[] crop,float radius,long released,HandoffDiagnostics diagnostics,CompletableFuture<Bitmap> wallpaper,
+   boolean launcher175,java.util.function.BooleanSupplier claim,Recents recents){
   Display display=panel.getDisplay();
-  if(!CornerSwipeHook.available()||poseOwner!=null||controller==null||!Float.isFinite(radius)||radius<0||display==null||display.getRotation()!=0)return false;
+  if(poseOwner!=null||simulator==null||controller==null||!Float.isFinite(radius)||radius<0||display==null||display.getRotation()!=0)return false;
   try{
    WindowManager wm=panel.getContext().getSystemService(WindowManager.class);
    WindowInsets insets=panel.getRootWindowInsets();
@@ -115,10 +165,6 @@ final class PortraitRecentsHandoff {
    Method matrix=SurfaceControl.Transaction.class.getDeclaredMethod("setMatrix",SurfaceControl.class,float.class,float.class,float.class,float.class);
    Method round=SurfaceControl.Transaction.class.getDeclaredMethod("setCornerRadius",SurfaceControl.class,float.class);
    matrix.setAccessible(true);round.setAccessible(true);
-   Object[] handles=(Object[])XposedHelpers.getObjectField(handler,RomSymbols.SOURCE_HANDLES);
-   if(handles==null||handles.length!=1)return false;
-   Object simulator=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_SIMULATOR);
-   if(simulator==null)return false;
    int[] add=LandscapeEntrance.screenBox(layout.add,bars.left,top);
    // A transparent preview is above Recents; leave any overlapping chrome to the host.
    float[] addQuad=null;
@@ -129,8 +175,14 @@ final class PortraitRecentsHandoff {
         true,add[0],add[1],source.width,source.height,PaneLayout.leftRightSideW(stageW,gap)):
       new float[]{0,0,w,0,w,h,0,h};
    }
-   PortraitRecentsHandoff run=new PortraitRecentsHandoff(context,display,manager,controller,simulator,candidate,source,from,crop,radius,target,add,addQuad,matrix,round,released);
-   if(!LauncherSwipeHook.claimHandoff(handler,true))return false;
+   if(recents.active()!=controller||!claim.getAsBoolean())return false;
+   if(diagnostics==null){
+    diagnostics=HandoffDiagnostics.begin(context.getApplicationContext(),released);
+    diagnostics.geometry(HandoffDiagnostics.Event.SOURCE_GEOMETRY,from);
+   }
+   PortraitRecentsHandoff run=new PortraitRecentsHandoff(context,display,controller,simulator,candidate,source,from,crop,radius,target,add,addQuad,matrix,round,released,diagnostics,recents,launcher175);
+   run.wallpaperPreparation=wallpaper;
+   diagnostics.record(HandoffDiagnostics.Event.PATH,launcher175?"launcher175_live_recents":"live_recents");
    try{run.begin();}
    catch(Throwable e){Log.w(TAG,"portrait_recents_begin_failed",e);run.finish(HandoffProtocol.FAILED,"source_start");}
    return true;
@@ -144,17 +196,19 @@ final class PortraitRecentsHandoff {
   }catch(Exception e){return false;}
  }
 
- private PortraitRecentsHandoff(Context context,Display display,Object manager,Object controller,Object simulator,SwipeCandidate.Match candidate,
-   SwipeSourceFrame.Capture source,RectF from,float[] crop,float fromRadius,int[] target,int[] addBox,float[] addQuad,Method matrix,Method radius,long released){
-  this.context=context;this.display=display;this.manager=manager;this.controller=controller;this.simulator=simulator;
+ private PortraitRecentsHandoff(Context context,Display display,Object controller,Object simulator,SwipeCandidate.Match candidate,
+   SwipeSourceFrame.Capture source,RectF from,float[] crop,float fromRadius,int[] target,int[] addBox,float[] addQuad,Method matrix,Method radius,long released,HandoffDiagnostics diagnostics,Recents recents,boolean launcher175){
+  this.context=context;this.display=display;this.controller=controller;this.simulator=simulator;
+  this.recents=recents;this.launcher175=launcher175;
   this.candidate=candidate;this.source=source;
   this.from=new RectF(from);fromCrop=new Rect(Math.round(crop[0]),Math.round(crop[1]),Math.round(crop[2]),Math.round(crop[3]));
   this.fromRadius=fromRadius;this.target=target;this.addBox=addBox;this.addQuad=addQuad;toRadius=Ui.dp(context,Ui.MAIN_RADIUS);
-  this.matrix=matrix;this.radius=radius;this.released=released;
+  this.matrix=matrix;this.radius=radius;this.diagnostics=diagnostics;this.released=released;
   deadline=new PortraitHandoffDeadline(candidate.task,released,MotionSpec.COVER_TIMEOUT_MS);
  }
 
- private void begin(){
+ private void begin() throws Exception{
+  diagnostics.geometry(HandoffDiagnostics.Event.TARGET_GEOMETRY,new RectF(target[0],target[1],target[2],target[3]));
   // Source pixels are captured in task coordinates, independent of the moving parent leash.
   Thread captureThread=new Thread(()->{
    Bitmap pixels=null;
@@ -173,9 +227,13 @@ final class PortraitRecentsHandoff {
   },"windowdeck-recents-pixels");
   try{captureThread.start();}
   catch(Throwable e){source.leash.release();throw e;}
-  if(!SwipeReleaseHandoff.keepSourceVisible(controller)){finish(HandoffProtocol.FAILED,"source_visibility");return;}
+  if(!recents.keepSourceVisible()){finish(HandoffProtocol.FAILED,"source_visibility");return;}
   ownedPose=sourcePose(0);
   poseOwner=this;
+  if(wallpaperPreparation!=null)wallpaperPreparation.whenComplete((bitmap,error)->main.post(()->{
+   if(error!=null){Log.w(TAG,"portrait_recents_wallpaper_prepare_failed",error);return;}
+   if(!closed&&motion!=null)wallpaper=bitmap;
+  }));
   ValueAnimator run=ValueAnimator.ofFloat(0,1);
   motion=run;run.setDuration(MotionSpec.PORTRAIT_HANDOFF_MS);run.setInterpolator(null);
   run.addUpdateListener(a->{
@@ -184,7 +242,7 @@ final class PortraitRecentsHandoff {
     if(!ownsSource()){finish(HandoffProtocol.FAILED,"source_changed");return;}
     float time=(float)a.getAnimatedValue();
     if(time>0&&time<1){
-     writeFrame(EntranceMotion.c17ZoomFraction(time),false);
+     writeFrame(EntranceMotion.c17ZoomFraction(time),time,false);
      launchAfterFirstFrame();
     }
    }catch(Exception e){Log.w(TAG,"portrait_recents_frame_failed",e);finish(HandoffProtocol.FAILED,"source_frame");}
@@ -194,7 +252,7 @@ final class PortraitRecentsHandoff {
    motion=null;
    try{
     if(!ownsSource()){finish(HandoffProtocol.FAILED,"source_changed");return;}
-    writeFrame(1,true);
+    writeFrame(1,1,true);
     launchAfterFirstFrame();
    }catch(Exception e){Log.w(TAG,"portrait_recents_final_frame_failed",e);finish(HandoffProtocol.FAILED,"source_final_frame");}
   }});
@@ -208,10 +266,11 @@ final class PortraitRecentsHandoff {
  private void launchAfterFirstFrame(){
   if(hostLaunchPosted)return;
   hostLaunchPosted=true;
+  diagnostics.record(HandoffDiagnostics.Event.FIRST_MOTION,"recents_transaction_submitted");
   Log.i(TAG,"portrait_recents_first_frame_submitted task="+candidate.task+" ms="+elapsed());
   main.post(()->{
    if(closed)return;
-   if(addQuad!=null){
+   if(addQuad!=null||wallpaperPreparation!=null){
     addPreview=HandoffCover.createAddPreview(context,addBox,addQuad,progress);
     if(!addPreview.isClosed())Log.i(TAG,"portrait_recents_add_preview task="+candidate.task+" ms="+elapsed());
    }
@@ -219,7 +278,7 @@ final class PortraitRecentsHandoff {
     ResultReceiver receiver=new ResultReceiver(main){
      @Override protected void onReceiveResult(int code,Bundle data){receive(code,data);}
     };
-    SwipeReleaseHandoff.launchContainer(context.getApplicationContext(),candidate,released,HandoffProtocol.transport(receiver),true,0,deadline,true);
+    SwipeReleaseHandoff.launchContainer(context.getApplicationContext(),candidate,released,HandoffProtocol.transport(receiver),true,0,deadline,true,diagnostics,false);
    }catch(Throwable e){Log.w(TAG,"portrait_recents_launch_failed",e);finish(HandoffProtocol.FAILED,"host_launch");}
   });
  }
@@ -229,10 +288,10 @@ final class PortraitRecentsHandoff {
     Math.round(blend(fromCrop.right,source.width,f)),Math.round(blend(fromCrop.bottom,source.height,f)));
   float left=blend(from.left,target[0],f),top=blend(from.top,target[1],f);
   float sx=(blend(from.right,target[2],f)-left)/crop.width(),sy=(blend(from.bottom,target[3],f)-top)/crop.height();
-  return new SourcePose(crop,sx,sy,left-crop.left*sx,top-crop.top*sy,blend(fromRadius,toRadius,f)/Math.max(sx,sy));
+  return new SourcePose(crop,sx,sy,left-crop.left*sx,top-crop.top*sy,blend(fromRadius,toRadius,f)/Math.max(sx,sy),f);
  }
 
- private void writeFrame(float f,boolean commit) throws Exception {
+ private void writeFrame(float f,float time,boolean commit) throws Exception {
   SourcePose pose=sourcePose(f);
   ownedPose=pose;
   float[] m=new float[9];pose.transform.getValues(m);
@@ -244,10 +303,33 @@ final class PortraitRecentsHandoff {
    if(commit)tx.addTransactionCommittedListener(main::post,()->{
     if(closed)return;
     terminalCommitted=true;
+    diagnostics.record(HandoffDiagnostics.Event.MOTION_COMMITTED,"recents_terminal");
     Log.i(TAG,"portrait_recents_motion_committed task="+candidate.task+" ms="+elapsed());
     sendPose();
    });
-   tx.apply();
+   RectF card=new RectF(blend(from.left,target[0],f),blend(from.top,target[1],f),
+     blend(from.right,target[2],f),blend(from.bottom,target[3],f));
+   boolean merged=false;
+   if(!closed&&wallpaper!=null&&addPreview!=null&&(wallpaperDrawn||time<0.65f)){
+    float backdropClock=launcher175?f:time;
+    if(!wallpaperDrawn)wallpaperStartTime=backdropClock;
+    float backdropTime=wallpaperStartTime<1?(backdropClock-wallpaperStartTime)/(1-wallpaperStartTime):1;
+    merged=addPreview.drawEntranceWallpaper(wallpaper,source.width,source.height,card,blend(fromRadius,toRadius,f),backdropTime,tx);
+   }
+   if(merged){
+    if(!wallpaperDrawn)Log.i(TAG,"portrait_recents_wallpaper_start task="+candidate.task+" progress="+f);
+    wallpaperDrawn=true;
+   }else{
+    if(wallpaperDrawn){addPreview.removeEntranceWallpaper();wallpaperDrawn=false;wallpaper=null;}
+    tx.apply();
+   }
+   if(!closed&&(!hostLaunchPosted||(progress<0.5f&&f>=0.5f)||commit))
+    diagnostics.geometry(HandoffDiagnostics.Event.MOTION_GEOMETRY,card);
+   if(commit){
+    terminalWallpaper=merged;
+    diagnostics.record(HandoffDiagnostics.Event.WALLPAPER,merged?"shared":"original_fallback");
+    Log.i(TAG,"portrait_recents_wallpaper_terminal shared="+merged+" task="+candidate.task);
+   }
   }
   progress=f;
   if(addPreview!=null)addPreview.updateAddPreview(f);
@@ -278,9 +360,10 @@ final class PortraitRecentsHandoff {
     if(!release.mayEmbed()){finish(HandoffProtocol.FAILED,"early_live");return;}
     if(hostPoseCommitted)return;
     hostPoseCommitted=true;
+    diagnostics.record(HandoffDiagnostics.Event.HOST_PREPARED,"matching_pose_committed");
     closeAddPreview();
     if(terminalCover!=null)terminalCover.fadeTerminal();
-    else hostReply.send(HandoffProtocol.OWNERSHIP,Bundle.EMPTY);
+    else notifyHostOwnership();
     return;
    case HandoffProtocol.READY:
     ResultReceiver complete=data.getParcelable(HandoffProtocol.COMPLETE,ResultReceiver.class);
@@ -299,7 +382,8 @@ final class PortraitRecentsHandoff {
   if(closed||poseSent||!terminalCommitted||snapshot==null||hostReply==null)return;
   if(!ownsSource()){finish(HandoffProtocol.FAILED,"source_changed");return;}
   if(!terminalCoverReady){prepareTerminalCover();return;}
-  try(HardwareBuffer buffer=snapshot.getHardwareBuffer()){
+  try(HardwareBuffer buffer=snapshot.getHardwareBuffer();
+      HardwareBuffer background=terminalWallpaper?wallpaper.getHardwareBuffer():null){
    Bundle pose=new Bundle();
    float l=target[0],t=target[1],r=target[2],b=target[3];
    float[] crop={0,0,source.width,source.height};
@@ -310,6 +394,10 @@ final class PortraitRecentsHandoff {
    pose.putIntArray(HandoffProtocol.POSE_STAGE,new int[]{source.width,source.height,0});
    pose.putFloat(HandoffProtocol.RADIUS,toRadius);
    pose.putParcelable(HandoffProtocol.SNAPSHOT,buffer);
+   if(background!=null){
+    pose.putParcelable(HandoffProtocol.ENTRANCE_WALLPAPER,background);
+    pose.putParcelable(HandoffProtocol.ENTRANCE_WALLPAPER_COLOR,new ParcelableColorSpace(wallpaper.getColorSpace()));
+   }
    pose.putParcelable(HandoffProtocol.SNAPSHOT_COLOR_SPACE,new ParcelableColorSpace(snapshot.getColorSpace()));
    hostReply.send(HandoffProtocol.POSE_QUERY,pose);poseSent=true;
   }catch(Exception e){Log.w(TAG,"portrait_recents_pose_failed",e);finish(HandoffProtocol.FAILED,"pose_send");}
@@ -326,7 +414,7 @@ final class PortraitRecentsHandoff {
    if(closed)return;
    if(!ownsSource()){finish(HandoffProtocol.FAILED,"source_changed");return;}
    int displayId=display.getDisplayId();
-   SurfaceControl previewLayer=addPreview==null?null:addPreview.previewLayer();
+   SurfaceControl previewLayer=addPreview==null||terminalWallpaper?null:addPreview.previewLayer();
    new Thread(()->{
     Bitmap withoutPreview=HandoffCover.captureNow(displayId,previewLayer);
     if(withoutPreview!=null){
@@ -351,7 +439,7 @@ final class PortraitRecentsHandoff {
   cover.onClosed(reason->{
    if(terminalCover!=cover)return;
    terminalCover=null;
-   if(hostPoseCommitted)hostReply.send(HandoffProtocol.OWNERSHIP,Bundle.EMPTY);
+   if(hostPoseCommitted)notifyHostOwnership();
    else if(!poseSent)terminalCoverUnavailable(reason);
   });
   if(cover.isClosed())return;
@@ -366,8 +454,16 @@ final class PortraitRecentsHandoff {
   });
  }
 
+ private void notifyHostOwnership(){
+  diagnostics.record(HandoffDiagnostics.Event.HOST_OWNERSHIP,"ownership_sent");
+  hostReply.send(HandoffProtocol.OWNERSHIP,Bundle.EMPTY);
+ }
+
  private void terminalCoverUnavailable(String reason){
+  diagnostics.record(HandoffDiagnostics.Event.FALLBACK,"terminal_cover_unavailable");
   Log.w(TAG,"portrait_recents_terminal_cover_degraded reason="+reason+" task="+candidate.task);
+  terminalWallpaper=false;
+  if(addPreview!=null)addPreview.removeEntranceWallpaper();
   terminalCoverReady=true;
   sendPose();
  }
@@ -383,14 +479,13 @@ final class PortraitRecentsHandoff {
  }
 
  private void releaseSource(){
-  if(!ownsSource()||!SwipeReleaseHandoff.commitDestination(controller)){finish(HandoffProtocol.FAILED,"source_commit");return;}
-  clearPoseOwner();
   try{
-   XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_FINISH_RECENTS,false);finishRequested=true;
-   XposedHelpers.callMethod(controller,RomSymbols.RECENTS_FINISH_CALLBACK,false,(Runnable)()->main.post(()->{
+   if(!ownsSource()||!recents.commitDestination()){finish(HandoffProtocol.FAILED,"source_commit");return;}
+   clearPoseOwner();
+   recents.finish(()->main.post(()->{
     if(closed)return;
     try{
-     Object current=XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_CONTROLLER);
+     Object current=recents.active();
      if((current!=null&&current!=controller)||!release.completeRelease()){
       finish(HandoffProtocol.FAILED,"source_release_changed");return;
      }
@@ -399,7 +494,8 @@ final class PortraitRecentsHandoff {
      Log.i(TAG,"swipe_source_released task="+candidate.task+" ms="+elapsed());
      hostReply.send(HandoffProtocol.SOURCE_RELEASED,data);
     }catch(Throwable e){Log.w(TAG,"portrait_recents_release_reply_failed",e);finish(HandoffProtocol.FAILED,"source_release_reply");}
-   }),false,null,true);
+   }));
+   finishRequested=true;
   }catch(Throwable e){Log.w(TAG,"portrait_recents_release_failed",e);finish(HandoffProtocol.FAILED,"source_release");}
  }
 
@@ -407,8 +503,8 @@ final class PortraitRecentsHandoff {
   return sameController()&&source.visibility.isValid()&&display.isValid()&&display.getRotation()==0;
  }
  private boolean sameController(){
-  try{return XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_CONTROLLER)==controller;}
-  catch(Throwable e){return false;}
+  try{return recents.active()==controller;}
+  catch(Exception e){return false;}
  }
 
  private void watchDeadline(){
@@ -421,18 +517,18 @@ final class PortraitRecentsHandoff {
 
  private void finish(int result,String reason){
   if(closed)return;
-  closed=true;clearPoseOwner();main.removeCallbacks(watchdog);release.cancel();deadline.cancel();
+  closed=true;diagnostics.record(HandoffDiagnostics.Event.RESULT,reason);clearPoseOwner();main.removeCallbacks(watchdog);release.cancel();deadline.cancel();
   if(motion!=null){motion.cancel();motion=null;}
   if(!finishRequested&&sameController()){
-   try{if(ownsSource())writeFrame(0,false);}
+   try{if(ownsSource())writeFrame(0,0,false);}
    catch(Exception e){Log.w(TAG,"portrait_recents_restore_failed",e);}
-   try{SwipeReleaseHandoff.keepSourceVisible(controller);XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_FINISH_RECENTS,false);}
+   try{recents.keepSourceVisible();recents.finish(null);}
    catch(Throwable e){Log.w(TAG,"portrait_recents_finish_failed",e);}
   }
   source.closeVisibility();
   closeAddPreview();
   closeTerminalCover(reason);
-  HandoffCover.recycle(snapshot);snapshot=null;
+  HandoffCover.recycle(snapshot);snapshot=null;wallpaper=null;wallpaperPreparation=null;
   if(result!=HandoffProtocol.READY&&hostReply!=null)hostReply.send(HandoffProtocol.FAILED,Bundle.EMPTY);
   Log.i(TAG,"portrait_recents_result task="+candidate.task+" result="+result+" reason="+reason+" ms="+elapsed());
   Log.i(TAG,"swipe_handoff_result result="+result+" task="+candidate.task);

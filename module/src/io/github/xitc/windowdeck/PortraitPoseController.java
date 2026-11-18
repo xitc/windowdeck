@@ -150,6 +150,7 @@ final class PortraitPoseController {
   float[] pixels=data.getFloatArray(HandoffProtocol.SNAPSHOT_CROP);
   float[] snapshotSource=snapshot==null||snapshot.isRecycled()?null:DisplayGeometry.snapshotQuad(pixels,snapshot.getWidth(),snapshot.getHeight());
   if(snapshotSource==null){if(snapshot!=null&&!snapshot.isRecycled())snapshot.recycle();host.failHandoff(slot,"pose_snapshot_invalid");return;}
+  if(liveRecents&&host.backdrop()!=null)host.backdrop().adoptPortrait(data);
   heldCorners=corners.clone();heldCrop=crop.clone();heldStage=space.clone();heldRadius=radius;
   poseHeld=true;poseSlot=slot;
   poseBridgeBitmap=snapshot;poseBridgeSource=snapshotSource;
@@ -231,6 +232,7 @@ final class PortraitPoseController {
   poseBridgeFitted=false;
   if(liveRecentsReveal!=null){ValueAnimator fade=liveRecentsReveal;liveRecentsReveal=null;fade.cancel();}
   if(poseBootstrapListener!=null&&host.stage()!=null){host.stage().getViewTreeObserver().removeOnPreDrawListener(poseBootstrapListener);poseBootstrapListener=null;}
+  if(host.backdrop()!=null)host.backdrop().releasePortrait();
   if(poseBridge==null)return;
   RecoveryCover cover=poseBridge;poseBridge=null;
   ((ViewGroup)host.window().getDecorView()).getOverlay().remove(cover);cover.setBitmap(null);cover.setBackdropChrome(null);

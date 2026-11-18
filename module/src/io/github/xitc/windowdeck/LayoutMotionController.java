@@ -101,6 +101,7 @@ final class LayoutMotionController {
  boolean layoutSwitchRail;
  boolean settlingInput;
  int switchGeneration;
+ int switchDiagnosticTask=-1;
  final SwitchPreparation switchPreparation=new SwitchPreparation();
  int switchPrepareToken;
  WorkbenchSlot switchPrepareTarget;
@@ -291,6 +292,7 @@ final class LayoutMotionController {
   final float railExtent=LayoutSwitchMotion.extent(to,session.primary,mode,geometry.add);
   if(rail)for(int i=0;i<current.size();i++)if(i!=session.primary)from[i]=LayoutSwitchMotion.incoming(to[i],mode,railExtent,0);
   final boolean mainSide=oldMain!=null&&!layoutFlip;
+  switchDiagnosticTask=mainSide?current.get(session.primary).taskId:-1;
   final boolean springY=mainSide&&mode==PaneLayout.TOP_BOTTOM;
   final long duration=springY?TopSwapSpring.WATCHDOG_MS:layoutFlip?LayoutSwitchMotion.DURATION_MS:mainSide?MainSideMotion.DURATION_MS:MotionSpec.SWITCH_MS;
   final int generation=++switchGeneration;
@@ -363,6 +365,10 @@ final class LayoutMotionController {
   });
   animation.addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){finishSwitchAnimation(a,generation);}});
   Log.i(TAG,"switch_animation_start generation="+generation+" prepare_token="+switchOriginPrepareToken+" tasks="+taskIds()+" duration_ms="+duration+" layout_flip="+layoutFlip+" ordinary_swap="+mainSide+" geometry="+(springY?"vivo_spring_y":mainSide?"vivo_corner_points":"quad_crop_radius")+" coordinates="+space);
+  if(mainSide){
+   HandoffDiagnostics.timeline(HandoffDiagnostics.Event.MAIN_SIDE_SWITCH,"promoted",switchDiagnosticTask);
+   HandoffDiagnostics.timeline(HandoffDiagnostics.Event.MAIN_SIDE_SWITCH,"demoted",oldMain.taskId);
+  }
   animation.start();
  }
  private void finishSwitchAnimation(Animator owner,int generation){
@@ -476,7 +482,12 @@ final class LayoutMotionController {
   }};host.stage().postOnAnimation(check);
  }
  boolean switching(){return animation!=null||settlingInput;}
- void logSwitch(String result){Log.i(TAG,"switch_metrics result="+result+" generation="+switchGeneration+" primary="+session.primary+" elapsed_ms="+(SystemClock.uptimeMillis()-switchStarted)+" frames="+animationFrames+" max_frame_gap_ms="+maxFrameGap+" resize_calls="+resizeStats.calls()+" resize_wall_us="+(resizeStats.nanos()/1000)+" fit_failures="+motionFitFailures);}
+ void logSwitch(String result){
+  if(switchDiagnosticTask>=0){
+   HandoffDiagnostics.timeline(HandoffDiagnostics.Event.MAIN_SIDE_SWITCH,result,switchDiagnosticTask);
+   switchDiagnosticTask=-1;
+  }
+  Log.i(TAG,"switch_metrics result="+result+" generation="+switchGeneration+" primary="+session.primary+" elapsed_ms="+(SystemClock.uptimeMillis()-switchStarted)+" frames="+animationFrames+" max_frame_gap_ms="+maxFrameGap+" resize_calls="+resizeStats.calls()+" resize_wall_us="+(resizeStats.nanos()/1000)+" fit_failures="+motionFitFailures);}
  void cancelAnimation(){
   cancelAnimation(false);
  }

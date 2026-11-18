@@ -73,6 +73,25 @@ final class LiveWorkbenchState {
   if(task<0)return null;
   Bundle result=new Bundle(state);result.putInt("selectedTask",task);result.putString("selectedPackage",pkg);return result;
  }
+ static int diagnosticTask(String pkg,int user){
+  Bundle state=latest;
+  if(state==null||state.getInt("count",0)<=0)return -1;
+  return ExistingAppPolicy.findTaskForInstance(state.getInt("userId",-1),user,pkg,
+    state.getStringArray("packages"),state.getIntArray("users"),state.getIntArray("tasks"));
+ }
+ static PickerLaunchPolicy.Retry pickerRetry(ComponentName component,int user){
+  Bundle state=latest;
+  if(state==null||state.getInt("count",0)<=0||state.getInt("userId",-1)!=user)return null;
+  return PickerLaunchPolicy.pickerRetry(state.getBoolean("hanging"),state.getInt("containerTaskId",-1),
+    state.getLong("instanceToken"),state.getLong("selectionSession"),user,component.flattenToString());
+ }
+ static int consumedPickerTask(PickerLaunchPolicy.Retry retry){
+  Bundle state=latest;
+  if(state==null||state.getInt("userId",-1)!=retry.user)return -1;
+  return retry.consumedTask(state.getInt("containerTaskId",-1),state.getLong("instanceToken"),state.getInt("count",0),
+    state.getIntArray("tasks"),state.getIntArray("users"),state.getLongArray(PickerLaunchPolicy.PICKER_SESSIONS),
+    state.getStringArray(PickerLaunchPolicy.PICKER_COMPONENTS));
+ }
  static Bundle launch(String pkg,int user){
   Bundle state=latest;if(state==null||!PickerLaunchPolicy.newAppForInstance(state.getBoolean("hanging"),state.getInt("userId",-1),user,
     state.getInt("count",0),state.getBoolean("replacing"),pkg,state.getStringArray("packages"),state.getIntArray("users")))return null;
@@ -86,7 +105,9 @@ final class LiveWorkbenchState {
  static void publish(Context context,Bundle state){
   BroadcastOptions options=BroadcastOptions.makeBasic();options.setShareIdentityEnabled(true);
   context.sendBroadcast(new Intent(UPDATE).setPackage("com.android.launcher").addFlags(Intent.FLAG_RECEIVER_FOREGROUND).putExtras(state),null,options.toBundle());
+  Bundle videoState=new Bundle(state);
+  videoState.remove(PickerLaunchPolicy.PICKER_SESSIONS);videoState.remove(PickerLaunchPolicy.PICKER_COMPONENTS);
   for(String pkg:new String[]{"tv.acfundanmaku.video","com.google.android.youtube"})
-   context.sendBroadcast(new Intent(UPDATE).setPackage(pkg).addFlags(Intent.FLAG_RECEIVER_FOREGROUND).putExtras(state),null,options.toBundle());
+   context.sendBroadcast(new Intent(UPDATE).setPackage(pkg).addFlags(Intent.FLAG_RECEIVER_FOREGROUND).putExtras(videoState),null,options.toBundle());
  }
 }

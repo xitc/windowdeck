@@ -91,6 +91,8 @@ final class ArrivalController {
  CardMotion.Pose[] arrivalSources,arrivalTargets;
  String arrivalGeometry;
  boolean arrivalFromEdge,arrivalHungMain,arrivalOriginalPlus;
+ private RecoveryCover retiringCover;
+ private CardSpace retirementSpace;
  MotionSpec.Scene arrivalScene=MotionSpec.Scene.ADD;
  final EntranceRun arrivalRun=new EntranceRun();
  final ArrivalCancellation arrivalCancellation=new ArrivalCancellation();
@@ -108,9 +110,41 @@ final class ArrivalController {
   return poseScreenArrival(fresh,fromEdge,hungMain,originalPlus,MotionSpec.ARRIVAL_UNLOCK_MS);
  }
  boolean poseScreenArrival(WorkbenchSlot fresh,boolean fromEdge,boolean hungMain,boolean originalPlus,long waitMs){
-  return poseScreenArrivalUntil(fresh,fromEdge,hungMain,originalPlus,SystemClock.uptimeMillis()+waitMs);
+  return poseScreenArrivalUntil(fresh,fromEdge,hungMain,originalPlus,false,SystemClock.uptimeMillis()+waitMs);
  }
- boolean poseScreenArrivalUntil(WorkbenchSlot fresh,boolean fromEdge,boolean hungMain,boolean originalPlus,long deadline){
+ boolean poseReplacementArrival(WorkbenchSlot old,WorkbenchSlot fresh,CardMotion.Pose oldPose,Bitmap oldFrame,boolean fromFullscreen){
+  int[][] targets=host.cardGeometry().cards;
+  Rect before=old.renderBounds,after=fresh.renderBounds;
+  if(oldFrame==null||oldFrame.isRecycled()||before.isEmpty()||after.isEmpty()
+    ||before.width()>=before.height()||after.width()>=after.height()
+    ||targets.length!=session.slots.size()||!ArrivalMotion.sameCardBox(oldPose.box,targets[session.primary]))return false;
+  long deadline=SystemClock.uptimeMillis()+MotionSpec.ARRIVAL_UNLOCK_MS;
+  if(!poseScreenArrivalUntil(fresh,fromFullscreen&&session.slots.size()>1,false,false,!fromFullscreen,deadline))return false;
+  int[] box=targets[session.primary];
+  RecoveryCover snapshot=new RecoveryCover(host.context());
+  snapshot.setBitmap(oldFrame);
+  snapshot.fit(CardMotion.sourceQuad(oldPose,before.width(),false),
+    CardMotion.localQuad(oldPose,box[2],box[3]),before.width(),before.height(),CardMotion.sourceRadius(oldPose));
+  FrameLayout.LayoutParams lp=new FrameLayout.LayoutParams(box[2],box[3],Gravity.TOP|Gravity.LEFT);
+  lp.leftMargin=box[0];lp.topMargin=box[1];
+  snapshot.setPivotX(box[2]*.5f);snapshot.setPivotY(box[3]*.5f);
+  snapshot.setTranslationZ(1f);
+  host.stage().addView(snapshot,lp);retiringCover=snapshot;retirementSpace=host.stage().cardSpace();
+  return true;
+ }
+ boolean replacementRetiring(){return retiringCover!=null;}
+ private void updateRetiringCover(float raw){
+  if(retiringCover==null)return;
+  float fraction=ArrivalMotion.replacementRetirement(raw);
+  float scale=1f+(ArrivalMotion.REPLACE_RETIRE_SCALE-1f)*fraction;
+  retiringCover.setScaleX(scale);retiringCover.setScaleY(scale);
+  retiringCover.setAlpha(1f-fraction);
+ }
+ private void clearRetiringCover(){
+  if(retiringCover==null)return;
+  host.stage().removeView(retiringCover);retiringCover.setBitmap(null);retiringCover=null;retirementSpace=null;
+ }
+ boolean poseScreenArrivalUntil(WorkbenchSlot fresh,boolean fromEdge,boolean hungMain,boolean originalPlus,boolean inPlaceReplacement,long deadline){
   if(fresh==null||fresh.card==null||host.stage().getWidth()==0||session.slots.isEmpty())return false;
   fresh.card.setAlpha(1f);
   int[] loc=new int[2];host.stage().getLocationOnScreen(loc);
@@ -124,11 +158,15 @@ final class ArrivalController {
   int shelf=HangPlace.shelfMain(session.slots.size(),session.primary,hungMain,originalPlus);
   for(int i=0;i<session.slots.size();i++){
    WorkbenchSlot s=session.slots.get(i);Rect placed=edge.get(s);
-   if(s==fresh)from[i]=sideAdd?SideEntranceMotion.start(target[i],mode,railExtent):new int[]{-loc[0],-loc[1],Math.max(1,screen.width()),Math.max(1,screen.height())};
+   if(s==fresh){
+    if(inPlaceReplacement)from[i]=ArrivalMotion.replacementStart(target[i]);
+    else if(sideAdd)from[i]=SideEntranceMotion.start(target[i],mode,railExtent);
+    else from[i]=new int[]{-loc[0],-loc[1],Math.max(1,screen.width()),Math.max(1,screen.height())};
+   }
    else if(placed!=null)from[i]=new int[]{placed.left-loc[0],placed.top-loc[1],Math.max(1,placed.width()),Math.max(1,placed.height())};
    else from[i]=new int[]{target[i][0],target[i][1],target[i][2],target[i][3]};
    boolean mainRadius=shelf>=0?i==shelf:i==session.primary;
-   s.motionFromRadius=s==fresh?(sideAdd?Ui.dp(host.context(),Ui.SIDE_RADIUS):0f):Ui.dp(host.context(),mainRadius?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS);
+   s.motionFromRadius=s==fresh&&!inPlaceReplacement?(sideAdd?Ui.dp(host.context(),Ui.SIDE_RADIUS):0f):Ui.dp(host.context(),mainRadius?Ui.MAIN_RADIUS:Ui.SIDE_RADIUS);
    int[] r=target[i];targets[i]=host.rolePose(s,new float[]{r[0],r[1],r[2],r[3]},i!=session.primary);
    CardMotion.Pose shape=s==fresh&&sideAdd?targets[i]:hungMain&&s!=fresh?host.hangReturnPose(s):null;
    if(shape==null)shape=host.rolePose(s,new float[]{from[i][0],from[i][1],from[i][2],from[i][3]},s!=fresh&&!mainRadius);
@@ -154,9 +192,17 @@ final class ArrivalController {
   for(WorkbenchSlot s:session.slots)key.append('|').append(s.id).append(':').append(s.orientationAxis).append(':').append(s.renderBounds);
   return key.toString();
  }
+ private boolean retirementGeometryMatches(){
+  if(retirementSpace==null)return true;
+  int[][] boxes=host.cardGeometry().cards;
+  if(!retirementSpace.same(host.stage().cardSpace())||boxes.length!=arrivalTargets.length)return false;
+  for(int i=0;i<boxes.length;i++)if(!ArrivalMotion.sameCardBox(arrivalTargets[i].box,boxes[i]))return false;
+  return true;
+ }
  void rebaseArrivalLayout(){
-  if(!screenArrival||Objects.equals(arrivalGeometry,arrivalGeometryKey()))return;
-  if(arrivalRun.phase()!=EntranceRun.Phase.WAITING){finishArrival("cancelled_geometry_changed");host.layoutCards(false);return;}
+  if(!screenArrival)return;
+  if(retirementGeometryMatches()&&Objects.equals(arrivalGeometry,arrivalGeometryKey()))return;
+  if(replacementRetiring()||arrivalRun.phase()!=EntranceRun.Phase.WAITING){finishArrival("cancelled_geometry_changed");host.layoutCards(false);return;}
   long remaining=arrivalRun.remaining(SystemClock.uptimeMillis());
   if(remaining==0){checkArrivalDeadline();host.layoutCards(false);return;}
   long deadline=arrivalRun.waitingDeadline(arrivalToken);
@@ -164,7 +210,7 @@ final class ArrivalController {
   if(host.animation()!=null){ValueAnimator old=host.animation();host.setAnimation(null);old.cancel();}
   arrivalRun.cancel();
   Log.i(TAG,"arrive_layout_rebased task="+(fresh==null?-1:fresh.taskId)+" old_token="+arrivalToken+" remaining_ms="+remaining);
-  if(!poseScreenArrivalUntil(fresh,edge,hung,plus,deadline)){finishArrival("cancelled_geometry_unavailable");host.layoutCards(false);}
+  if(!poseScreenArrivalUntil(fresh,edge,hung,plus,false,deadline)){finishArrival("cancelled_geometry_unavailable");host.layoutCards(false);}
  }
  java.util.HashMap<WorkbenchSlot,Rect> edgeRects(WorkbenchSlot fresh,int[][] target,int[] loc,Rect screen,boolean hungMain,boolean originalPlus){
   java.util.HashMap<WorkbenchSlot,Rect> map=new java.util.HashMap<>();
@@ -209,13 +255,17 @@ final class ArrivalController {
   final boolean[] moving=new boolean[current.size()];
   host.setAnimation(ValueAnimator.ofFloat(0f,1f));host.animation().setDuration(total);host.animation().setInterpolator(null);
   final ValueAnimator expected=host.animation();
+  final float[] retirementTime={0f};
   arrivalFitFailures=0;
   host.removeMotionFitListener();
   host.setMotionFitListener(()->{
    if(screenArrival&&arrivalToken==token&&!host.closing()&&!host.stopped()&&!host.backgrounded()){
     try(SurfaceControl.Transaction fit=new SurfaceControl.Transaction()){
      boolean ready=true;for(WorkbenchSlot s:current)ready&=host.writeLeashFit(s,fit);
-     if(ready)host.submitMotionFit(fit);else if(!arrivalRun.waiting(token))arrivalFitFailures++;
+     if(ready){
+      host.submitMotionFit(fit);
+      updateRetiringCover(retirementTime[0]);
+     }else if(!arrivalRun.waiting(token))arrivalFitFailures++;
     }catch(Throwable e){if(!arrivalRun.waiting(token))arrivalFitFailures++;Log.w(TAG,"arrival_frame_fit_failed token="+token,e);}
    }
    return true;
@@ -231,12 +281,13 @@ final class ArrivalController {
     float local=ArrivalMotion.localTime(raw,scene,position,freshSide,arrivalMode);
     if(local>0f&&!moving[i]){moving[i]=true;Log.i(TAG,"arrive_card_start slot="+current.get(i).id+" position="+position+" primary="+(i==arrivalPrimary)+" delay_ms="+(freshSide?MotionSpec.SIDE_ADD_DELAY_MS:MotionSpec.delayFor(scene,position))+" elapsed_ms="+Math.round(raw*total));}
     host.poseCard(current.get(i),ArrivalMotion.frame(from[i],to[i],local,scene),to[i]);
-   }host.stage().invalidate();});
+   }
+   retirementTime[0]=raw;host.stage().invalidate();});
   host.animation().addListener(new AnimatorListenerAdapter(){public void onAnimationEnd(Animator a){
    Log.i(TAG,"arrive_animation_end token="+token+" current="+(host.animation()==a)+" phase="+arrivalRun.phase());
    if(host.animation()!=a)return;
    if(!arrivalRun.settle(token,SystemClock.uptimeMillis(),MotionSpec.ARRIVAL_UNLOCK_MS)){checkArrivalDeadline();return;}
-   host.setAnimation(null);host.blockInput();host.stage().watch("arrival_"+token);
+   host.setAnimation(null);host.blockInput();host.stage().watch("arrival_"+token);retirementTime[0]=1f;
    for(int i=0;i<current.size();i++){host.poseCard(current.get(i),to[i],to[i]);host.inputRole(current.get(i),i==session.primary);}
    handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,arrivalRun.remaining(SystemClock.uptimeMillis()));
    Log.i(TAG,"arrive_settling token="+token+" task="+(arrivalSlot==null?-1:arrivalSlot.taskId));
@@ -255,7 +306,9 @@ final class ArrivalController {
    if(host.entranceCover()!=null){host.releaseEntranceCoverWhenDrawn();handler.postDelayed(this,MotionSpec.SURFACE_RETRY_MS);return;}
    if(!arrivalRun.start(token,SystemClock.uptimeMillis(),total+MotionSpec.FRAME_TIMEOUT_MS)){checkArrivalDeadline();return;}
    handler.removeCallbacks(arrivalUnlock);handler.postDelayed(arrivalUnlock,arrivalRun.remaining(SystemClock.uptimeMillis()));
-   started[0]=true;arrivalLastFrame=arrivalFrameGap=0;arrivalFrames=0;host.unlockEntranceInput();expected.start();
+   started[0]=true;arrivalLastFrame=arrivalFrameGap=0;arrivalFrames=0;
+   if(!replacementRetiring())host.unlockEntranceInput();
+   expected.start();
    Log.i(TAG,"arrive_animation_start token="+token+" slots="+current.size()+" scene="+scene+" duration_ms="+total+" side_travel_ms="+(scene==MotionSpec.Scene.SIDE_ADD?SideEntranceMotion.travelMs(arrivalMode):0)+" curve="+(scene==MotionSpec.Scene.SIDE_ADD?"vivo_side_critical":scene==MotionSpec.Scene.MULTI_WINDOW?"coui_geometry":"c17_rapid_path"));
   }};
   Runnable prepare=new Runnable(){public void run(){
@@ -303,7 +356,7 @@ final class ArrivalController {
   boolean locked=screenArrival||host.pendingEntrance()!=null||host.settlingInput();
   screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;arrivalSources=null;arrivalTargets=null;
   host.resetPendingEntrance();host.setSettlingInput(false);
-  host.clearInputBlock();host.closeEntranceCover("arrival_"+result);
+  clearRetiringCover();host.clearInputBlock();host.closeEntranceCover("arrival_"+result);
   for(WorkbenchSlot s:session.slots)if(s.card!=null){s.motionPose=null;host.resetCardTransform(s);}
   for(int i=0;i<session.slots.size();i++)if(session.slots.get(i).card!=null)host.inputRole(session.slots.get(i),i==session.primary);
   try{Method method=rom.canvas.viewMethod("setNoNeedStartEmbedded");for(WorkbenchSlot s:session.slots)if(s.surface!=null)method.invoke(s.surface,false);}catch(Throwable ignored){}
@@ -326,10 +379,13 @@ final class ArrivalController {
      if(!arrivalRun.settling(token)||!screenArrival)return;
      if(!key.equals(host.entranceSurfaceKey())){settleArrivalFrame(token,reveal);return;}
      if(reveal){
+      updateRetiringCover(1f);
       host.removeMotionFitListener();
       for(WorkbenchSlot s:session.slots){s.motionPose=null;host.resetCardTransform(s);}
-      host.clearInputBlock();
-      for(int i=0;i<session.slots.size();i++)host.inputRole(session.slots.get(i),i==session.primary);
+      if(!replacementRetiring()){
+       host.clearInputBlock();
+       for(int i=0;i<session.slots.size();i++)host.inputRole(session.slots.get(i),i==session.primary);
+      }
       handler.post(()->settleArrivalFrame(token,false));
      }else if(arrivalRun.complete(token,SystemClock.uptimeMillis())){
       finishArrival("completed");handler.post(()->host.focusPrimary("arrive"));
@@ -350,7 +406,7 @@ final class ArrivalController {
    public void closeCover(){host.closeEntranceCover("arrival_cancelled");}
    public void clearHangFrame(){host.clearHangSourceFrame();}
    public void clearHangGeometry(){host.clearHangReturnGeometry();}
-   public void clearFields(){screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;arrivalSources=null;arrivalTargets=null;}
+   public void clearFields(){clearRetiringCover();screenArrival=false;hangEntranceDue=false;arrivalSlot=null;arrivalFrom=null;arrivalSources=null;arrivalTargets=null;}
    public void resetPoses(){for(WorkbenchSlot s:session.slots)if(s.card!=null)host.resetCardTransform(s);}
   },preservePose);
  }

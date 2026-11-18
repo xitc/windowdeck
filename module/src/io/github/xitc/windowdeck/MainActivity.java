@@ -14,6 +14,7 @@ public final class MainActivity extends Activity {
  private final String[] components=new String[SLOTS];
  private final String[] labels=new String[SLOTS];
  private final SettingsRow[] picks=new SettingsRow[SLOTS];
+ private DiagnosticsSettings diagnostics;
  private LinearLayout body; private TextView status; private SettingsRow start;
  private boolean atomicRotate=AtomicPresentation.DEFAULT,originalPlus=HangPlace.DEFAULT;
  protected void onCreate(Bundle state){super.onCreate(state);
@@ -30,7 +31,15 @@ public final class MainActivity extends Activity {
   sideGroup();
   appGroup();
   compatGroup();
+  diagnostics=new DiagnosticsSettings(this,group("诊断"),state);
   footer();
+ }
+ @Override protected void onSaveInstanceState(Bundle state){
+  super.onSaveInstanceState(state);diagnostics.save(state);
+ }
+ @Override protected void onActivityResult(int request,int result,Intent data){
+  super.onActivityResult(request,result,data);
+  if(request==DiagnosticsSettings.EXPORT_REQUEST)diagnostics.onResult(result,data);
  }
  private void header(){
   TextView heading=SettingsTheme.title(this,"多窗工作台");heading.setTextSize(28);

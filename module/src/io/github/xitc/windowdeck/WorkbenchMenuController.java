@@ -30,6 +30,7 @@ final class WorkbenchMenuController {
   ValueAnimator addAnimation();
   boolean backReady();
   boolean backgrounded();
+  boolean replacementRetiring();
   void cancelAnimation();
   void abortSideSort(String reason);
   boolean sideSortActive();
@@ -173,7 +174,7 @@ final class WorkbenchMenuController {
  }
  void primaryMenu(){
   if(host.sideSortActive())return;
-  if(host.taskRotationRun()!=null||host.closing()||recovering||dragging!=null||session.slots.isEmpty()||host.more()==null||host.more().getVisibility()!=View.VISIBLE||host.stage()==null||host.stage().getWidth()<=0)return;
+  if(host.taskRotationRun()!=null||host.closing()||recovering||host.replacementRetiring()||dragging!=null||session.slots.isEmpty()||host.more()==null||host.more().getVisibility()!=View.VISIBLE||host.stage()==null||host.stage().getWidth()<=0)return;
   dismissPrimaryMenu();
   WorkbenchSlot main=session.slots.get(session.primary);
   CardLayout.Result geometry=host.cardGeometry();
@@ -188,7 +189,7 @@ final class WorkbenchMenuController {
   java.util.function.IntConsumer action=which->{
    if(which<0||which>=items.length)return;
    dismissPrimaryMenu();
-   if(host.closing()||recovering||dragging!=null||session.slots.isEmpty()||session.slots.get(session.primary)!=main)return;
+   if(host.closing()||recovering||host.replacementRetiring()||dragging!=null||session.slots.isEmpty()||session.slots.get(session.primary)!=main)return;
    if(which==0)host.exitToFullscreen();else if(which==1)host.toggleLayout();else if(which==2)host.hangForReplace();else if(which==3)removeSlot(main);else host.toggleImeFloating();
   };
   int[] loc=new int[2];host.stage().getLocationOnScreen(loc);

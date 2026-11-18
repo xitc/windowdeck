@@ -27,11 +27,12 @@ import java.util.concurrent.Executor;
 final class HangPickController {
  interface Host {
   ValueAnimator addAnimation();
-  boolean addExistingTask(Intent request);
+  boolean addExistingTask(Intent request,long pickerSelectionSession);
   ValueAnimator animation();
   boolean attachTaskEntrance(WorkbenchSlot fresh,boolean replace,boolean hang,Intent request) throws Exception;
   boolean backgroundWorkbench(String reason);
   boolean backgrounded();
+  CardSpace cardSpace();
   void cancelAnimation();
   void cancelAnimation(boolean preservePose);
   void cancelSwitchPreparation(String reason);
@@ -54,12 +55,14 @@ final class HangPickController {
   PackageManager packageManager();
   WorkbenchSlot pendingEntrance();
   boolean poseScreenArrival(WorkbenchSlot fresh,boolean fromEdge,boolean hungMain,boolean originalPlus);
+  boolean poseReplacementArrival(WorkbenchSlot old,WorkbenchSlot fresh,CardMotion.Pose oldPose,Bitmap oldFrame,boolean fromFullscreen);
   boolean poseScreenArrival(WorkbenchSlot fresh,boolean fromEdge,boolean hungMain,boolean originalPlus,long waitMs);
   void publishState(int count);
   void publishState(int count,int generation,int attempt);
   void queueExistingSwitch(WorkbenchSlot selected,long session);
   void raiseMain();
   boolean recovering();
+  boolean replacementRetiring();
   void refreshStatus();
   void releaseEntrance();
   void releaseEntranceCoverWhenDrawn();
@@ -99,6 +102,9 @@ final class HangPickController {
  final IdentityHashMap<WorkbenchSlot,Rect> hangReturnRects=new IdentityHashMap<>();
  final IdentityHashMap<WorkbenchSlot,int[]> hangReturnBindings=new IdentityHashMap<>();
  SwitchMotion<WorkbenchSlot> hangReturnPoses;
+ Bitmap hangReplacementFace;
+ CardSpace hangReplacementSpace;
+ int hangReplacementMode;
  final Runnable hangWatch=this::watchHang;
  final Runnable hangConsume=this::ensureHangConsumed;
  int hangTask=-1,hangUser=-1,pendingHangFront=-1,hangEntranceGeneration,hangStableId=-1,hangStableHits,hangConsumeTries;
@@ -132,17 +138,19 @@ final class HangPickController {
   if(!host.closing()&&!host.stopped()&&!host.backgrounded())host.focusPrimary("add_without_source");
  }
  void hangForReplace(){
-  if(host.closing()||!host.initialized()||host.recovering()||host.dragging()!=null||hanging||pendingPickerLaunch!=null||session.slots.isEmpty())return;
+  if(host.closing()||!host.initialized()||host.recovering()||host.replacementRetiring()||host.dragging()!=null||hanging||pendingPickerLaunch!=null||session.slots.isEmpty())return;
   if(session.slots.get(session.primary).pinned){Toast.makeText(host.context(),"请先取消固定",Toast.LENGTH_SHORT).show();return;}
   hangReplace=true;hangForAdd();if(!hanging)hangReplace=false;
  }
  void hangForAdd(){
-  if(host.closing()||!host.initialized()||host.recovering()||host.dragging()!=null||hanging||pendingPickerLaunch!=null)return;
+  if(host.closing()||!host.initialized()||host.recovering()||host.replacementRetiring()||host.dragging()!=null||hanging||pendingPickerLaunch!=null)return;
   if(!hangReplace&&session.slots.size()>=Caps.MAX_TASKS){Toast.makeText(host.context(),"最多同时打开五个应用",Toast.LENGTH_SHORT).show();return;}
   host.cancelSwitchPreparation("new_picker");
   clearHangReturnGeometry();
   ArrayList<HangShelf.Card> cards=new ArrayList<>();
-  WorkbenchSlot main=session.slots.get(session.primary);cards.add(new HangShelf.Card(hangFace(main),main.component.getPackageName(),screenRect(main.card),true));
+  WorkbenchSlot main=session.slots.get(session.primary);
+  Bitmap mainFace=hangFace(main);
+  cards.add(new HangShelf.Card(mainFace,main.component.getPackageName(),screenRect(main.card),true));
   for(WorkbenchSlot s:session.slots)if(s!=main&&s.card!=null)cards.add(new HangShelf.Card(hangFace(s),s.component.getPackageName(),screenRect(s.card),false));
   try{hangShelf.show(host.context(),cards,host.effectiveMode()==PaneLayout.TOP_BOTTOM,this::restoreFromHang);}
   catch(Throwable e){Log.w(TAG,"hang_show_failed",e);hangShelf.hide();if(hangReplace){hangReplace=false;chooseApp(session.slots.get(session.primary));}else chooseApp(null);return;}
@@ -150,6 +158,9 @@ final class HangPickController {
   Rect[] ends=HangShelf.ends(cards,screen,host.effectiveMode()==PaneLayout.TOP_BOTTOM,screen.height()>screen.width(),Ui.dp(host.context(),20),Ui.dp(host.context(),48));
   ArrayList<WorkbenchSlot> shelfOrder=new ArrayList<>();shelfOrder.add(main);for(WorkbenchSlot s:session.slots)if(s!=main&&s.card!=null)shelfOrder.add(s);
   hangReturnPoses=SwitchMotion.capture(shelfOrder,host::currentPose);
+  if(hangReplace&&HandoffCover.visibleTaskFrame(mainFace)){
+   hangReplacementFace=mainFace;hangReplacementSpace=host.cardSpace();hangReplacementMode=host.effectiveMode();
+  }
   for(int i=0;i<shelfOrder.size();i++){
    WorkbenchSlot s=shelfOrder.get(i);hangReturnRects.put(s,new Rect(ends[i]));
    hangReturnBindings.put(s,new int[]{s.taskId,s.orientationAxis,s.renderBounds.width(),s.renderBounds.height()});
@@ -166,7 +177,7 @@ final class HangPickController {
     ||binding[2]!=s.renderBounds.width()||binding[3]!=s.renderBounds.height())return null;
   return hangReturnPoses.source(s);
  }
- void clearHangReturnGeometry(){hangReturnRects.clear();hangReturnBindings.clear();hangReturnPoses=null;}
+ void clearHangReturnGeometry(){hangReturnRects.clear();hangReturnBindings.clear();hangReturnPoses=null;hangReplacementFace=null;hangReplacementSpace=null;}
  Bitmap hangFace(WorkbenchSlot s){
   try{Method capture=rom.viewApi.getDeclaredMethod("getSnapBitMap",boolean.class);capture.setAccessible(true);Bitmap bitmap=(Bitmap)capture.invoke(s.surface,false);if(bitmap!=null&&bitmap.getConfig()==Bitmap.Config.HARDWARE)bitmap=bitmap.copy(Bitmap.Config.ARGB_8888,false);return bitmap;}
   catch(Throwable e){Log.w(TAG,"hang_snapshot_failed slot="+s.id,e);return null;}
@@ -352,6 +363,7 @@ final class HangPickController {
    // Reserve the first selection before raising the host. Creating a FlexibleTaskView
    // in a stopped Activity could start its task before destination geometry exists.
    lastSelectionSession=request.getLongExtra("selectionSession",0);
+   fresh.pickerSelectionSession=lastSelectionSession;
    pendingPickerLaunch=fresh;pendingPickerReplacement=replaced;
    hanging=false;hangReplace=false;hangTask=-1;hangUser=-1;pendingHangFront=-1;
    handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();clearHangSourceFrame();host.publishState(session.slots.size());
@@ -410,6 +422,7 @@ final class HangPickController {
  }
  void finishExistingHang(WorkbenchSlot selected,boolean beforeLaunch){
   clearHangReturnGeometry();
+  selected.pickerSelectionSession=hangStarted;
   boolean replacing=hangReplace;hanging=false;hangReplace=false;
   handler.removeCallbacks(hangWatch);handler.removeCallbacks(hangConsume);hangShelf.hide();
   int index=session.slots.indexOf(selected);boolean promote=!replacing&&index>=0&&index!=session.primary&&!host.recovering()&&host.dragging()==null&&selected.taskId>=0;
@@ -454,7 +467,7 @@ final class HangPickController {
   if(hangTask<0||host.stopped()||host.backgrounded())return;
   int id=hangTask,user=hangUser;boolean replace=hangReplace;pendingHangFront=id;
   Intent request=new Intent();request.putExtra("windowdeck_add_task_id",id);request.putExtra("windowdeck_add_user_id",user);request.putExtra("windowdeck_container_task_id",host.taskId());request.putExtra("windowdeck_hang_place",!replace);request.putExtra("windowdeck_hang_replace",replace);
-  host.addExistingTask(request);
+  host.addExistingTask(request,hangStarted);
   if((host.pendingEntrance()!=null&&host.pendingEntrance().sourceTaskId==id)||(host.replacements().current()!=null&&host.replacements().current().fresh.sourceTaskId==id)){hangTask=-1;hangUser=-1;hangReplace=false;Log.i(TAG,"hang_consumed task="+id+" replace="+replace);}
   else pendingHangFront=-1;
  }
@@ -489,11 +502,24 @@ final class HangPickController {
   host.replacements().begin(old,fresh,index,session.primary);
  }
  void commitReplacement(ReplacementController.Run<WorkbenchSlot> run){
+ boolean fullscreenSource=run.fresh.taskId==hangSourceTask&&hangSourceFrame!=null
+   &&hangSourceFrame.getWidth()<hangSourceFrame.getHeight();
+ CardMotion.Pose previousMain=run.mainEntrance&&run.old.taskId!=run.fresh.taskId
+   &&run.fresh.sourceTaskId>=0&&run.fresh.sourceTaskId==run.fresh.taskId
+   &&(run.fresh.pickerLaunch||fullscreenSource)
+   &&hangReplacementSpace!=null&&hangReplacementSpace.same(host.cardSpace())
+   &&hangReplacementMode==host.effectiveMode()?hangReturnPose(run.old):null;
  run.old.quietDetach=true;host.releaseSlot(run.old);host.clearRecoveryCovers();host.setRecovering(false);
  host.publishState(session.slots.size());host.layoutCards(false);host.restoreContainerFocus();
  if(run.mainEntrance){
   boolean previous=hangReplace;hangReplace=true;
-  try{if(!host.poseScreenArrival(run.fresh,session.slots.size()>1,false,false)){host.closeEntranceCover("replace_no_pose");host.focusPrimary("replace_committed");}}
+  try{
+   if(previousMain!=null&&host.poseReplacementArrival(run.old,run.fresh,previousMain,hangReplacementFace,fullscreenSource)){
+    Log.i(TAG,"replace_retirement_prepared old_task="+run.old.taskId+" new_task="+run.fresh.taskId+" fullscreen_source="+fullscreenSource);
+   }else if(!host.poseScreenArrival(run.fresh,session.slots.size()>1,false,false)){
+    host.closeEntranceCover("replace_no_pose");clearHangSourceFrame();clearHangReturnGeometry();host.focusPrimary("replace_committed");
+   }
+  }
   finally{hangReplace=previous;}
  }else{host.closeEntranceCover("replace_committed");host.focusPrimary("replace_committed");}
  Log.i(TAG,"replace_committed slot="+run.fresh.id+" was="+run.old.id+" task="+run.fresh.taskId);
@@ -502,6 +528,7 @@ final class HangPickController {
   int index=session.slots.indexOf(run.fresh);
   if(index>=0){session.slots.set(index,run.old);session.primary=run.primary;transferCover(run.fresh,run.old);}
   run.fresh.quietDetach=true;host.releaseSlot(run.fresh);host.clearRecoveryCovers();host.setRecovering(false);host.closeEntranceCover("replace_rollback");
+  if(run.mainEntrance){clearHangSourceFrame();clearHangReturnGeometry();}
   if(!run.old.released&&!run.old.embedded&&run.old.taskId>=0)run.old.pendingTask=run.old.taskId;
   if(!host.closing()){host.publishState(session.slots.size());host.updateNaturalBounds();host.layoutCards(false);host.refreshStatus();
    if(!host.stopped()&&!host.backgrounded()){host.restorePendingTasks();host.restoreContainerFocus();host.focusPrimary("replace_rollback");}}

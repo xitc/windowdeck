@@ -47,6 +47,7 @@ final class TaskReleaseController {
   boolean recovering();
   Runnable recoveryFinish();
   void releasePendingEntrance(WorkbenchSlot s);
+  boolean resumed();
   void removeSlot(WorkbenchSlot s);
   void removeSlot(WorkbenchSlot s,boolean taskGone);
   ReplacementController<WorkbenchSlot> replacements();
@@ -213,7 +214,7 @@ void releaseSlot(WorkbenchSlot s){releaseSlot(s,false);}
    int kept=task>=0?task:s.taskId;
    if(kept<0){host.removeSlot(s,true);return;}
    Log.i(TAG,"back_keep_group slot="+s.id+" task="+kept+" container="+host.taskId());
-   if(host.backgrounded()||host.stopped()){s.pendingTask=kept;return;}
+   if(!host.resumed()||host.backgrounded()||host.stopped()){s.pendingTask=kept;return;}
    if(host.backgroundWorkbench("primary_vanished")){s.pendingTask=kept;return;}
    if(taskExists(kept))rebindEmbedded(s,kept);else host.removeSlot(s,true);
    return;
@@ -221,7 +222,7 @@ void releaseSlot(WorkbenchSlot s){releaseSlot(s,false);}
   host.removeSlot(s,true);
  }
  void restorePendingTasks(){
-  if(host.closing()||host.stopped()||host.backgrounded()||host.hangTask()>=0)return;
+  if(!host.resumed()||host.closing()||host.stopped()||host.backgrounded()||host.hangTask()>=0)return;
   for(WorkbenchSlot s:new ArrayList<>(session.slots)){
    if(s.pendingTask<0||s.released)continue;
    int id=s.pendingTask;s.pendingTask=-1;

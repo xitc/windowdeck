@@ -14,6 +14,7 @@ final class WorkbenchSlot {
  final ComponentName component;
  final String label;
  int taskId=-1,sourceTaskId=-1,sourceUserId=-1,orientationAxis;
+ long pickerSelectionSession;
  ComponentName activeComponent;
  Intent launchIntent;
  final Rect renderBounds=new Rect();

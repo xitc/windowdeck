@@ -47,12 +47,23 @@ final class CandidateProbe {
   if(handler==null)return false;
   int reported=runningTask(handler),retiredSource=LiveWorkbenchState.retiredSource(reported);
   if(rendered&&retiredSource>=0&&!retiredTargetReady(handler,reported,retiredSource))return false;
+  return showEntryForTask(retiredSource>=0?retiredSource:reported);
+ }
+ static boolean showEntryForTask(int source){
   Snapshot shot=snapshot;
   int[] published=LiveWorkbenchState.published();
   boolean known=published!=null||(shot!=null&&shot.providerKnown);
   int container=published!=null?published[0]:shot!=null?shot.providerContainer:-1;
   int count=published!=null?published[1]:shot!=null?shot.providerCount:0;
-  return SwipeCandidate.showEntry(retiredSource>=0?retiredSource:reported,shot==null?null:shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
+  return SwipeCandidate.showEntry(source,shot==null?null:shot.tasks,known,container,count,LiveWorkbenchState.swipeMembership());
+ }
+ static SwipeCandidate.Match matchPanelTask(int task){
+  Snapshot shot=snapshot;
+  if(shot==null||LiveWorkbenchState.retiredSource(task)>=0)return null;
+  int[] published=LiveWorkbenchState.published();
+  return SwipeCandidate.match(task,shot.tasks,published!=null||shot.providerKnown,
+    published==null?shot.providerContainer:published[0],published==null?shot.providerCount:published[1],
+    LiveWorkbenchState.swipeMembership());
  }
  static SwipeCandidate.Match match(Object handler){
   Snapshot shot=snapshot;

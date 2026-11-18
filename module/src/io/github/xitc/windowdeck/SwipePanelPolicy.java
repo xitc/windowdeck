@@ -78,6 +78,13 @@ final class SwipePanelPolicy {
  static boolean claimsCentre(int axisCode){
   return (axisCode&0xF0)==AXIS_PICKABLE&&(axisCode&0x0F)==AXIS_COLUMN_CARD;
  }
+
+ static final int RESTORE_BY_LAUNCHER=Integer.MIN_VALUE;
+ /** A pickable side transition and its callback belong to Launcher. */
+ static int centreDodgeRestoreAxis(int axisCode){
+  if(!stillCurrent(axisCode))return RESTORE_BY_LAUNCHER;
+  return claimsCentre(axisCode)?0x20:axisCode;
+ }
  /**
   * What {@code LauncherSwipeHook.retireCapsules} has to do about the centre claim this frame.
   *

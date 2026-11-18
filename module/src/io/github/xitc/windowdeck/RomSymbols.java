@@ -227,9 +227,6 @@ final class RomSymbols {
 
     // ------------------------------------------------------------------ handler: gesture.a
 
-    /** {@code OplusBaseTriggerPanelView} — the panel this handler drives. (C93: {@code triggerPanel}) */
-    static final String HANDLER_TRIGGER_PANEL = "U1";
-
     /** {@code GestureState} — declared on the superclass {@code com.android.quickstep.va}. (C93: {@code mGestureState}) */
     static final String HANDLER_GESTURE_STATE = "n";
 
@@ -449,6 +446,22 @@ final class RomSymbols {
         throw new NoSuchFieldException(owner.getName() + "." + name);
     }
 
+    /** The handler stores the concrete panel through its shared OplusBaseTriggerPanelView type. */
+    static Field findHandlerPanel(Class<?> panel, Class<?> handler) throws NoSuchFieldException {
+        Class<?> base = panel.getSuperclass();
+        Field match = null;
+        for (Class<?> owner = handler; owner != null; owner = owner.getSuperclass()) {
+            for (Field candidate : owner.getDeclaredFields()) {
+                if (Modifier.isStatic(candidate.getModifiers()) || candidate.getType() != base) continue;
+                if (match != null) throw new NoSuchFieldException("ambiguous handler panel field");
+                match = candidate;
+            }
+        }
+        if (match == null) throw new NoSuchFieldException("handler panel field");
+        match.setAccessible(true);
+        return match;
+    }
+
     /** Walks the hierarchy for a method with an exact parameter list. */
     static Method method(Class<?> owner, String name, Class<?>... params) throws NoSuchMethodException {
         for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
@@ -490,7 +503,7 @@ final class RomSymbols {
             if (findInitAnimation(panel) == null) return "initAnimation 不是恰好一个 Function4";
             if (findGestureEndedBridge(handler) == null) return "onGestureEnded static bridge 不是恰好一个";
 
-            field(handler, HANDLER_TRIGGER_PANEL);
+            findHandlerPanel(panel, handler);
             field(handler, HANDLER_GESTURE_STATE);
             field(handler, HANDLER_TASK_ANIM);
             Class<?> gesture = field(handler, HANDLER_GESTURE_STATE).getType();

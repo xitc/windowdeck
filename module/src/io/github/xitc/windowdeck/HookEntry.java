@@ -1,11 +1,17 @@
 package io.github.xitc.windowdeck;
+import android.app.Application;
 import android.app.Instrumentation;
+import android.content.Context;
 import android.content.Intent;
 import de.robv.android.xposed.*;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class HookEntry implements IXposedHookLoadPackage {
  public void handleLoadPackage(XC_LoadPackage.LoadPackageParam p) {
+  if(p.isFirstApplication&&p.packageName.equals(p.processName)
+    &&("com.android.launcher".equals(p.packageName)||"com.oplus.pscanvas".equals(p.packageName))){
+   try{installVersionProbe();}catch(Throwable e){android.util.Log.w("WindowDeck","diagnostic_probe_hook_failed",e);}
+  }
   // App-process compatibility is disabled in the host-only build.
   if ("com.android.launcher".equals(p.packageName) || "com.oplus.pscanvas".equals(p.packageName))
    android.util.Log.i("WindowDeck","load_package package="+p.packageName+" process="+p.processName+" first="+p.isFirstApplication);
@@ -29,6 +35,14 @@ public final class HookEntry implements IXposedHookLoadPackage {
   try{ime=CanvasImeBridge.install();}catch(Throwable e){android.util.Log.e("WindowDeck","canvas_ime_bridge_install_failed",e);}
   try{hookBackKeyPassthrough(p.classLoader);back=true;}catch(Throwable e){android.util.Log.e("WindowDeck","back_key_passthrough_failed",e);XposedBridge.log(e);}
   android.util.Log.i("WindowDeck","hook_ready version="+Version.NAME+" activity="+activity+" leash="+leash+" ime="+ime+" back="+back+" process="+p.processName);
+ }
+ private static void installVersionProbe(){
+  XposedHelpers.findAndHookMethod(Application.class,"attach",Context.class,new XC_MethodHook(){
+   @Override protected void afterHookedMethod(MethodHookParam p){
+    try{HandoffDiagnostics.registerVersionProbe((Application)p.thisObject);}
+    catch(RuntimeException e){android.util.Log.w("WindowDeck","diagnostic_probe_unavailable",e);}
+   }
+  });
  }
  private static void hookWorkbenchActivity(){
   XposedHelpers.findAndHookMethod(Instrumentation.class,"newActivity",ClassLoader.class,String.class,Intent.class,new XC_MethodHook(){

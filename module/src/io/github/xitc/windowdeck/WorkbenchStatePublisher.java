@@ -76,8 +76,20 @@ final class WorkbenchStatePublisher {
   state.putBoolean("hanging",host.hanging()&&count>0);state.putBoolean("replacing",host.hanging()&&host.hangReplace());state.putLong("selectionSession",host.hangStarted());state.putInt("userId",android.os.Process.myUid()/100000);
   state.putBoolean(PickerLaunchPolicy.EMBED_BEFORE_LAUNCH,host.hanging()&&count>0&&PickerLaunchPolicy.embedBeforeLaunch(host.hangReplace(),host.readOriginalPlus()));
   String[] packages=new String[session.slots.size()];int[] tasks=new int[session.slots.size()],users=new int[session.slots.size()];
+  long[] pickerSessions=new long[session.slots.size()];String[] pickerComponents=new String[session.slots.size()];
   int owner=android.os.Process.myUid()/100000;
-  for(int i=0;i<session.slots.size();i++){WorkbenchSlot slot=session.slots.get(i);packages[i]=slot.component.getPackageName();tasks[i]=slot.taskId;users[i]=slot.sourceUserId>=0?slot.sourceUserId:owner;}
-  state.putStringArray("packages",packages);state.putIntArray("tasks",tasks);state.putIntArray("users",users);return state;
+  for(int i=0;i<session.slots.size();i++){
+   WorkbenchSlot slot=session.slots.get(i);
+   packages[i]=slot.component.getPackageName();tasks[i]=slot.taskId;users[i]=slot.sourceUserId>=0?slot.sourceUserId:owner;
+   if(slot.pickerSelectionSession>0&&slot.taskId>=0&&slot.embedded&&!slot.released&&slot.pendingTask<0){
+    ComponentName component=slot.launchIntent==null?null:slot.launchIntent.getComponent();
+    pickerComponents[i]=(component==null?slot.component:component).flattenToString();
+    pickerSessions[i]=slot.pickerSelectionSession;
+   }
+  }
+  state.putStringArray("packages",packages);state.putIntArray("tasks",tasks);state.putIntArray("users",users);
+  state.putLongArray(PickerLaunchPolicy.PICKER_SESSIONS,pickerSessions);
+  state.putStringArray(PickerLaunchPolicy.PICKER_COMPONENTS,pickerComponents);
+  return state;
  }
 }

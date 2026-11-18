@@ -7,7 +7,10 @@ import android.animation.AnimatorListenerAdapter;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Matrix;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.RenderEffect;
+import android.graphics.Shader;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
@@ -16,6 +19,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.AttachedSurfaceControl;
 import android.view.ContextThemeWrapper;
 import android.view.Gravity;
 import android.view.SurfaceControl;
@@ -23,6 +27,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import java.util.function.Consumer;
 import de.robv.android.xposed.XposedHelpers;
 
@@ -78,6 +83,9 @@ final class HandoffCover {
  private float geometryProgress,backgroundProgress;
  private boolean backgroundStarted,portraitReveal;
  private Consumer<String> closedListener;
+ private EntranceWallpaper entranceWallpaper;
+ private HandoffDiagnostics diagnostics;
+ private boolean firstSnapshotFrame;
  private Consumer<Boolean> motionResult;
  private final HandoffReveal reveal=new HandoffReveal();
  private int width,height,captureWidth,captureHeight,captureRotation,viewportTurns=Integer.MIN_VALUE;
@@ -96,6 +104,7 @@ final class HandoffCover {
  private final Runnable releaseTimeout=this::onCoverTimeout;
 
  private HandoffCover(String reason){this.reason=reason;}
+ void diagnostics(HandoffDiagnostics trace){diagnostics=trace;}
 
  static HandoffCover create(Context context){
   return create(context,"swipe",null,false,null,null);
@@ -207,7 +216,7 @@ final class HandoffCover {
   try{
    cover.windows=context.getSystemService(WindowManager.class);
    cover.view=new FrameLayout(context);
-   cover.drawAddPreview(context,box,quad,progress);
+   if(quad!=null)cover.drawAddPreview(context,box,quad,progress);
    cover.attach(context);
   }catch(Throwable e){
    Log.w(TAG,"handoff_add_preview_unavailable",e);cover.close("unavailable");
@@ -256,6 +265,53 @@ final class HandoffCover {
    canvas.translate(x-right*(1-fraction),y);
    canvas.concat(projection);add.draw(canvas);
    canvas.restoreToCount(save);
+  }
+ }
+
+ boolean drawEntranceWallpaper(Bitmap bitmap,int width,int height,RectF card,float radius,float progress,SurfaceControl.Transaction task){
+  if(closed||view==null||view.getWidth()!=width||view.getHeight()!=height||!view.isHardwareAccelerated())return false;
+  AttachedSurfaceControl root=view.getRootSurfaceControl();
+  if(root==null)return false;
+  try{
+   if(entranceWallpaper==null){
+    entranceWallpaper=new EntranceWallpaper(view.getContext(),bitmap);
+    view.addView(entranceWallpaper,0,new FrameLayout.LayoutParams(-1,-1));
+   }
+   entranceWallpaper.update(card,radius,progress);
+   if(root.applyTransactionOnDraw(task))return true;
+  }catch(RuntimeException e){Log.w(TAG,"handoff_wallpaper_draw_failed",e);}
+  removeEntranceWallpaper();
+  return false;
+ }
+
+ void removeEntranceWallpaper(){
+  if(entranceWallpaper!=null){view.removeView(entranceWallpaper);entranceWallpaper=null;}
+ }
+
+ private static final class EntranceWallpaper extends FrameLayout {
+  private final Path hole=new Path();
+  private final ImageView image;
+  EntranceWallpaper(Context context,Bitmap bitmap){
+   super(context);
+   image=new ImageView(context);
+   image.setScaleType(ImageView.ScaleType.FIT_XY);
+   image.setImageBitmap(bitmap);
+   image.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+   addView(image,new FrameLayout.LayoutParams(-1,-1));
+  }
+  void update(RectF card,float radius,float progress){
+   hole.rewind();
+   hole.addRoundRect(card,radius,radius,Path.Direction.CW);
+   float blur=180f*EntranceMotion.revealAlpha(progress);
+   image.setRenderEffect(blur>=1f?RenderEffect.createBlurEffect(blur,blur,Shader.TileMode.CLAMP):null);
+   image.setAlpha(EntranceMotion.backdropFraction(2f*progress));
+   invalidate();
+  }
+  @Override protected void dispatchDraw(Canvas canvas){
+   int saved=canvas.save();
+   canvas.clipOutPath(hole);
+   super.dispatchDraw(canvas);
+   canvas.restoreToCount(saved);
   }
  }
 
@@ -823,7 +879,12 @@ final class HandoffCover {
   final float[] speed={0};
   final long[] last={0},gap={0};final int[] frames={0};
   run.setDuration(clockDuration);run.setInterpolator(null);
-  run.addUpdateListener(a->{if(!closed&&motion==a){long now=SystemClock.uptimeMillis();if(last[0]>0)gap[0]=Math.max(gap[0],now-last[0]);last[0]=now;frames[0]++;long elapsed=Math.min(a.getCurrentPlayTime(),clockDuration);float time=Math.min(1,elapsed/(float)duration);geometryProgress=cornerEntrance?CornerGesture.enterFraction(time):portraitEntrance?EntranceMotion.c17ZoomFraction(time):EntranceMotion.fraction(time,speed[0]);moving.railTime(elapsed);moving.progress(geometryProgress,backgroundProgress);}});
+  run.addUpdateListener(a->{if(!closed&&motion==a){long now=SystemClock.uptimeMillis();if(last[0]>0)gap[0]=Math.max(gap[0],now-last[0]);last[0]=now;frames[0]++;long elapsed=Math.min(a.getCurrentPlayTime(),clockDuration);float time=Math.min(1,elapsed/(float)duration);geometryProgress=cornerEntrance?CornerGesture.enterFraction(time):portraitEntrance?EntranceMotion.c17ZoomFraction(time):EntranceMotion.fraction(time,speed[0]);moving.railTime(elapsed);
+   if(diagnostics!=null&&!firstSnapshotFrame&&geometryProgress>0){
+    firstSnapshotFrame=true;
+    moving.getViewTreeObserver().registerFrameCommitCallback(()->diagnostics.record(HandoffDiagnostics.Event.FIRST_MOTION,"snapshot_frame_submitted"));
+   }
+   moving.progress(geometryProgress,backgroundProgress);}});
   run.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){
    if(closed||motion!=a)return;motion=null;
    if(frameTrace!=null){frameTrace.stop("motion_end");frameTrace=null;}
@@ -917,7 +978,7 @@ final class HandoffCover {
   hideUnderlay();
   if(view!=null){if(!visualDetached)try{windows.removeViewImmediate(view);}catch(Throwable e){Log.w(TAG,"handoff_cover_remove",e);}view.removeAllViews();view=null;}
   // Let RenderThread release its bitmap reference naturally after window teardown.
-  bitmap=null;sourceFrame=null;poseSnapshot=null;scene=null;addPreview=null;if(active==this)active=null;
+  bitmap=null;sourceFrame=null;poseSnapshot=null;scene=null;addPreview=null;entranceWallpaper=null;if(active==this)active=null;
   Log.i(TAG,"handoff_cover_removed reason="+reason+" why="+why+" ms="+(SystemClock.uptimeMillis()-started));
   Consumer<Boolean> result=motionResult;motionResult=null;if(result!=null)result.accept(false);
   if(closedListener!=null)closedListener.accept(why);

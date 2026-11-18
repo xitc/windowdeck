@@ -184,12 +184,21 @@ final class SwipeSourceFrame {
  }
 
  static Capture capture(Object handler,int task) {
-  SurfaceControl copied=null,visibility=null;
   try {
    Object match=taskTarget(handler,task);
    if(match==null)return null;
    SurfaceControl leash=(SurfaceControl)XposedHelpers.getObjectField(match,RomSymbols.SOURCE_LEASH);
    Rect bounds=(Rect)XposedHelpers.getObjectField(match,RomSymbols.SOURCE_BOUNDS);
+   return captureTaskLeash(leash,bounds,task);
+  }catch(Throwable e){
+   Log.w(TAG,"swipe_release_target_unavailable",e);
+   return null;
+  }
+ }
+
+ static Capture captureTaskLeash(SurfaceControl leash,Rect bounds,int task) {
+  SurfaceControl copied=null,visibility=null;
+  try{
    if(leash==null||!leash.isValid()||bounds==null||bounds.width()<2||bounds.height()<2)return null;
    int layer=LiveTaskContent.layerId(leash);
    if(layer<0)return null;

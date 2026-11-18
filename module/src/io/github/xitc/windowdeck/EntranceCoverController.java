@@ -48,6 +48,7 @@ final class EntranceCoverController {
   void maybeAnimateAddedCard();
   WorkbenchSlot pendingEntrance();
   Resources resources();
+  boolean replacementRetiring();
   WorkbenchSlot releaseEntrancePresentation();
   boolean screenArrival();
   CanvasStage stage();
@@ -84,7 +85,7 @@ void releaseEntrance(){
   for(int i=0;i<session.slots.size();i++)if(session.slots.get(i).card!=null)host.inputRole(session.slots.get(i),i==session.primary);
 }
 void unlockEntranceInput(){
-  if(!host.consumeInputBlock())return;
+  if(host.replacementRetiring()||!host.consumeInputBlock())return;
   for(int i=0;i<session.slots.size();i++)if(session.slots.get(i).card!=null)host.inputRole(session.slots.get(i),i==session.primary);
   Log.i(TAG,"entrance_input_unlocked slots="+session.slots.size());
 }

@@ -2,13 +2,15 @@ package io.github.xitc.windowdeck;
 
 import android.app.ActivityManager;
 import java.io.ByteArrayOutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /** Root helper: recheck live tasks before creating a container for a gesture. */
 public final class TaskIngress {
  public static void main(String[] args) throws Exception {
-  if(android.os.Process.myUid()!=0||args.length!=2)throw new SecurityException("root task/user required");
+  if(android.os.Process.myUid()!=0||(args.length!=2&&args.length!=4))throw new SecurityException("root task/user required");
   int source=Integer.parseInt(args[0]),user=Integer.parseInt(args[1]);
   if(source<0||user<0)throw new IllegalArgumentException("invalid source");
   Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
@@ -21,7 +23,13 @@ public final class TaskIngress {
    if(task.taskId==source)sourceInfo=task;
   }
   if(sourceInfo==null||sourceInfo.baseActivity==null||sourceInfo.topActivity==null||!sourceInfo.baseActivity.getPackageName().equals(sourceInfo.topActivity.getPackageName())||sourceInfo.getClass().getField("userId").getInt(sourceInfo)!=user||((Number)sourceInfo.getClass().getMethod("getWindowingMode").invoke(sourceInfo)).intValue()!=1)throw new IllegalStateException("source changed");
-  Process process=new ProcessBuilder("am","start","-W","--user","0","-f","0x10000000","-n","com.oplus.pscanvas/.canvasmode.canvas.ContainerActivity","--ez","windowdeck_workbench_v1","true","--ei","windowdeck_create_source_task",Integer.toString(source),"--ei","windowdeck_create_source_user",Integer.toString(user)).redirectErrorStream(true).start();
+  ArrayList<String> command=new ArrayList<>(Arrays.asList("am","start","-W","--user","0","-f","0x10000000","-n","com.oplus.pscanvas/.canvasmode.canvas.ContainerActivity","--ez","windowdeck_workbench_v1","true","--ei","windowdeck_create_source_task",Integer.toString(source),"--ei","windowdeck_create_source_user",Integer.toString(user)));
+  if(args.length==4){
+   long released=Long.parseLong(args[3]);
+   if(HandoffDiagnostics.valid(args[2],released))
+    command.addAll(Arrays.asList("--es",HandoffDiagnostics.ID,args[2],"--el",HandoffDiagnostics.RELEASED,args[3]));
+  }
+  Process process=new ProcessBuilder(command).redirectErrorStream(true).start();
   if(!process.waitFor(12,TimeUnit.SECONDS)){process.destroy();throw new IllegalStateException("start timed out");}
   ByteArrayOutputStream output=new ByteArrayOutputStream();byte[] bytes=new byte[1024];int n;
   while((n=process.getInputStream().read(bytes))!=-1)output.write(bytes,0,n);

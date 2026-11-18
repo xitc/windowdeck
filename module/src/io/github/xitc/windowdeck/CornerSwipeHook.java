@@ -35,14 +35,15 @@ final class CornerSwipeHook {
   View panel;float panelAlpha;
   boolean hidden,rendered,rebounding,handedOff,haptic;
   final Matrix matrix=new Matrix();
+  final RectF renderedBox=new RectF();float renderedRadius;
   Session(Object consumer,Context context,CornerGesture gesture,CornerTouch down){
    this.consumer=consumer;this.context=context;this.gesture=gesture;this.down=down;this.downTime=down.downTime;this.revision=CornerSwipeHook.revision;
   }
  }
- static boolean install(ClassLoader loader,Class<?> handler){
+ static boolean install(ClassLoader loader,Class<?> handler,java.lang.reflect.Field panel){
   ArrayList<XC_MethodHook.Unhook> hooks=new ArrayList<>();
   try{
-   contract=new CornerGestureContract(loader,handler);
+   contract=new CornerGestureContract(loader,handler,panel);
    hooks.add(XposedBridge.hookMethod(contract.serviceInput,new XC_MethodHook(){
     @Override protected void beforeHookedMethod(MethodHookParam p){
      if(!(p.args[0] instanceof MotionEvent)||(!CornerEntrySettings.enabled()&&current==null))return;
@@ -67,6 +68,9 @@ final class CornerSwipeHook {
      if(s!=null&&s.consumer==p.thisObject&&!s.rendered&&(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)){
       restorePanel(s);current=null;
      }
+     if(contract.modern&&s!=null&&s.consumer==p.thisObject&&(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)){
+      MAIN.postDelayed(()->{if(current==s&&owns(s.handler)&&!s.rebounding)rebound(s);},1500);
+     }
      Object copied=p.getObjectExtra("windowdeck_corner_cancel");if(copied instanceof MotionEvent)((MotionEvent)copied).recycle();
     }
    }));
@@ -74,14 +78,16 @@ final class CornerSwipeHook {
     @Override protected void afterHookedMethod(MethodHookParam p){try{if(current!=null&&current.consumer==p.thisObject)bind(current);}catch(Throwable e){fail("start",e);}}
    }));
    hooks.add(XposedBridge.hookMethod(contract.build,new XC_MethodHook(){
-    @Override protected void afterHookedMethod(MethodHookParam p){try{if(!PortraitRecentsHandoff.retainPose(p.thisObject,p.args[0],p.args[1],contract))draw(p);}catch(Throwable e){fail("frame",e);}}
+    @Override protected void afterHookedMethod(MethodHookParam p){try{if(!p.hasThrowable()&&(contract.modern||!PortraitRecentsHandoff.retainPose(p.thisObject,p.args[0],p.args[1],contract)))draw(p);}catch(Throwable e){fail("frame",e);}}
    }));
+   if(!contract.modern){
    hooks.add(XposedBridge.hookMethod(contract.crop,new XC_MethodHook(){
     @Override protected void afterHookedMethod(MethodHookParam p){Session s=owner(p.thisObject);if(s!=null)p.setResult(new RectF(0,0,s.gesture.width,s.gesture.height));}
    }));
    hooks.add(XposedBridge.hookMethod(contract.radius,new XC_MethodHook(){
     @Override protected void afterHookedMethod(MethodHookParam p){Session s=owner(p.thisObject);if(s!=null)p.setResult(s.gesture.radius());}
    }));
+   }
    // Some regions already have an assistant wrapper. Route only a supported right-corner
    // stream to its existing OtherActivity delegate; never invoke the assistant's completion.
    hooks.add(XposedBridge.hookMethod(contract.assistantInput,new XC_MethodHook(){
@@ -154,7 +160,7 @@ final class CornerSwipeHook {
    return;
   }
   if(action==MotionEvent.ACTION_MOVE||action==MotionEvent.ACTION_UP)s.gesture.move(touch.x,touch.y);
-  if(s.gesture.rejected){current=null;return;}
+  if(s.gesture.rejected){restorePanel(s);current=null;return;}
   if(s.gesture.claimed&&s.candidate!=null&&s.panel!=null){
    if(!s.hidden){s.panelAlpha=s.panel.getAlpha();s.panel.setAlpha(0);s.hidden=true;}
    if(s.gesture.ready()&&!s.haptic){s.panel.performHapticFeedback(HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE);s.haptic=true;}
@@ -166,14 +172,16 @@ final class CornerSwipeHook {
   Object handler=contract.interaction.get(s.consumer);if(handler==null)return;
   if(s.handler!=null&&s.handler!=handler){s.gesture.cancel();return;}
   s.handler=handler;
-  if(s.candidate==null)s.candidate=CandidateProbe.match(handler);
-  if(s.candidate==null){if(!s.gesture.rejected)LauncherSwipeHook.log("corner_rejected reason=candidate task="+CandidateProbe.runningTask(handler));s.gesture.rejected=true;return;}
-  s.panel=(View)XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TRIGGER_PANEL);
-  Object[] handles=(Object[])XposedHelpers.getObjectField(handler,RomSymbols.SOURCE_HANDLES);
-  if(handles==null||handles.length!=1)return;
-  s.simulator=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_SIMULATOR);
-  s.params=XposedHelpers.callMethod(handles[0],RomSymbols.SOURCE_PARAMS);
-  s.manager=XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TASK_ANIM);
+  int task=contract.modern?(Integer)contract.runningTask.invoke(contract.gestureState.get(handler)):CandidateProbe.runningTask(handler);
+  if(contract.modern&&task<0)return;
+  if(s.candidate==null)s.candidate=contract.modern?CandidateProbe.matchPanelTask(task):CandidateProbe.match(handler);
+  if(s.candidate==null){if(!s.gesture.rejected)LauncherSwipeHook.log("corner_rejected reason=candidate task="+task);s.gesture.rejected=true;return;}
+  s.panel=contract.modern?(View)contract.panel.get(handler):LauncherSwipeHook.panelOf(handler);
+  Object[] handles=(Object[])contract.handles.get(handler);
+  if(handles==null||handles.length!=1||handles[0]==null)return;
+  s.simulator=contract.modern?contract.simulatorField.get(handles[0]):contract.simulatorGetter.invoke(handles[0]);
+  s.params=contract.modern?contract.paramsField.get(handles[0]):contract.paramsGetter.invoke(handles[0]);
+  s.manager=contract.manager.get(handler);
  }
  private static Session owner(Object simulator){
   Session s=current;return s!=null&&s.rendered&&s.simulator==simulator?s:null;
@@ -181,16 +189,18 @@ final class CornerSwipeHook {
  private static void draw(XC_MethodHook.MethodHookParam p) throws Exception {
   Session s=current;
   if(s==null||s.simulator!=p.thisObject||!s.gesture.claimed||s.candidate==null||s.manager==null)return;
+  // The live handoff now owns the simulator transaction and writes its own pose.
+  if(contract.modern&&(s.handedOff||p.args[2]!=s.params))return;
   if(!s.handedOff&&!sameDisplay(s)){s.gesture.cancel();finish(s,"display_changed");return;}
   if(!s.rendered&&!Boolean.TRUE.equals(contract.gestureStarted.invoke(s.handler)))return;
-  Object target=p.args[1];int task=XposedHelpers.getIntField(target,RomSymbols.SOURCE_TASK);
-  Rect bounds=(Rect)XposedHelpers.getObjectField(target,RomSymbols.SOURCE_BOUNDS);
+  Object target=p.args[1];int task=contract.targetTask.getInt(target);
+  Rect bounds=(Rect)contract.targetBounds.get(target);
   if(task!=s.candidate.task||bounds==null||!bounds.equals(new Rect(0,0,s.gesture.width,s.gesture.height))){
    if(!s.gesture.rejected)LauncherSwipeHook.log("corner_rejected reason=source task="+task+" bounds="+bounds+" display="+s.gesture.width+"x"+s.gesture.height);
    if(s.handedOff){restorePanel(s);current=null;}
    else if(s.rendered)finish(s,"source_changed");else{s.gesture.rejected=true;restorePanel(s);}return;
   }
-  Object controller=XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_CONTROLLER);
+  Object controller=controller(s);
   if(controller==null)return;
   if(s.controller!=null&&s.controller!=controller){restorePanel(s);current=null;return;}
   s.controller=controller;
@@ -202,14 +212,24 @@ final class CornerSwipeHook {
   // but never undo the cover's alpha transaction while waiting for Recents to finish.
   if(!s.handedOff)contract.alpha.invoke(builder,1f);
   // Keep release geometry identical to the transaction just submitted, including full crop.
-  ((Matrix)XposedHelpers.getObjectField(p.thisObject,RomSymbols.SOURCE_MATRIX)).set(s.matrix);
+  if(!contract.modern)((Matrix)contract.sourceMatrix.get(p.thisObject)).set(s.matrix);
   if(!s.rendered)LauncherSwipeHook.log("corner_render task="+task+" rotation="+s.down.rotation+" bounds="+bounds);
-  s.rendered=true;
+  s.rendered=true;s.renderedBox.set(s.gesture.left,s.gesture.top,s.gesture.right,s.gesture.bottom);
+  s.renderedRadius=s.gesture.radius()*s.gesture.scale();
   s.motion.sample(task,SystemClock.uptimeMillis(),new float[]{s.gesture.left,s.gesture.top,s.gesture.right,s.gesture.bottom});
+ }
+ private static Object controller(Session s) throws Exception {
+  return contract.modern?contract.active.get(s.manager):contract.controllerGetter.invoke(s.manager);
  }
  static boolean owns(Object handler){Session s=current;return s!=null&&s.handler==handler&&s.rendered&&!s.handedOff;}
  static boolean tracking(Object handler){Session s=current;return s!=null&&s.handler==handler&&s.gesture.claimed&&!s.gesture.cancelled&&!s.gesture.rejected;}
  static boolean ready(Object handler){return owns(handler)&&current.gesture.ready()&&current.revision==revision&&!current.rebounding&&sameDisplay(current);}
+ static RectF releaseBox(Object handler){
+  if(!owns(handler))return null;
+  return new RectF(current.renderedBox);
+ }
+ static float releaseRadius(Object handler){return owns(handler)?current.renderedRadius:0;}
+ static void rebound(Object handler){if(owns(handler))rebound(current);}
  static int rotation(Object handler){return owns(handler)?current.down.rotation:-1;}
  static int task(Object handler){return owns(handler)?current.candidate.task:-1;}
  static SwipeCandidate.Match candidate(Object handler){return owns(handler)?current.candidate:null;}
@@ -219,7 +239,7 @@ final class CornerSwipeHook {
   Session s=current;s.handedOff=true;
   MAIN.post(new Runnable(){public void run(){
    if(current!=s||!s.handedOff)return;
-   try{if(XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_CONTROLLER)!=s.controller
+   try{if(controller(s)!=s.controller
       ||SystemClock.uptimeMillis()>deadline){restorePanel(s);current=null;return;}}
    catch(Throwable e){restorePanel(s);current=null;return;}
    MAIN.postDelayed(this,16);
@@ -242,18 +262,23 @@ final class CornerSwipeHook {
    if(current!=s||s.handedOff)return;
    try{
     if(!sameDisplay(s)){finish(s,"display_changed");return;}
-    if(XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_CONTROLLER)!=s.controller){restorePanel(s);current=null;return;}
-    long elapsed=SystemClock.uptimeMillis()-began;s.gesture.rebound(bottom,elapsed);contract.apply.invoke(s.simulator,s.params);
+    if(controller(s)!=s.controller){restorePanel(s);current=null;return;}
+    long elapsed=SystemClock.uptimeMillis()-began;s.gesture.rebound(bottom,elapsed);if(contract.modern)contract.apply.invoke(s.simulator,s.params,false);else contract.apply.invoke(s.simulator,s.params);
     if(s.gesture.reboundDone(bottom,elapsed)||elapsed>=1500){finish(s,"rebounded");return;}
     if(s.panel!=null)s.panel.postOnAnimation(this);else MAIN.postDelayed(this,16);
    }catch(Throwable e){Log.w("WindowDeck","corner_rebound_failed",e);finish(s,"rebound_failed");}
   }});
  }
  private static void finish(Session s,String reason){
-  if(s.rendered&&!s.handedOff)LauncherSwipeHook.claimCornerReturn(s.handler);
-  try{if(s.controller!=null&&s.manager!=null&&XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_CONTROLLER)==s.controller){
-   XposedHelpers.callMethod(s.controller,RomSymbols.RECENTS_WILL_FINISH_TO_HOME,false);
-   XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_FINISH_RECENTS,false);}
+  if(!contract.modern&&s.rendered&&!s.handedOff)LauncherSwipeHook.claimCornerReturn(s.handler);
+  try{if(s.controller!=null&&s.manager!=null&&controller(s)==s.controller){
+   if(contract.modern){
+    contract.finishDirection.invoke(s.controller,false);
+    contract.finish.invoke(s.manager,false);
+   }else{
+    XposedHelpers.callMethod(s.controller,RomSymbols.RECENTS_WILL_FINISH_TO_HOME,false);
+    XposedHelpers.callMethod(s.manager,RomSymbols.TASK_ANIM_FINISH_RECENTS,false);
+   }}
   }catch(Throwable e){Log.w("WindowDeck","corner_finish_failed",e);}
   restorePanel(s);if(current==s)current=null;CandidateProbe.kick();Log.i("WindowDeck","corner_finished reason="+reason);
  }

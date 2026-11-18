@@ -50,6 +50,7 @@ final class WorkbenchBackController {
   boolean recovering();
   void refreshIme();
   void releaseWindows();
+  boolean resumed();
   boolean screenArrival();
   void setBackgrounded(boolean value);
   void setClosing(boolean value);
@@ -82,16 +83,22 @@ final class WorkbenchBackController {
  boolean backStartedWithIme;
 
 
- boolean backReady(){return host.taskRotationRun()==null&&!host.switchPreparation().pending()&&!host.closing()&&!host.backgrounded()&&!host.stopped()&&host.modalWindows()==0&&!host.recovering()&&!host.switching()&&!host.entranceInputBlocked()&&!host.handoffPresentation()&&host.dragging()==null&&!session.slots.isEmpty();}
+ void cancelPendingBack(){
+  backGeneration++;
+  forwardingBack=false;
+  backStartedWithIme=false;
+ }
+ boolean backReady(){return host.resumed()&&host.taskRotationRun()==null&&!host.switchPreparation().pending()&&!host.closing()&&!host.backgrounded()&&!host.stopped()&&host.modalWindows()==0&&!host.recovering()&&!host.switching()&&!host.entranceInputBlocked()&&!host.handoffPresentation()&&host.dragging()==null&&!session.slots.isEmpty();}
  boolean focusPrimary(String reason){
   // Menu dismissal is posted while layout snapshots are being prepared. Do not
   // insert a synchronous WM focus round trip ahead of their bounded callback.
   // The transition restores focus after settling; a cancelled prepare retries it.
   if(host.layoutPreparationPending())return false;
   if(!backReady()||host.stage()==null||!host.stage().isShown()||host.screenArrival())return false;
-  WorkbenchSlot main=session.slots.get(session.primary);if(main.released||main.taskId<0)return false;
+  WorkbenchSlot main=session.slots.get(session.primary);if(main.released||main.taskId<0||main.pendingTask>=0)return false;
   host.refreshIme();
-  try{rom.canvas.managerMethod("setFocusAppForEmbeddedTask").invoke(rom.manager,main.taskId);Log.i(TAG,"back_focus reason="+reason+" task="+main.taskId);return true;}
+  try{rom.canvas.managerMethod("setFocusAppForEmbeddedTask").invoke(rom.manager,main.taskId);Log.i(TAG,"back_focus reason="+reason+" task="+main.taskId);
+   HandoffDiagnostics.timeline(HandoffDiagnostics.Event.MAIN_FOCUS,reason,main.taskId);return true;}
   catch(Throwable e){Log.w(TAG,"back_focus_failed",e);return false;}
  }
  void handleTaskRootBack(WorkbenchSlot s,int task){
@@ -104,7 +111,7 @@ final class WorkbenchBackController {
  }
 boolean backgroundWorkbench(String reason){
   if(!backReady())return false;
-  host.setBackgrounded(true);backGeneration++;forwardingBack=false;host.cancelDrag();host.cancelAnimation();
+  host.setBackgrounded(true);cancelPendingBack();host.cancelDrag();host.cancelAnimation();
   if(host.keepSurfaceOnBackground()){
    // Experimental alternative for TODO A1-3. Moving the container back can still stop its
    // Activity and destroy its surface; only a device trace can establish whether it helps.
@@ -141,7 +148,8 @@ boolean backgroundWorkbench(String reason){
   WorkbenchSlot target=session.slots.get(session.primary);if(!focusPrimary("host_back"))return;
   forwardingBack=true;final int generation=++backGeneration;
   handler.postDelayed(()->{
-   if(generation!=backGeneration||!backReady()||session.slots.get(session.primary)!=target){forwardingBack=false;return;}
+   if(generation!=backGeneration)return;
+   if(!backReady()||session.slots.get(session.primary)!=target){forwardingBack=false;return;}
    try{
     Object service=Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
     Object focused=Class.forName("android.app.IActivityTaskManager").getMethod("getFocusedRootTaskInfo").invoke(service);

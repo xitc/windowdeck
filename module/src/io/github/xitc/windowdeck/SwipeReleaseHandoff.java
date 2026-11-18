@@ -37,9 +37,10 @@ final class SwipeReleaseHandoff {
   * mask; the two booleans are read raw, which is the conservative reading.
   */
  static void release(XC_MethodHook.MethodHookParam p){
+  long gestureReleased=SystemClock.uptimeMillis();
   Object handler=p.args[0];
   if(handler==null){log("release bail=no_handler");return;}
-  View panel=(View)XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TRIGGER_PANEL);
+  View panel=LauncherSwipeHook.panelOf(handler);
   if(panel==null)return;
   LauncherSwipeHook.State s=LauncherSwipeHook.stateOf(panel);
   final boolean corner=CornerSwipeHook.owns(handler);
@@ -67,14 +68,15 @@ final class SwipeReleaseHandoff {
   if(candidate==null||candidate.task!=s.gestureTask||(s.candidate!=null&&(candidate.task!=s.candidate.task||candidate.user!=s.candidate.user||candidate.container!=s.candidate.container))){
    log("release bail=candidate fresh="+(candidate==null?"null":candidate.task+"/"+candidate.container)+" cached="+(s.candidate==null?"null":s.candidate.task+"/"+s.candidate.container));return;
   }
-  Object manager=XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TASK_ANIM);
-  if(manager==null){log("release bail=no_manager");return;}
   Context context=panel.getContext().getApplicationContext();
+  HandoffDiagnostics trace=HandoffDiagnostics.begin(context,gestureReleased);
+  Object manager=XposedHelpers.getObjectField(handler,RomSymbols.HANDLER_TASK_ANIM);
+  if(manager==null){trace.record(HandoffDiagnostics.Event.RESULT,"no_manager");log("release bail=no_manager");return;}
   final long released=SystemClock.uptimeMillis();
   Handler main=new Handler(Looper.getMainLooper());
   Object activeController;
   try{activeController=XposedHelpers.callMethod(manager,RomSymbols.TASK_ANIM_CONTROLLER);}
-  catch(Throwable e){Log.w(TAG,"swipe_controller_unavailable",e);return;}
+  catch(Throwable e){trace.record(HandoffDiagnostics.Event.RESULT,"controller_unavailable");Log.w(TAG,"swipe_controller_unavailable",e);return;}
   final Object gestureController=activeController;
   RectF sourceRect=null;float sourceRadius=0;float[] sourceCrop=null,sourceMatrix=null;
   try{
@@ -88,7 +90,8 @@ final class SwipeReleaseHandoff {
     sourceRect=rect;sourceRadius=matrix.mapRadius(((Number)XposedHelpers.callMethod(simulator,RomSymbols.SOURCE_RADIUS)).floatValue());
    }
   }catch(Throwable e){Log.w(TAG,"swipe_source_geometry_unavailable",e);}
-  final RectF releaseRect=sourceRect;final float releaseRadius=sourceRadius;
+  final RectF releaseRect=sourceRect;
+  trace.geometry(HandoffDiagnostics.Event.SOURCE_GEOMETRY,releaseRect);final float releaseRadius=sourceRadius;
   final float[] releaseCrop=sourceCrop,releaseMatrix=sourceMatrix;
   final float[] releaseVelocity=corner?CornerSwipeHook.velocity(handler,released):s.source.motion().velocity(candidate.task,released);
   Log.i(TAG,"swipe_source_velocity task="+candidate.task+" measured="+(releaseVelocity!=null)+" edges_px_ms="+java.util.Arrays.toString(releaseVelocity));
@@ -102,23 +105,31 @@ final class SwipeReleaseHandoff {
   // but retains its own task crop. Existing containers and rotated sources keep their path.
   final boolean portraitRequested=!landscape&&candidate.container<0&&releaseRect!=null;
   SwipeSourceFrame.Capture capturedSource=(deferPortrait||portraitRequested)?SwipeSourceFrame.capture(handler,candidate.task):null;
-  if(portraitRequested&&capturedSource==null)Log.i(TAG,"swipe_portrait_content skipped=source_layer_unavailable");
+  if(portraitRequested&&capturedSource==null){
+   trace.record(HandoffDiagnostics.Event.FALLBACK,"source_layer_unavailable");
+   Log.i(TAG,"swipe_portrait_content skipped=source_layer_unavailable");
+  }
   if(!deferPortrait&&capturedSource!=null&&(capturedSource.left!=0||capturedSource.top!=0||!PortraitContentGeometry.sourceValid(capturedSource.width,capturedSource.height,releaseCrop,
     new float[]{releaseRect.left,releaseRect.top,releaseRect.right,releaseRect.bottom},releaseMatrix))){
    capturedSource.leash.release();capturedSource.closeVisibility();capturedSource=null;
+   trace.record(HandoffDiagnostics.Event.FALLBACK,"unsupported_source_geometry");
    Log.i(TAG,"swipe_portrait_content skipped=unsupported_source_geometry");
   }
   if(!corner&&rotation==0&&portraitRequested&&capturedSource!=null
-    &&PortraitRecentsHandoff.start(panel,handler,manager,gestureController,candidate,capturedSource,releaseRect,releaseCrop,releaseRadius,released)){
+    &&PortraitRecentsHandoff.start(panel,handler,manager,gestureController,candidate,capturedSource,releaseRect,releaseCrop,releaseRadius,released,trace)){
    s.motion.resetExpansion();if(s.zone()!=null)s.zone().setVisibility(View.GONE);s.candidate=null;LauncherSwipeHook.deactivateMid();
    p.setResult(null);return;
   }
+  if(!corner&&rotation==0&&portraitRequested&&capturedSource!=null)
+   trace.record(HandoffDiagnostics.Event.FALLBACK,"live_recents_unavailable");
+  trace.record(HandoffDiagnostics.Event.PATH,candidate.container>=0?"snapshot_existing":landscape?"snapshot_landscape":"snapshot_portrait");
   final SwipeSourceFrame.Capture capture=capturedSource;
   final boolean portraitPixels=capture!=null&&!deferPortrait;
   final long hostWait=landscape?MotionSpec.LANDSCAPE_REVEAL_MS:MotionSpec.COVER_TIMEOUT_MS;
   final PortraitHandoffDeadline portraitWait=capture!=null||candidate.container>=0?new PortraitHandoffDeadline(candidate.task,released,hostWait):null;
   if(deferPortrait&&(sourceActivity==null||capture==null||releaseRect==null)){
    if(capture!=null){capture.leash.release();capture.closeVisibility();}
+   trace.record(HandoffDiagnostics.Event.RESULT,"release_source_unavailable");
    Log.w(TAG,"swipe_add_degraded reason=release_source_unavailable native_release=true");return;
   }
   final HandoffCover[] sourceCover={null};
@@ -135,13 +146,15 @@ final class SwipeReleaseHandoff {
       releaseCrop,releaseRect,releaseMatrix,releaseRadius,released,portraitWait);
    }
    else cover=HandoffCover.create(panel.getContext(),landscape,taskFrame,false);
+   cover.diagnostics(trace);
    if(candidate.container>=0)cover.awaitRail();
    if(corner)cover.cornerEntrance();
-  }catch(Throwable e){if(capture!=null)capture.closeVisibility();Log.w(TAG,"swipe_add_degraded reason=source_window_unavailable native_release=true",e);return;}
+  }catch(Throwable e){if(capture!=null)capture.closeVisibility();trace.record(HandoffDiagnostics.Event.RESULT,"source_window_unavailable");Log.w(TAG,"swipe_add_degraded reason=source_window_unavailable native_release=true",e);return;}
   sourceCover[0]=cover;
   if(portraitWait!=null)cover.portraitDeadline(portraitWait);
   if(!LauncherSwipeHook.claimHandoff(handler,!cover.isClosed())){
    if(capture!=null)capture.closeVisibility();
+   trace.record(HandoffDiagnostics.Event.RESULT,"cover_unavailable");
    Log.w(TAG,"swipe_add_degraded reason=cover_unavailable native_release=true");return;
   }
   if(corner){CornerSwipeHook.handedOff(handler,portraitWait!=null?portraitWait.limit():released+hostWait);p.setResult(null);}
@@ -170,6 +183,7 @@ final class SwipeReleaseHandoff {
   java.util.concurrent.atomic.AtomicBoolean motionTransferred=new java.util.concurrent.atomic.AtomicBoolean();
   final android.os.ResultReceiver[] completion={null};
   final int[] outcome={HandoffProtocol.FAILED};
+  final String[] failure={"handoff_failed"};
   Runnable finish=()->{
    if(!finished.compareAndSet(false,true))return;
    if(portraitWait!=null)portraitWait.cancel();
@@ -181,6 +195,7 @@ final class SwipeReleaseHandoff {
    if(recentsEnded.get()||!corner||!CornerSwipeHook.cancelHandoff(handler))endRecents.run();
    cover.close("handoff_finished");
    if(ack!=null)ack.send(outcome[0],Bundle.EMPTY);
+   trace.record(HandoffDiagnostics.Event.RESULT,outcome[0]==HandoffProtocol.READY?"completed":failure[0]);
    Log.i(TAG,"swipe_handoff_result result="+outcome[0]+" task="+candidate.task);
    Log.i(TAG,"swipe_handoff_finish ms="+(SystemClock.uptimeMillis()-released));
   };
@@ -188,7 +203,7 @@ final class SwipeReleaseHandoff {
    if(!"handoff_finished".equals(why)){
     underlayStop.set(true);
     SwipeLauncherVeil.restore(underlayRoot);
-    Log.w(TAG,"swipe_cover_failed reason="+why);finish.run();
+    failure[0]=why;Log.w(TAG,"swipe_cover_failed reason="+why);finish.run();
    }
   });
   android.os.ResultReceiver localReady=new android.os.ResultReceiver(main){
@@ -239,11 +254,12 @@ final class SwipeReleaseHandoff {
      }
      if(!cover.detachVisual()){poseReply.send(HandoffProtocol.FAILED,Bundle.EMPTY);finish.run();return;}
      motionTransferred.set(true);
+     trace.record(HandoffDiagnostics.Event.HOST_OWNERSHIP,"pose_committed");
      Log.i(TAG,"swipe_motion_ownership_released task="+candidate.task);
      poseReply.send(HandoffProtocol.OWNERSHIP,android.os.Bundle.EMPTY);return;
     }
     if(finished.get())return;
-    if(code!=HandoffProtocol.READY&&code!=HandoffProtocol.PREPARED&&code!=HandoffProtocol.BACKGROUND){finish.run();return;}
+    if(code!=HandoffProtocol.READY&&code!=HandoffProtocol.PREPARED&&code!=HandoffProtocol.BACKGROUND){failure[0]=code==HandoffProtocol.CANCELLED?"host_cancelled":"host_rejected";finish.run();return;}
     if(data==null||data.getInt(HandoffProtocol.TASK,-1)!=candidate.task||data.getInt(HandoffProtocol.CONTAINER,-1)<0
       ||(portraitWait!=null&&!portraitWait.matches(data.getInt(HandoffProtocol.TASK,-1),data.getInt(HandoffProtocol.CONTAINER,-1)))
       ||(candidate.container>=0&&data.getInt(HandoffProtocol.CONTAINER,-1)!=candidate.container)){Log.w(TAG,"swipe_host_geometry_identity_failed");finish.run();return;}
@@ -286,6 +302,7 @@ final class SwipeReleaseHandoff {
     if(action==HandoffPreparation.Action.BACKGROUND){
      cover.prepareBackdrop(data.getParcelable(HandoffProtocol.BACKDROP,android.graphics.Bitmap.class));return;
     }
+    if(code==HandoffProtocol.READY)trace.record(HandoffDiagnostics.Event.HOST_OWNERSHIP,"live_ready");
     if(action==HandoffPreparation.Action.LIVE){
      cover.allowReveal(data.getParcelable(HandoffProtocol.BACKDROP,android.graphics.Bitmap.class));return;
     }
@@ -293,9 +310,10 @@ final class SwipeReleaseHandoff {
     completion[0]=data.getParcelable(HandoffProtocol.COMPLETE,android.os.ResultReceiver.class);
     int[] target=data.getIntArray(HandoffProtocol.TARGET);
     RectF rect=target!=null&&target.length==4?new RectF(target[0],target[1],target[2],target[3]):null;
+    trace.geometry(HandoffDiagnostics.Event.TARGET_GEOMETRY,rect);
     Log.i(TAG,"swipe_snapshot_motion_requested task="+candidate.task);
     if(completion[0]==null||!data.containsKey(HandoffProtocol.ROTATION)||!cover.animateTo(releaseRect,releaseRadius,rect,data.getFloat(HandoffProtocol.RADIUS),data.getParcelable(HandoffProtocol.BACKDROP,android.graphics.Bitmap.class),data.getInt(HandoffProtocol.ROTATION),releaseVelocity,released,code==HandoffProtocol.READY,ok->{outcome[0]=ok?HandoffProtocol.READY:HandoffProtocol.FAILED;finish.run();})){
-     Log.w(TAG,"swipe_snapshot_degraded reason=source_or_target_unavailable");finish.run();
+     failure[0]="snapshot_source_or_target_unavailable";Log.w(TAG,"swipe_snapshot_degraded reason=source_or_target_unavailable");finish.run();
     }
    }
   };
@@ -304,12 +322,12 @@ final class SwipeReleaseHandoff {
   android.os.ResultReceiver ready=HandoffProtocol.transport(localReady);
   // The first landscape cover belongs to the source application's native handoff.
   // This is a failure watchdog, not a normal-path animation/settle timer.
-  if(portraitWait==null)main.postDelayed(()->{if(!finished.get()){Log.w(TAG,"swipe_host_ready_timeout");finish.run();}},hostWait);
+  if(portraitWait==null)main.postDelayed(()->{if(!finished.get()){failure[0]="host_ready_timeout";Log.w(TAG,"swipe_host_ready_timeout");finish.run();}},hostWait);
   else{
    Runnable timeout=new Runnable(){public void run(){
     if(finished.get())return;
     long now=SystemClock.uptimeMillis();
-    if(portraitWait.expired(now)){Log.w(TAG,"swipe_portrait_timeout phase="+portraitWait.phase());finish.run();return;}
+    if(portraitWait.expired(now)){failure[0]="portrait_timeout";Log.w(TAG,"swipe_portrait_timeout phase="+portraitWait.phase());finish.run();return;}
     main.postDelayed(this,portraitWait.deadline()-now);
    }};main.postDelayed(timeout,Math.max(0L,portraitWait.deadline()-SystemClock.uptimeMillis()));
   }
@@ -334,7 +352,7 @@ final class SwipeReleaseHandoff {
      Bundle done=new Bundle();done.putInt(HandoffProtocol.TASK,candidate.task);
      sourceReleaseReply[0].send(HandoffProtocol.SOURCE_RELEASED,done);return;
     }
-    Runnable launch=()->{if(!finished.get())dispatchHandoff(context,candidate,released,ready,finish,deferPortrait,rotation,portraitWait);};
+    Runnable launch=()->{if(!finished.get())dispatchHandoff(context,candidate,released,ready,finish,deferPortrait,rotation,portraitWait,trace,false);};
     launch.run();
    });
    // The destination has already committed its snapshot. Returning to the pausing
@@ -354,7 +372,7 @@ final class SwipeReleaseHandoff {
    if(deferPortrait){
     // Keep the recents task at its release geometry until the destination has
     // committed its snapshot frame. The host cannot embed before our finish callback.
-    dispatchHandoff(context,candidate,released,ready,finish,true,rotation,portraitWait);
+    dispatchHandoff(context,candidate,released,ready,finish,true,rotation,portraitWait,trace,false);
    }else releaseSource[0].run();
   });
   Log.i(TAG,"swipe_add_requested task="+candidate.task+" container="+candidate.container);
@@ -396,11 +414,16 @@ final class SwipeReleaseHandoff {
   }catch(Throwable e){Log.w(TAG,"swipe_commit_destination_failed",e);return false;}
  }
 
- private static void dispatchHandoff(Context context,SwipeCandidate.Match candidate,long released,android.os.ResultReceiver ready,Runnable finish,boolean deferPortrait,int sourceRotation,PortraitHandoffDeadline portraitWait){
+ static void dispatchAfterRecents(Context context,SwipeCandidate.Match candidate,long released,int rotation){
+  HandoffDiagnostics trace=HandoffDiagnostics.begin(context,released);
+  trace.record(HandoffDiagnostics.Event.PATH,"launcher175_after_recents");
+  dispatchHandoff(context,candidate,released,null,()->{},false,rotation,null,trace,true);
+ }
+ private static void dispatchHandoff(Context context,SwipeCandidate.Match candidate,long released,android.os.ResultReceiver ready,Runnable finish,boolean deferPortrait,int sourceRotation,PortraitHandoffDeadline portraitWait,HandoffDiagnostics trace,boolean launcher175){
   Log.i(TAG,"swipe_handoff_begin ms="+(SystemClock.uptimeMillis()-released));
   if(candidate.container<0){
    try{
-    launchContainer(context,candidate,released,ready,deferPortrait,sourceRotation,portraitWait,false);
+    launchContainer(context,candidate,released,ready,deferPortrait,sourceRotation,portraitWait,false,trace,launcher175);
     return;
    }catch(Throwable e){Log.w(TAG,"swipe_create_direct_failed",e);}
   }else try{
@@ -409,7 +432,9 @@ final class SwipeReleaseHandoff {
    add.putExtra("windowdeck_add_task_id",candidate.task);
    add.putExtra("windowdeck_add_user_id",candidate.user);
    add.putExtra("windowdeck_container_task_id",candidate.container);
-   add.putExtra("windowdeck_handoff_ready",ready);
+   if(ready!=null)add.putExtra("windowdeck_handoff_ready",ready);
+   if(launcher175)add.putExtra(WorkbenchBackdrop.ENTRANCE,true);
+   trace.put(add);
    add.putExtra("windowdeck_source_rotation",sourceRotation);
    if(portraitWait!=null)add.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
    android.app.BroadcastOptions options=android.app.BroadcastOptions.makeBasic();
@@ -438,37 +463,41 @@ final class SwipeReleaseHandoff {
       catch(Throwable e){Log.w(TAG,"swipe_rejected_front_failed",e);}
       finish.run();
      }
-     else if(result==0){finish.run();dispatchRootHandoff(context,candidate);}
+     else if(result==0){trace.record(HandoffDiagnostics.Event.FALLBACK,"direct_receiver_unavailable");finish.run();dispatchRootHandoff(context,candidate,trace);}
      else if(result!=1)finish.run();
     }
    },new Handler(Looper.getMainLooper()),0,null,null);
    return;
   }catch(Throwable e){Log.w(TAG,"swipe_front_or_add_direct_failed",e);}
-  finish.run();dispatchRootHandoff(context,candidate);
+  finish.run();dispatchRootHandoff(context,candidate,trace);
  }
  static void launchContainer(Context context,SwipeCandidate.Match candidate,long released,android.os.ResultReceiver ready,
-   boolean deferPortrait,int sourceRotation,PortraitHandoffDeadline portraitWait,boolean liveRecents) throws Exception {
+   boolean deferPortrait,int sourceRotation,PortraitHandoffDeadline portraitWait,boolean liveRecents,HandoffDiagnostics trace,boolean launcher175) throws Exception {
   Intent create=new Intent().setComponent(new ComponentName("com.oplus.pscanvas","com.oplus.pscanvas.canvasmode.canvas.ContainerActivity"));
   create.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION);
   create.putExtra("windowdeck_workbench_v1",true);
   create.putExtra("windowdeck_create_source_task",candidate.task);
   create.putExtra("windowdeck_create_source_user",candidate.user);
-  create.putExtra("windowdeck_handoff_ready",ready);
+  if(ready!=null)create.putExtra("windowdeck_handoff_ready",ready);
+  if(launcher175)create.putExtra(WorkbenchBackdrop.ENTRANCE,true);
+  trace.put(create);
   if(portraitWait!=null)create.putExtra(HandoffProtocol.PORTRAIT_LIMIT,portraitWait.limit());
   if(deferPortrait){create.putExtra("windowdeck_defer_portrait",true);create.putExtra("windowdeck_defer_rotation",sourceRotation);create.putExtra("windowdeck_wait_source_release",true);}
   if(liveRecents)create.putExtra(HandoffProtocol.LIVE_RECENTS,true);
   context.startActivity(create,TaskFrontBinder.handoffOptions(context));
   Log.i(TAG,"swipe_create_direct task="+candidate.task+" ms="+(SystemClock.uptimeMillis()-released));
  }
- private static void dispatchRootHandoff(Context context,SwipeCandidate.Match candidate){
+ private static void dispatchRootHandoff(Context context,SwipeCandidate.Match candidate,HandoffDiagnostics trace){
+  trace.record(HandoffDiagnostics.Event.FALLBACK,"root_dispatch");
   Bundle message=new Bundle();message.putInt("taskId",candidate.task);message.putInt("userId",candidate.user);message.putInt("containerTaskId",candidate.container);
+  trace.put(message);
   try{if(context.getContentResolver().call(Uri.parse(BuildIdentity.STATE_URI),"add_task",null,message)!=null)return;}
   catch(Throwable e){Log.w(TAG,"swipe_provider_fallback",e);}
   try{
    Intent request=new Intent().setComponent(new ComponentName(BuildIdentity.APPLICATION_ID,"io.github.xitc.windowdeck.IngressActivity"));
    request.putExtras(message);request.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION|Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
    context.startActivity(request,ActivityOptions.makeBasic().setShareIdentityEnabled(true).toBundle());
-  }catch(Throwable e){Log.e(TAG,"swipe_add_dispatch_failed",e);}
+  }catch(Throwable e){trace.record(HandoffDiagnostics.Event.RESULT,"root_dispatch_failed");Log.e(TAG,"swipe_add_dispatch_failed",e);}
  }
 
  private static int rotation(View panel){try{return XposedHelpers.getIntField(panel,RomSymbols.PANEL_ROTATION);}catch(Throwable ignored){return 0;}}

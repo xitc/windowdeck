@@ -31,25 +31,29 @@ public final class LauncherIngressReceiver extends BroadcastReceiver {
   if(!launcher){Log.w("WindowDeck","launcher_ingress_denied uid="+uid);return;}
   int task=intent.getIntExtra("taskId",-1),user=intent.getIntExtra("userId",-1),container=intent.getIntExtra("containerTaskId",-1);
   if(task<0||user<0||container < -1||task==container)return;
-  final PendingResult pending=goAsync();startTask(context,task,user,container,pending::finish);
+  final PendingResult pending=goAsync();startTask(context,task,user,container,intent.getExtras(),pending::finish);
  }
- private static void createWorkbench(Context context,int task,int user) throws Exception {
+ private static void createWorkbench(Context context,int task,int user,String diagnosticArgs) throws Exception {
   String apk=context.getPackageCodePath();
   if(!apk.matches("/data/app/[A-Za-z0-9_~=/+.-]+/base\\.apk"))throw new IOException("unexpected apk path");
-  Process process=new ProcessBuilder("su","-c","CLASSPATH="+apk+" app_process /system/bin io.github.xitc.windowdeck.TaskIngress "+task+" "+user).redirectErrorStream(true).start();
+  Process process=new ProcessBuilder("su","-c","CLASSPATH="+apk+" app_process /system/bin io.github.xitc.windowdeck.TaskIngress "+task+" "+user+diagnosticArgs).redirectErrorStream(true).start();
   if(!process.waitFor(15,TimeUnit.SECONDS)&&process.isAlive()){process.destroy();throw new IOException("create workbench timed out");}
   if(process.exitValue()!=0)throw new IOException("create workbench exit="+process.exitValue());
   Log.i("WindowDeck","launcher_ingress_created source="+task);
  }
- static void startTask(Context context,int task,int user,int container,Runnable done){
+ static void startTask(Context context,int task,int user,int container,android.os.Bundle request,Runnable done){
+  String diagnosticId=request==null?null:request.getString(HandoffDiagnostics.ID);
+  long released=request==null?0:request.getLong(HandoffDiagnostics.RELEASED);
+  boolean traced=HandoffDiagnostics.valid(diagnosticId,released);
   if(!BUSY.compareAndSet(false,true)){if(done!=null)done.run();return;}
   new Thread(()->{
    long started=android.os.SystemClock.uptimeMillis();
    try{
-    if(container<0){createWorkbench(context,task,user);return;}
+    if(container<0){createWorkbench(context,task,user,traced?" "+diagnosticId+" "+released:"");return;}
     // Deliver to the live container. Starting ContainerActivity from outside can
     // create a second task, whose empty instance then replaces the real one.
     String command="am broadcast --user 0 --receiver-foreground -a "+BuildIdentity.APPLICATION_ID+".ADD_TO_LIVE_WORKBENCH -p com.oplus.pscanvas --ei windowdeck_add_task_id "+task+" --ei windowdeck_add_user_id "+user+" --ei windowdeck_container_task_id "+container;
+    if(traced)command+=" --es "+HandoffDiagnostics.ID+" "+diagnosticId+" --el "+HandoffDiagnostics.RELEASED+" "+released;
     Process process=new ProcessBuilder("su","-c",command).redirectErrorStream(true).start();
     if(!process.waitFor(12,TimeUnit.SECONDS)&&process.isAlive()){process.destroy();throw new IOException("am start timed out");}
     if(process.exitValue()!=0)throw new IOException("am broadcast exit="+process.exitValue());

@@ -9,11 +9,15 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.ColorSpace;
 import android.graphics.Matrix;
+import android.graphics.ParcelableColorSpace;
 import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.hardware.HardwareBuffer;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -37,7 +41,7 @@ final class WorkbenchBackdrop {
  private final BackdropRequests requests=new BackdropRequests();
  private int visualGeneration,appliedRotation=-1,appliedW,appliedH;
  private boolean attached;
- private boolean placeholder;
+ private boolean placeholder,portraitHeld,portraitRefresh;
  boolean ready;
  Runnable onReady;
  private void signalReady(){ready=true;if(onReady!=null)onReady.run();}
@@ -54,10 +58,24 @@ final class WorkbenchBackdrop {
  Bitmap currentBitmap(){return owned;}
  int visualGeneration(){return visualGeneration;}
 
- void attach(Activity a){
+ static final String ENTRANCE="windowdeck_launcher175_wallpaper_entrance";
+ private android.widget.ImageView entranceLayer;
+ private android.animation.ValueAnimator entranceAnimator;
+ private boolean awaitingWallpaper,temporaryWallpaperFlag;
+
+ void attach(Activity a,boolean entrance){
   activity=a;
   if(thread==null){thread=new HandlerThread("WindowDeckBackdrop");thread.start();bg=new Handler(thread.getLooper());}
   attached=true;placeholder=true;
+  if(entrance){
+   awaitingWallpaper=true;
+   Window window=a.getWindow();
+   int flag=android.view.WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER;
+   temporaryWallpaperFlag=(window.getAttributes().flags&flag)==0;
+   window.addFlags(flag);
+   window.setBackgroundDrawable(new ColorDrawable(android.graphics.Color.TRANSPARENT));
+   window.setBackgroundBlurRadius(180);
+  }
   refresh("attach");
   register();
  }
@@ -83,7 +101,8 @@ final class WorkbenchBackdrop {
   });
  }
  void detach(){
-  attached=false;requests.invalidate();ready=false;placeholder=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
+  clearEntranceLayer();finishWallpaperWait();
+  attached=false;portraitHeld=false;portraitRefresh=false;requests.invalidate();ready=false;placeholder=false;onReady=null;main.removeCallbacksAndMessages(null);unregister();
   if(thread!=null){thread.quitSafely();thread=null;bg=null;}
   if(underlay!=null){try(android.view.SurfaceControl.Transaction t=new android.view.SurfaceControl.Transaction()){t.reparent(underlay,null).apply();}underlay.release();underlay=null;}
   recycle(nativeBitmap);nativeBitmap=null;nativeSource=null;
@@ -107,11 +126,13 @@ final class WorkbenchBackdrop {
  }
  private void scheduleRefresh(String reason){
   main.removeCallbacks(refreshRunnable);
+  if(portraitHeld){portraitRefresh=true;return;}
   Log.i(TAG,"backdrop_schedule reason="+reason);
   main.postDelayed(refreshRunnable,400);
  }
  private void refresh(String reason){
   if(!attached||activity==null||bg==null)return;
+  if(portraitHeld){portraitRefresh=true;return;}
   final int rotation=displayRotation();
   final int[] size=displaySize();
   final int gen=requests.begin(rotation,size[0],size[1],"scheduled".equals(reason));
@@ -145,6 +166,7 @@ final class WorkbenchBackdrop {
   Window window=host.getWindow();
   visualGeneration++;
   if(prepared==null||prepared.bitmap==null){
+   finishWallpaperWait();
    window.setBackgroundDrawable(new ColorDrawable(Ui.CHROME));
    Ui.overlaySystemBars(host,false);
    Bitmap previous=owned;owned=null;
@@ -159,11 +181,63 @@ final class WorkbenchBackdrop {
   window.setBackgroundDrawable(drawable);
   Ui.overlaySystemBars(host,prepared.light);
   Bitmap previous=owned;owned=prepared.bitmap;
+  if(awaitingWallpaper){enter();finishWallpaperWait();}
   ready=false;
   if(!applyUnderlay(host,owned,displayW,displayH))restoreSurface();
   appliedRotation=rotation;appliedW=displayW;appliedH=displayH;
   Log.i(TAG,"backdrop_applied source="+prepared.source+" size="+prepared.bitmap.getWidth()+"x"+prepared.bitmap.getHeight()+" lightBars="+prepared.light);
   if(previous!=null&&previous!=owned)main.postDelayed(()->{if(previous!=owned)recycle(previous);},1000);
+ }
+ private void finishWallpaperWait(){
+  if(!awaitingWallpaper)return;
+  awaitingWallpaper=false;
+  Window window=activity.getWindow();
+  window.setBackgroundBlurRadius(0);
+  if(temporaryWallpaperFlag)window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER);
+  temporaryWallpaperFlag=false;
+ }
+
+ void enter(){
+  if(!attached||!usable(owned))return;
+  clearEntranceLayer();
+  android.view.ViewGroup content=activity.findViewById(android.R.id.content);
+  if(content==null)return;
+  android.widget.ImageView layer=new android.widget.ImageView(activity);
+  layer.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+  layer.setScaleType(android.widget.ImageView.ScaleType.FIT_XY);
+  layer.setImageBitmap(owned);
+  layer.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(180,180,android.graphics.Shader.TileMode.CLAMP));
+  entranceLayer=layer;
+  content.addView(layer,0,new android.widget.FrameLayout.LayoutParams(-1,-1));
+  layer.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener(){
+   public boolean onPreDraw(){
+    layer.getViewTreeObserver().removeOnPreDrawListener(this);
+    if(entranceLayer!=layer)return true;
+    entranceAnimator=android.animation.ValueAnimator.ofFloat(180,0);
+    entranceAnimator.setDuration(MotionSpec.PORTRAIT_HANDOFF_MS);
+    entranceAnimator.addUpdateListener(a->{
+     float radius=(float)a.getAnimatedValue();
+     layer.setRenderEffect(radius>=1?android.graphics.RenderEffect.createBlurEffect(radius,radius,android.graphics.Shader.TileMode.CLAMP):null);
+    });
+    entranceAnimator.addListener(new android.animation.AnimatorListenerAdapter(){
+     public void onAnimationEnd(android.animation.Animator animation){
+      if(entranceLayer==layer)clearEntranceLayer();
+     }
+    });
+    entranceAnimator.start();
+    return true;
+   }
+  });
+ }
+
+ private void clearEntranceLayer(){
+  if(entranceAnimator!=null){entranceAnimator.removeAllListeners();entranceAnimator.cancel();entranceAnimator=null;}
+  if(entranceLayer!=null){
+   android.view.ViewGroup parent=(android.view.ViewGroup)entranceLayer.getParent();
+   if(parent!=null)parent.removeView(entranceLayer);
+   entranceLayer.setImageDrawable(null);
+   entranceLayer=null;
+  }
  }
  private boolean applyUnderlay(Activity host,Bitmap bitmap,int width,int height){
   Bitmap created=null;
@@ -189,7 +263,7 @@ final class WorkbenchBackdrop {
   }catch(Throwable e){Log.w(TAG,"wallpaper_underlay_failed",e);return false;}
   finally{recycle(created);}
  }
- private static Bitmap fetchDrawable(Activity host){
+ private static Bitmap fetchDrawable(Context host){
   try{
    WallpaperManager wm=WallpaperManager.getInstance(host);
    Drawable drawable=wm.getFastDrawable();
@@ -201,6 +275,32 @@ final class WorkbenchBackdrop {
    Canvas canvas=new Canvas(bitmap);drawable.setBounds(0,0,w,h);drawable.draw(canvas);
    return bitmap;
   }catch(Throwable e){Log.w(TAG,"backdrop_drawable_failed",e);return null;}
+ }
+ static Bitmap preparePortrait(Context context,int width,int height){
+  Bitmap prepared=null;
+  try{
+   prepared=prepare(fetchDrawable(context),0,width,height);
+   return usable(prepared)?prepared.copy(Bitmap.Config.HARDWARE,false):null;
+  }finally{recycle(prepared);}
+ }
+ void adoptPortrait(Bundle data){
+  try(HardwareBuffer buffer=data.getParcelable(HandoffProtocol.ENTRANCE_WALLPAPER,HardwareBuffer.class)){
+   if(!attached||activity==null||buffer==null||(buffer.getUsage()&HardwareBuffer.USAGE_PROTECTED_CONTENT)!=0)return;
+   int[] size=displaySize();
+   int expectedHeight=Math.round(buffer.getWidth()*size[1]/(float)size[0]);
+   if(buffer.getWidth()>size[0]||buffer.getHeight()!=expectedHeight)return;
+   ParcelableColorSpace color=data.getParcelable(HandoffProtocol.ENTRANCE_WALLPAPER_COLOR,ParcelableColorSpace.class);
+   Bitmap bitmap=Bitmap.wrapHardwareBuffer(buffer,color==null?ColorSpace.get(ColorSpace.Named.SRGB):color.getColorSpace());
+   if(!usable(bitmap))return;
+   int token=requests.begin(0,size[0],size[1],true);
+   portraitHeld=true;
+   apply(token,activity,new Prepared(bitmap,"launcher_entrance",lightWallpaper(activity)),0,size[0],size[1]);
+  }catch(RuntimeException e){Log.w(TAG,"backdrop_launcher_entrance_failed",e);}
+ }
+ void releasePortrait(){
+  if(!portraitHeld)return;
+  portraitHeld=false;
+  if(portraitRefresh){portraitRefresh=false;scheduleRefresh("portrait_release");}
  }
  private static Bitmap prepare(Bitmap src,int rotation,int displayW,int displayH){
   Bitmap working=copySoftware(src);

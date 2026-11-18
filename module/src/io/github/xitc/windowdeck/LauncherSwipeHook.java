@@ -2,11 +2,14 @@ package io.github.xitc.windowdeck;
 
 import android.content.Context;
 import android.content.res.Resources;
+import android.graphics.Bitmap;
 import android.graphics.PointF;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
@@ -14,6 +17,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.CompletableFuture;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -64,6 +68,7 @@ final class LauncherSwipeHook {
   final SwipeCentreClaim.Latch claim=new SwipeCentreClaim.Latch();
   SwipeZoneChrome chrome;
   SwipeCandidate.Match candidate;
+  CompletableFuture<Bitmap> portraitWallpaper;
   int gestureTask=-1;
   float progress,trigger,startShow;
   boolean tracedProgress,tracedZone;
@@ -72,6 +77,8 @@ final class LauncherSwipeHook {
   View zone(){return chrome==null?null:chrome.zone();}
  }
  private static final GestureHandoffOwners HANDOFF_OWNERS=new GestureHandoffOwners();
+ private static java.lang.reflect.Field handlerPanel;
+
  /** @return whether the swipe hooks were installed. A ROM mismatch returns false and installs nothing. */
  static boolean install(ClassLoader loader){
   Class<?> panel;
@@ -82,6 +89,12 @@ final class LauncherSwipeHook {
   // to abort the whole install with ClassNotFoundException on any new ROM.
   Class<?> handler=RomSymbols.probeHandlerClass(panel);
   if(handler==null){XposedBridge.log("WindowDeck: setSwipeUpHandler 不存在，跳过安装");return false;}
+  if (LauncherPanel175.matches(panel, handler)){
+   installGestureTargetDiagnostics(handler);
+   LauncherStartDiagnostics.install(handler);
+   LauncherExistingAppHook.installPickerRetry(handler);
+   return LauncherPanel175.install(panel, handler, LauncherRecents175.install(handler));
+  }
   String problem=RomSymbols.validate(panel,handler);
   if(problem!=null){XposedBridge.log("WindowDeck: 桌面版本未适配("+problem+")，跳过安装；handler="+handler.getName());return false;}
   Method bridge=RomSymbols.findGestureEndedBridge(handler);
@@ -93,9 +106,36 @@ final class LauncherSwipeHook {
   // Resolved here rather than on the first gesture so the verdict is in the log from boot, next to
   // the rest of the symbol report, instead of after a swipe that already looked wrong.
   try{SwipeCentreClaim.problem(RomSymbols.field(panel,RomSymbols.PANEL_CONTROLLER).getType());}catch(Throwable ignored){}
+  try{handlerPanel=RomSymbols.findHandlerPanel(panel,handler);}
+  catch(NoSuchFieldException e){XposedBridge.log(e);return false;}
   installHooks(panel,bridge,initAnimation);
-  CornerSwipeHook.install(loader,handler);
+  CornerSwipeHook.install(loader,handler,null);
   return true;
+ }
+ private static void installGestureTargetDiagnostics(Class<?> handler){
+  try{
+   Class<?> state=RomSymbols.field(handler,"t").getType();
+   if(!"i84".equals(state.getName())&&!"h84".equals(state.getName()))return;
+   Class<?> target=state.getClassLoader().loadClass("com.android.quickstep.GestureState$GestureEndTarget");
+   Method setter=state.getDeclaredMethod("j",target,boolean.class);
+   if(!target.isEnum()||setter.getReturnType()!=void.class)return;
+   XposedBridge.hookMethod(setter,new XC_MethodHook(){
+    @Override protected void afterHookedMethod(MethodHookParam p){
+     if(p.hasThrowable()||!(p.args[0] instanceof Enum<?>))return;
+     String name=((Enum<?>)p.args[0]).name();
+     String reason;
+     switch(name){
+      case "HOME": case "RECENTS": case "LAST_TASK": case "NEW_TASK":
+       reason=name.toLowerCase(java.util.Locale.ROOT);
+       break;
+      default: reason="other";
+     }
+     HandoffDiagnostics.timeline(HandoffDiagnostics.Event.GESTURE_TARGET,reason,-1);
+    }
+   });
+  }catch(ReflectiveOperationException|RuntimeException|LinkageError e){
+   Log.w(TAG,"diagnostic_gesture_target_unavailable",e);
+  }
  }
  private static void installHooks(Class<?> panel,Method bridge,Method initAnimation){
   // Install ownership first: a failed contract must not leave a competing handoff hook enabled.
@@ -140,11 +180,16 @@ final class LauncherSwipeHook {
   // The bridge is static: the handler is args[0], not thisObject.
   XposedBridge.hookMethod(bridge,new XC_MethodHook(){
    @Override protected void beforeHookedMethod(MethodHookParam p){try{SwipeReleaseHandoff.release(p);}catch(Throwable e){Log.w(TAG,"swipe_release_failed",e);}finally{CornerSwipeHook.afterRelease(p);}}
-   @Override protected void afterHookedMethod(MethodHookParam p){try{onGestureEnd((View)XposedHelpers.getObjectField(p.args[0],RomSymbols.HANDLER_TRIGGER_PANEL));}catch(Throwable e){XposedBridge.log(e);}}
+   @Override protected void afterHookedMethod(MethodHookParam p){try{onGestureEnd(panelOf(p.args[0]));}catch(Throwable e){XposedBridge.log(e);}}
   });
   Log.i(TAG,"launcher_swipe_hook_ready");
  }
  // ------------------------------------------------------------------ ROM accessors
+ static View panelOf(Object handler){
+  if(handler==null)return null;
+  try{return (View)handlerPanel.get(handler);}
+  catch(IllegalAccessException e){throw new IllegalStateException(e);}
+ }
  private static Object swipeUpHandler(View panel){
   Object ref=XposedHelpers.getObjectField(panel,RomSymbols.PANEL_HANDLER_REF);
   return ref instanceof WeakReference?((WeakReference<?>)ref).get():null;
@@ -211,6 +256,16 @@ private static void onGestureStart(View panel) throws Exception {
  log("swipe_init version="+Version.NAME+" handler="+(swipe!=null)+" candidate="+(candidate!=null)+" room="+room
      +" offered="+offered+" source="+state.gestureTask+" reported="+CandidateProbe.runningTask(swipe)
      +" cache="+(CandidateProbe.ready()?"warm":"cold")+" total="+(SystemClock.uptimeMillis()-began)+"ms");
+ state.portraitWallpaper=null;
+ if(candidate!=null&&candidate.container<0&&rotation(panel)==0&&panel.getDisplay()!=null&&panel.getDisplay().getRotation()==0
+   &&(MID_ACTIVE||CornerSwipeHook.tracking(swipe))){
+  Context context=panel.getContext().getApplicationContext();
+  WindowManager windows=context.getSystemService(WindowManager.class);
+  Rect bounds=windows==null?null:windows.getMaximumWindowMetrics().getBounds();
+  if(bounds!=null&&bounds.width()>0&&bounds.width()<bounds.height())
+   state.portraitWallpaper=CompletableFuture.supplyAsync(
+     ()->WorkbenchBackdrop.preparePortrait(context,bounds.width(),bounds.height()));
+ }
  CandidateProbe.kick();
  // HOME/RECENTS/cancel still belong to Launcher. Never cover the finger-driven
  // task with a display snapshot before release selects a workbench handoff.
@@ -219,9 +274,9 @@ private static void onGestureStart(View panel) throws Exception {
   state.source.schedule(panel,swipe,candidate.task,sourceGeneration);
 }
  private static void onGestureEnd(View panel){
-  State state=STATES.get(panel);
-  if(state!=null)state.source.endGesture();
-  Object params=params(panel);
+  State state=panel==null?null:STATES.get(panel);
+  if(state!=null){state.source.endGesture();state.portraitWallpaper=null;}
+  Object params=panel==null?null:params(panel);
   if(params!=null)ELIGIBLE_PARAMS.remove(params);
   MID_ACTIVE=false;
   SwipeCentreClaim.clearShown();

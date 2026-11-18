@@ -1,6 +1,6 @@
 # 多窗工作台 · WindowDeck
 
-**当前源码：v0.6.2-dev.635 · 开发测试版**
+**当前源码为开发测试快照**
 
 面向 **C17（ColorOS 17 / Android 17）** 的 LSPosed 多应用工作台，基于系统实时任务嵌入能力，让最多五个应用同时出现在主窗和侧窗中。应用包名：`io.github.xitc.windowdeck`。
 
@@ -10,7 +10,7 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码版本为 `v0.6.2-dev.635`，下载包以实际 Release 为准；源码更新不表示新版 APK 已发布。当前源码包含右下角入口与主窗放大、横屏交接改进，以及按 Android 用户区分主应用和应用分身。此版还把分身用户号传入上滑工作台入口。本地离线检查及双身份编译 30/30 PASS；用户反馈 ACFun1 分身内上滑已可进入工作台，其他应用、冷启动、恢复、视觉和性能仍为 **UNVERIFIED**。此前 dev.148 的 YouTube 全屏方向兼容失败没有在本轮关闭。
+从 [GitHub Releases](https://github.com/xitc/windowdeck/releases) 下载最新 Pre-release。当前源码快照更新了桌面 17.5.x 的工作台入口、可导出的交接诊断和回桌面时的转场收尾。本轮发布范围为源码。桌面 17.5.x 的实际 Hook 加载、手势、视觉与性能仍为 **UNVERIFIED**。
 
 ## 环境与验收范围
 
@@ -84,7 +84,7 @@ sh tools/build_module.sh
 
 测试、ROM 审计及其它辅助脚本仅在维护者本地保留，不随源码仓库分发。
 
-本地构建使用 `build/windowdeck-test.keystore`。文件不存在时脚本会生成一把新密钥；密钥和构建产物已从 Git 排除。请保留自己的密钥，否则下一版不能覆盖安装。
+发布签名构建需要维护者提供 `build/windowdeck-test.keystore`。脚本在编译前核对签名证书，并在生成 APK 后再次验签。签名密钥由维护者保管，预编译安装包可从 GitHub Releases 获取。
 
 GitHub Actions 每天北京时间 **04:17** 检查 `main`，发布有变化的每日测试版；推送本身不触发发布。GitHub 定时调度可能延迟，并不保证在 04:17 准时完成。工作流必须在默认分支 `main` 上才会按时触发；公开仓库连续 60 天没有活动时，GitHub 可能停用定时工作流，需要重新启用。
 
